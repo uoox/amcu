@@ -5,10 +5,14 @@ import Foundation
 public struct SnapshotLimits: Sendable {
     public var maxNodes: Int
     public var maxDepth: Int
+    /// Without a per-node cap, one long table can consume the entire node
+    /// budget and push the rest of the window out of the snapshot.
+    public var maxChildrenPerNode: Int
 
-    public init(maxNodes: Int = 1500, maxDepth: Int = 64) {
-        self.maxNodes = maxNodes
-        self.maxDepth = maxDepth
+    public init(maxNodes: Int = 1500, maxDepth: Int = 64, maxChildrenPerNode: Int = 250) {
+        self.maxNodes = max(1, maxNodes)
+        self.maxDepth = max(1, maxDepth)
+        self.maxChildrenPerNode = max(1, maxChildrenPerNode)
     }
 }
 
@@ -87,6 +91,9 @@ public struct Snapshot: Codable, Sendable {
     public let focusedIndex: Int?
     public let truncated: Bool
     public let maxDepthReached: Bool
+    /// Absent in snapshots written before the per-node cap existed.
+    public var childrenTruncated: Bool { childrenTruncatedRaw ?? false }
+    let childrenTruncatedRaw: Bool?
     public let capturedAt: Date
 
     public init(
@@ -96,6 +103,7 @@ public struct Snapshot: Codable, Sendable {
         focusedIndex: Int?,
         truncated: Bool,
         maxDepthReached: Bool,
+        childrenTruncated: Bool = false,
         capturedAt: Date
     ) {
         self.app = app
@@ -104,7 +112,13 @@ public struct Snapshot: Codable, Sendable {
         self.focusedIndex = focusedIndex
         self.truncated = truncated
         self.maxDepthReached = maxDepthReached
+        self.childrenTruncatedRaw = childrenTruncated
         self.capturedAt = capturedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case app, window, nodes, focusedIndex, truncated, maxDepthReached, capturedAt
+        case childrenTruncatedRaw = "childrenTruncated"
     }
 
     /// Compact indented text, one line per element, sized for a model's context
@@ -139,6 +153,7 @@ public struct Snapshot: Codable, Sendable {
         }
         if truncated { lines.append("(truncated: node budget reached — narrow the target with --window-id)") }
         if maxDepthReached { lines.append("(truncated: depth budget reached)") }
+        if childrenTruncated { lines.append("(truncated: some elements have more children than were listed)") }
         return lines.joined(separator: "\n")
     }
 
@@ -175,12 +190,16 @@ public enum SnapshotBuilder {
         var nodes: [SnapshotNode] = []
         var truncated = false
         var depthReached = false
+        var childrenTruncated = false
         var focusedIndex: Int?
         let origin = window.frame.cgRect.origin
 
-        func walk(_ element: AXUIElement, depth: Int, path: [Int]) {
+        func walk(_ element: AXUIElement, depth: Int, path: [Int], ancestors: [AXUIElement]) {
             if nodes.count >= limits.maxNodes { truncated = true; return }
             if depth > limits.maxDepth { depthReached = true; return }
+            // Some hierarchies point back at an ancestor. Following one is an
+            // unbounded recursion that ends in a stack overflow, not an error.
+            if ancestors.contains(where: { CFEqual($0, element) }) { return }
 
             let role = AX.string(element, kAXRoleAttribute as String) ?? "AXUnknown"
             let focused = AX.bool(element, kAXFocusedAttribute as String) ?? false
@@ -204,7 +223,7 @@ public enum SnapshotBuilder {
                 subrole: AX.string(element, kAXSubroleAttribute as String),
                 identifier: AX.string(element, "AXIdentifier"),
                 label: label(of: element),
-                value: AX.string(element, kAXValueAttribute as String),
+                value: redactedValue(of: element, role: role),
                 enabled: AX.bool(element, kAXEnabledAttribute as String) ?? true,
                 focused: focused,
                 frame: frame,
@@ -213,12 +232,15 @@ public enum SnapshotBuilder {
                 path: path
             ))
 
-            for (childIndex, child) in AX.children(element).enumerated() {
-                walk(child, depth: depth + 1, path: path + [childIndex])
+            let children = AX.children(element)
+            if children.count > limits.maxChildrenPerNode { childrenTruncated = true }
+            let lineage = ancestors + [element]
+            for (childIndex, child) in children.prefix(limits.maxChildrenPerNode).enumerated() {
+                walk(child, depth: depth + 1, path: path + [childIndex], ancestors: lineage)
             }
         }
 
-        walk(windowElement, depth: 0, path: [])
+        walk(windowElement, depth: 0, path: [], ancestors: [])
 
         return Snapshot(
             app: app,
@@ -227,6 +249,7 @@ public enum SnapshotBuilder {
             focusedIndex: focusedIndex,
             truncated: truncated,
             maxDepthReached: depthReached,
+            childrenTruncated: childrenTruncated,
             capturedAt: Date()
         )
     }
@@ -264,6 +287,24 @@ public enum SnapshotBuilder {
             maxDepthReached: false,
             capturedAt: Date()
         )
+    }
+
+    /// AppKit's own secure fields publish no value, but nothing guarantees that
+    /// for a custom control, a web input or an Electron form. A snapshot is
+    /// handed straight to a model and often into a transcript, so anything that
+    /// announces itself as secret-bearing has its value withheld rather than
+    /// trusted to be masked at the source.
+    static func redactedValue(of element: AXUIElement, role: String) -> String? {
+        guard let value = AX.string(element, kAXValueAttribute as String), !value.isEmpty else { return nil }
+        let descriptors = [
+            role,
+            AX.string(element, kAXSubroleAttribute as String),
+            AX.string(element, kAXTitleAttribute as String),
+            AX.string(element, kAXDescriptionAttribute as String),
+            AX.string(element, kAXPlaceholderValueAttribute as String),
+            AX.string(element, "AXIdentifier")
+        ].compactMap { $0 }
+        return Redaction.holdsSecret(descriptors: descriptors) ? Redaction.placeholder : value
     }
 
     static func label(of element: AXUIElement) -> String? {

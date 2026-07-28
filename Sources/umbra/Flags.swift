@@ -10,7 +10,7 @@ struct Flags {
 
     static let knownBooleans: Set<String> = [
         "json", "force", "request", "no-snapshot", "screen", "help", "raw", "quiet",
-        "press", "raise", "minimize", "restore"
+        "press", "raise", "minimize", "restore", "allow-sensitive"
     ]
 
     init(_ arguments: [String]) throws {
@@ -53,6 +53,26 @@ struct Flags {
             throw UmbraError(.invalidArgument, "--\(name) expects an integer, got '\(raw)'")
         }
         return value
+    }
+
+    /// Narrowing an out-of-range value with a plain `Int32(_:)` conversion traps
+    /// and takes the process down. A number the caller can type is input to be
+    /// validated, not a programmer error to assert on.
+    func int32(_ name: String, min lower: Int32 = .min, max upper: Int32 = .max) throws -> Int32? {
+        guard let value = try int(name) else { return nil }
+        guard let narrowed = NumericBounds.narrow(value, min: lower, max: upper) else {
+            throw UmbraError(.invalidArgument, "--\(name) must be between \(lower) and \(upper), got \(value)", nextSteps: [
+                "Scroll and drag distances are in points; values beyond a screen's size have no additional effect."
+            ])
+        }
+        return narrowed
+    }
+
+    /// Clamps rather than rejects, for budgets where any positive number is
+    /// meaningful and the caller mostly wants "as much as you can".
+    func boundedInt(_ name: String, min lower: Int, max upper: Int) throws -> Int? {
+        guard let value = try int(name) else { return nil }
+        return NumericBounds.clamp(value, min: lower, max: upper)
     }
 
     func double(_ name: String) throws -> Double? {

@@ -17,6 +17,7 @@ enum Commands {
     static func resolveTarget(_ flags: Flags) throws -> ResolvedTarget {
         let selector = try flags.required("app", hint: "Pass --app with a bundle id, pid:N, or application name. `umbra apps` lists them.")
         let app = try Target.resolveApp(selector)
+        try SensitiveApps.guardAgainst(app, allowed: flags.has("allow-sensitive"))
         let windowID = try flags.int("window-id").map { CGWindowID($0) }
         let windowIndex = try flags.int("window-index")
         let selected = try Target.selectWindow(of: app, windowID: windowID, windowIndex: windowIndex)
@@ -32,6 +33,14 @@ enum Commands {
             windowElement: selected.element,
             windowInfo: selected.info
         )
+    }
+
+    /// For the commands that resolve an application directly rather than
+    /// through `resolveTarget`.
+    static func resolveApp(_ flags: Flags, _ selector: String) throws -> NSRunningApplication {
+        let app = try Target.resolveApp(selector)
+        try SensitiveApps.guardAgainst(app, allowed: flags.has("allow-sensitive"))
+        return app
     }
 
     static func session(_ flags: Flags) -> String {
@@ -104,7 +113,7 @@ enum Commands {
     static func windows(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let selector = try flags.required("app")
-        let app = try Target.resolveApp(selector)
+        let app = try resolveApp(flags, selector)
         let list = try Target.windows(of: app).map(\.info)
         struct Payload: Encodable { let ok = true; let windows: [WindowInfo] }
         Output.emit(Payload(windows: list)) {
@@ -121,8 +130,9 @@ enum Commands {
         try Permissions.requireAccessibility()
         let target = try resolveTarget(flags)
         var limits = SnapshotLimits()
-        if let maxNodes = try flags.int("max-nodes") { limits.maxNodes = maxNodes }
-        if let maxDepth = try flags.int("max-depth") { limits.maxDepth = maxDepth }
+        if let maxNodes = try flags.boundedInt("max-nodes", min: 1, max: 20_000) { limits.maxNodes = maxNodes }
+        if let maxDepth = try flags.boundedInt("max-depth", min: 1, max: 200) { limits.maxDepth = maxDepth }
+        if let maxChildren = try flags.boundedInt("max-children", min: 1, max: 5_000) { limits.maxChildrenPerNode = maxChildren }
 
         let snapshot = SnapshotBuilder.capture(
             app: target.appInfo,
@@ -147,7 +157,7 @@ enum Commands {
         case let other:
             throw UmbraError(.invalidArgument, "unknown --button '\(other)'", nextSteps: ["Use one of: left, right, middle."])
         }
-        let clickCount = try flags.int("count") ?? 1
+        let clickCount = try flags.boundedInt("count", min: 1, max: 10) ?? 1
 
         // Element addressing: prefer the semantic action the element itself
         // advertises. It needs no coordinates, survives window movement, and is
@@ -155,7 +165,7 @@ enum Commands {
         if let elementIndex = try flags.int("element") {
             let sessionName = session(flags)
             let (snapshot, node) = try SessionStore.node(index: elementIndex, session: sessionName)
-            let app = try Target.resolveApp("pid:\(snapshot.app.pid)")
+            let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
             let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
 
             // Optically located text has no element behind it to re-resolve, so
@@ -269,7 +279,7 @@ enum Commands {
         }
         let name = try flags.required("action", hint: "Pass an action listed for that element in `umbra snapshot`.")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
-        let app = try Target.resolveApp("pid:\(snapshot.app.pid)")
+        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
         let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         try AX.perform(element, name)
@@ -284,7 +294,7 @@ enum Commands {
         }
         let value = try flags.required("value")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
-        let app = try Target.resolveApp("pid:\(snapshot.app.pid)")
+        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
         let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         guard AX.isSettable(element, kAXValueAttribute as String) else {
@@ -310,7 +320,7 @@ enum Commands {
     static func type(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
-        let app = try Target.resolveApp(try flags.required("app"))
+        let app = try resolveApp(flags, try flags.required("app"))
         let mode = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(mode, app: app)
         let focus = try focusForTyping(flags, app: app)
@@ -321,7 +331,7 @@ enum Commands {
 
     static func focus(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let app = try Target.resolveApp(try flags.required("app"))
+        let app = try resolveApp(flags, try flags.required("app"))
         let focus = Focus.current(of: app)
         struct Payload: Encodable { let ok = true; let focus: FocusInfo }
         Output.emit(Payload(focus: focus)) { focus.summary }
@@ -331,7 +341,7 @@ enum Commands {
 
     static func menu(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let app = try Target.resolveApp(try flags.required("app"))
+        let app = try resolveApp(flags, try flags.required("app"))
         let depth = try flags.int("depth") ?? 3
         var items = try Menus.list(of: app, maxDepth: depth)
         if let filter = flags.string("filter")?.lowercased() {
@@ -351,7 +361,7 @@ enum Commands {
 
     static func menuItem(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let app = try Target.resolveApp(try flags.required("app"))
+        let app = try resolveApp(flags, try flags.required("app"))
         let raw = try flags.required("path", hint: "For example --path \"File > Save\".")
         let path = raw.split(separator: ">").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let item = try Menus.find(path, in: app)
@@ -464,7 +474,7 @@ enum Commands {
         try Permissions.requireAccessibility()
         let key = try flags.required("key", hint: "For example --key return, --key escape, --key a.")
         let modifiers = flags.list("mod")
-        let app = try Target.resolveApp(try flags.required("app"))
+        let app = try resolveApp(flags, try flags.required("app"))
         let mode = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(mode, app: app)
         let focus = try focusForTyping(flags, app: app)
@@ -477,7 +487,7 @@ enum Commands {
     static func paste(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
-        let app = try Target.resolveApp(try flags.required("app"))
+        let app = try resolveApp(flags, try flags.required("app"))
         let mode = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(mode, app: app)
         let focus = try focusForTyping(flags, app: app)
@@ -503,8 +513,8 @@ enum Commands {
     static func scroll(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let target = try resolveTarget(flags)
-        let deltaX = Int32(try flags.int("dx") ?? 0)
-        let deltaY = Int32(try flags.int("dy") ?? 0)
+        let deltaX = try flags.int32("dx", min: -100_000, max: 100_000) ?? 0
+        let deltaY = try flags.int32("dy", min: -100_000, max: 100_000) ?? 0
         guard deltaX != 0 || deltaY != 0 else {
             throw UmbraError(.invalidArgument, "scroll needs --dx and/or --dy", nextSteps: ["Positive --dy scrolls up, negative scrolls down."])
         }
@@ -541,7 +551,7 @@ enum Commands {
             windowFrame: target.windowInfo.frame.cgRect,
             from: globalPoint(from, window: target.windowInfo, isScreenSpace: isScreenSpace),
             to: globalPoint(to, window: target.windowInfo, isScreenSpace: isScreenSpace),
-            steps: try flags.int("steps") ?? 12,
+            steps: try flags.boundedInt("steps", min: 1, max: 500) ?? 12,
             mode: mode
         )
         let result = ActionResult(action: "drag", mode: mode.rawValue, target: target.appInfo.name, detail: nil)

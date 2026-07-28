@@ -327,6 +327,43 @@ t.expect(KeyCodes.code(for: "⎋") == KeyCodes.code(for: "escape"), "a menu's es
 t.expect(KeyCodes.code(for: "↩") == KeyCodes.code(for: "return"), "a menu's return glyph maps to the return key")
 t.expect(KeyCodes.code(for: "⌫") == KeyCodes.code(for: "delete"), "a menu's delete glyph maps to the delete key")
 
+// MARK: - Safety guards
+
+t.suite("safety guards")
+
+t.expect(Redaction.holdsSecret(descriptors: ["AXTextField", "AXSecureTextField"]), "a secure field's subrole marks its value as secret")
+t.expect(Redaction.holdsSecret(descriptors: ["AXTextField", "", "", "", "Password"]), "a password placeholder marks its value as secret")
+t.expect(Redaction.holdsSecret(descriptors: ["AXTextField", "", "One-Time Code"]), "a one-time code field is treated as secret")
+t.expect(Redaction.holdsSecret(descriptors: ["AXTextField", "", "API token"]), "a token field is treated as secret")
+t.expect(!Redaction.holdsSecret(descriptors: ["AXTextField", "", "Search"]), "an ordinary field keeps its value")
+t.expect(!Redaction.holdsSecret(descriptors: []), "an element that describes itself as nothing keeps its value")
+
+t.expect(SensitiveApps.bundleIDs.contains("com.apple.keychainaccess"), "Keychain Access is on the credential-holding list")
+t.expect(SensitiveApps.bundleIDs.contains("com.bitwarden.desktop"), "third-party password managers are on the list too")
+
+// A number someone can type must never be able to trap the process.
+t.expect(NumericBounds.narrow(99_999_999_999, min: -100_000, max: 100_000) == nil, "a value beyond Int32 is refused rather than trapped")
+t.expect(NumericBounds.narrow(Int(Int32.max) + 1, min: .min, max: .max) == nil, "one past Int32.max is refused")
+t.expectEqual(NumericBounds.narrow(-500, min: -100_000, max: 100_000), -500, "an in-range negative value narrows unchanged")
+t.expectEqual(NumericBounds.clamp(0, min: 1, max: 10), 1, "a budget below the floor clamps up")
+t.expectEqual(NumericBounds.clamp(9_999, min: 1, max: 10), 10, "a budget above the ceiling clamps down")
+
+do {
+    // A zero or negative budget would otherwise produce a snapshot of nothing.
+    let limits = SnapshotLimits(maxNodes: 0, maxDepth: -5, maxChildrenPerNode: 0)
+    t.expect(limits.maxNodes >= 1 && limits.maxDepth >= 1 && limits.maxChildrenPerNode >= 1, "snapshot budgets stay at least one")
+}
+
+do {
+    let capped = Snapshot(
+        app: AppInfo(pid: 1, name: "T", bundleID: nil, active: false, hasWindows: true),
+        window: WindowInfo(windowID: 1, index: 0, title: nil, frame: FrameJSON(.zero), minimized: false, main: true),
+        nodes: [], focusedIndex: nil, truncated: false, maxDepthReached: false,
+        childrenTruncated: true, capturedAt: Date()
+    )
+    t.expect(capped.renderText().contains("more children"), "a per-element child cap is announced, not silent")
+}
+
 // MARK: - Errors
 
 t.suite("errors")

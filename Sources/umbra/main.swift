@@ -48,6 +48,7 @@ COMMON FLAGS
   --session NAME     namespace for snapshot state (default: "default")
   --screen           interpret coordinates as absolute screen coordinates
   --expect-focus S   refuse to type unless the focused element matches S
+  --allow-sensitive  permit acting on a password manager (refused by default)
 
 OPTICAL FALLBACK
   Some windows draw their own interface and publish nothing useful to the

@@ -213,6 +213,24 @@ error [app_not_found]: no running application matched 'Gmail'
   next: Do not retry the same selector unchanged.
 ```
 
+## What umbra will not do
+
+- **Values that announce themselves as secrets are withheld.** A snapshot goes
+  straight to a model and usually into a transcript. Any element whose role,
+  subrole, placeholder or identifier mentions a password, passcode, one-time
+  code or token has its value replaced with `[redacted]`. This matters even for
+  well-behaved controls: AppKit's `NSSecureTextField` does mask its characters,
+  but it publishes the mask *at the original length* in private-use glyphs — so
+  an unredacted snapshot leaks exactly how long the password is, and hands the
+  model a run of junk it cannot read. Custom, web and Electron fields make no
+  promise at all.
+- **Password managers are refused by default.** Keychain Access, 1Password,
+  Bitwarden, KeePassXC and the rest are declined unless `--allow-sensitive` is
+  passed. This is a guard rail, not a security boundary — anything with
+  Accessibility can read those windows. What it prevents is the accident: an
+  agent sweeping open windows, or following an instruction it read on a web
+  page, and quietly putting a vault into a transcript.
+
 ## Limitations
 
 Stated plainly, because finding these out at runtime is worse:
