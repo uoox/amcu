@@ -1,4 +1,6 @@
+import AppKit
 import CoreGraphics
+import CoreText
 import Foundation
 import UmbraCore
 
@@ -209,6 +211,101 @@ do {
 
 t.expectThrows("a session name cannot escape the cache directory") { _ = try SessionStore.url(for: "../../etc/passwd") }
 t.expectThrows("an empty session name is refused") { _ = try SessionStore.url(for: "") }
+
+// MARK: - Optical fallback
+
+t.suite("optical fallback")
+
+/// Renders text into an image so recognition and the coordinate conversion can
+/// be exercised without a screen capture — the capture step needs a Screen
+/// Recording grant, which a test run cannot assume.
+func renderTextImage(_ text: String, at point: CGPoint, size: CGSize) -> CGImage? {
+    guard let context = CGContext(
+        data: nil,
+        width: Int(size.width),
+        height: Int(size.height),
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(origin: .zero, size: size))
+    let attributes: [NSAttributedString.Key: Any] = [
+        .font: CTFontCreateWithName("Helvetica" as CFString, 36, nil),
+        .foregroundColor: CGColor(red: 0, green: 0, blue: 0, alpha: 1)
+    ]
+    let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+    context.textPosition = point
+    CTLineDraw(line, context)
+    return context.makeImage()
+}
+
+do {
+    let size = CGSize(width: 400, height: 200)
+    // Drawn near the top of the image (CoreGraphics y counts up from the bottom).
+    if let image = renderTextImage("Export", at: CGPoint(x: 40, y: 140), size: size) {
+        do {
+            let marks = try VisionScan.recognizeText(in: image, windowSize: size, languages: ["en-US"], minimumConfidence: 0.1)
+            t.expect(!marks.isEmpty, "text is recognised in a rendered image")
+            let found = marks.first { $0.text.localizedCaseInsensitiveContains("export") }
+            t.expect(found != nil, "the recognised text matches what was drawn")
+            if let found {
+                // Vision reports a bottom-left origin; marks must come back in
+                // the top-left space the rest of umbra clicks in.
+                t.expect(found.frame.minY < size.height / 2, "a mark drawn near the top reports a small y, not a flipped one")
+                t.expect(found.frame.minX > 10 && found.frame.minX < 200, "the mark's x lands near where the text was drawn")
+                t.expect(found.frame.width > 0 && found.frame.height > 0, "the mark has a usable size")
+            }
+            if let annotated = VisionScan.annotate(image, marks: marks, windowSize: size) {
+                t.expectEqual(annotated.width, image.width, "the annotated capture keeps the original width")
+                t.expectEqual(annotated.height, image.height, "the annotated capture keeps the original height")
+            } else {
+                t.expect(false, "annotation produced no image")
+            }
+
+            // Vision marks are addressable exactly like accessibility elements.
+            let snapshot = SnapshotBuilder.fromVision(
+                app: AppInfo(pid: 1, name: "Test", bundleID: nil, active: false, hasWindows: true),
+                window: WindowInfo(windowID: 1, index: 0, title: "W", frame: FrameJSON(CGRect(origin: .zero, size: size)), minimized: false, main: true),
+                marks: marks
+            )
+            t.expectEqual(snapshot.nodes.first?.origin, NodeOrigin.vision, "scanned text is marked as optical in origin")
+            t.expect(snapshot.renderText().contains("(text)"), "rendered output distinguishes optical marks from elements")
+        } catch {
+            t.expect(false, "text recognition threw: \(error)")
+        }
+    } else {
+        t.expect(false, "could not render the test image")
+    }
+}
+
+do {
+    // A window with a hierarchy but nothing actionable is blind, not empty.
+    let blind = makeSnapshot(nodes: [
+        makeNode(index: 0, role: "AXWindow", label: "W", path: []),
+        SnapshotNode(index: 1, role: "AXStaticText", subrole: nil, label: "hi", value: nil,
+                     enabled: true, focused: false, frame: nil, actions: [], depth: 1, path: [0])
+    ])
+    t.expect(blind.looksAccessibilityBlind == false, "a window whose own node offers AXPress is not blind")
+
+    let canvas = makeSnapshot(nodes: [
+        SnapshotNode(index: 0, role: "AXWindow", subrole: nil, label: "W", value: nil,
+                     enabled: true, focused: false, frame: nil, actions: ["AXRaise"], depth: 0, path: []),
+        SnapshotNode(index: 1, role: "AXStaticText", subrole: nil, label: "hi", value: nil,
+                     enabled: true, focused: false, frame: nil, actions: [], depth: 1, path: [0])
+    ])
+    t.expect(canvas.looksAccessibilityBlind, "a window offering only AXRaise is reported as blind")
+    t.expect(canvas.renderText().contains("umbra scan"), "a blind window points at the optical fallback")
+}
+
+// MARK: - Menu shortcuts
+
+t.suite("menu shortcuts")
+
+t.expect(KeyCodes.code(for: "⎋") == KeyCodes.code(for: "escape"), "a menu's escape glyph maps to the escape key")
+t.expect(KeyCodes.code(for: "↩") == KeyCodes.code(for: "return"), "a menu's return glyph maps to the return key")
+t.expect(KeyCodes.code(for: "⌫") == KeyCodes.code(for: "delete"), "a menu's delete glyph maps to the delete key")
 
 // MARK: - Errors
 

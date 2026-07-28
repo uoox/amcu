@@ -12,6 +12,15 @@ public struct SnapshotLimits: Sendable {
     }
 }
 
+/// Where a node came from, because the two sources carry very different
+/// guarantees: an accessibility element can be re-resolved and re-verified
+/// before it is acted on, while a recognised piece of text can only be trusted
+/// as long as the capture it came from is fresh.
+public enum NodeOrigin: String, Codable, Sendable {
+    case accessibility
+    case vision
+}
+
 /// One addressable element. `path` is the chain of child indices from the window
 /// element down; it is what makes an index from an earlier snapshot re-resolvable
 /// — and, when the UI has changed underneath it, detectably stale.
@@ -30,6 +39,10 @@ public struct SnapshotNode: Codable, Sendable {
     public let actions: [String]
     public let depth: Int
     public let path: [Int]
+    /// Absent in snapshots written before optical fallback existed, which were
+    /// all accessibility-derived.
+    public var origin: NodeOrigin { originRaw ?? .accessibility }
+    let originRaw: NodeOrigin?
 
     public init(
         index: Int,
@@ -43,7 +56,8 @@ public struct SnapshotNode: Codable, Sendable {
         frame: FrameJSON?,
         actions: [String],
         depth: Int,
-        path: [Int]
+        path: [Int],
+        origin: NodeOrigin = .accessibility
     ) {
         self.index = index
         self.role = role
@@ -57,6 +71,12 @@ public struct SnapshotNode: Codable, Sendable {
         self.actions = actions
         self.depth = depth
         self.path = path
+        self.originRaw = origin
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case index, role, subrole, identifier, label, value, enabled, focused, frame, actions, depth, path
+        case originRaw = "origin"
     }
 }
 
@@ -106,6 +126,7 @@ public struct Snapshot: Codable, Sendable {
             if let frame = node.frame {
                 parts.append("@\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height))")
             }
+            if node.origin == .vision { parts.append("(text)") }
             let extraActions = node.actions.filter { $0 != kAXPressAction as String }
             if !extraActions.isEmpty {
                 parts.append("actions:" + extraActions.map { shortRole($0) }.joined(separator: ","))
@@ -113,9 +134,25 @@ public struct Snapshot: Codable, Sendable {
             lines.append(parts.joined(separator: " "))
         }
         if focusedIndex == nil { lines.append("(no element currently focused)") }
+        if looksAccessibilityBlind {
+            lines.append("(this window exposes no actionable accessibility elements — it may render its own interface; try `umbra scan` for an optical fallback)")
+        }
         if truncated { lines.append("(truncated: node budget reached — narrow the target with --window-id)") }
         if maxDepthReached { lines.append("(truncated: depth budget reached)") }
         return lines.joined(separator: "\n")
+    }
+
+    /// True when the window publishes a hierarchy but nothing in it can be
+    /// acted on — the signature of a canvas-rendered or otherwise
+    /// accessibility-opaque interface. Reporting this is the difference between
+    /// "this window is empty" and "umbra cannot see into this window".
+    public var looksAccessibilityBlind: Bool {
+        guard nodes.contains(where: { $0.origin == .accessibility }) else { return false }
+        let actionable = nodes.filter { node in
+            node.origin == .accessibility
+                && node.actions.contains { $0 != "AXShowMenu" && $0 != "AXRaise" && $0 != "AXScrollToVisible" }
+        }
+        return actionable.isEmpty
     }
 
     private func shortRole(_ role: String) -> String {
@@ -194,6 +231,41 @@ public enum SnapshotBuilder {
         )
     }
 
+    /// Wraps recognised text in the same snapshot shape as accessibility
+    /// elements, so a caller addresses either kind with `--element N`.
+    public static func fromVision(
+        app: AppInfo,
+        window: WindowInfo,
+        marks: [VisionMark]
+    ) -> Snapshot {
+        let nodes = marks.enumerated().map { index, mark in
+            SnapshotNode(
+                index: index,
+                role: "UmbraText",
+                subrole: nil,
+                identifier: nil,
+                label: mark.text,
+                value: nil,
+                enabled: true,
+                focused: false,
+                frame: FrameJSON(mark.frame),
+                actions: [],
+                depth: 0,
+                path: [],
+                origin: .vision
+            )
+        }
+        return Snapshot(
+            app: app,
+            window: window,
+            nodes: nodes,
+            focusedIndex: nil,
+            truncated: false,
+            maxDepthReached: false,
+            capturedAt: Date()
+        )
+    }
+
     static func label(of element: AXUIElement) -> String? {
         for attribute in [
             kAXTitleAttribute as String,
@@ -211,6 +283,12 @@ public enum SnapshotBuilder {
     /// A snapshot index is a promise about what is there; this is where the
     /// promise gets checked instead of silently clicking the wrong control.
     public static func resolve(node: SnapshotNode, windowElement: AXUIElement) throws -> AXUIElement {
+        guard node.origin == .accessibility else {
+            throw UmbraError(.unsupported, "element \(node.index) came from an optical scan and has no accessibility element behind it", nextSteps: [
+                "Optically located targets can only be clicked by coordinate; that is what `umbra click --element` does for them automatically.",
+                "This error means something asked for a semantic action on recognised text."
+            ])
+        }
         var current = windowElement
         for step in node.path {
             let children = AX.children(current)

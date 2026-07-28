@@ -19,10 +19,25 @@ public enum KeyCodes {
         "backslash": 42, "grave": 50
     ]
 
+    /// Menu items report their keyboard equivalent as a character, which for
+    /// non-printing keys is either the glyph the menu draws or the control
+    /// character itself. Both spellings map back to the same key.
+    static let glyphs: [String: String] = [
+        "⎋": "escape", "\u{1b}": "escape",
+        "⌫": "delete", "\u{8}": "delete",
+        "⌦": "forwarddelete", "\u{7f}": "forwarddelete",
+        "↩": "return", "⏎": "return", "\r": "return", "\u{3}": "return",
+        "⇥": "tab", "\t": "tab",
+        "␣": "space", " ": "space",
+        "←": "left", "→": "right", "↑": "up", "↓": "down",
+        "⇞": "pageup", "⇟": "pagedown", "↖": "home", "↘": "end"
+    ]
+
     public static var knownNames: [String] { table.keys.sorted() }
 
     public static func code(for name: String) -> CGKeyCode? {
-        table[name.lowercased()]
+        if let mapped = glyphs[name], let code = table[mapped] { return code }
+        return table[name.lowercased()]
     }
 
     public static func modifier(for name: String) -> CGEventFlags? {

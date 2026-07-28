@@ -13,6 +13,9 @@ INSPECT
   apps                                  list running applications (pid, bundle id, name)
   windows      --app S                  list an application's windows with ids and frames
   snapshot     --app S                  capture the accessibility tree as indexed text
+  scan         --app S                  optical fallback: recognise text and where it is
+  menu         --app S                  read the menu bar without opening it
+  focus        --app S                  report what currently has keyboard focus
   doctor                                check permissions and verify background delivery
 
 ACT
@@ -25,7 +28,9 @@ ACT
   key          --app S --key K          press a key, with --mod cmd,shift
   scroll       --app S --dy N           scroll, optionally at --at X,Y
   drag         --app S --from X,Y --to X,Y
+  menu-item    --app S --path "A > B"   invoke a menu command, by shortcut where possible
   screenshot   --app S [--out FILE]     capture one window, occluded or not
+  window       --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
 
 SELECTORS
   --app accepts a bundle id (com.apple.finder), pid:1234, or an application name.
@@ -42,6 +47,26 @@ COMMON FLAGS
   --json             machine-readable output on stdout, structured errors on stderr
   --session NAME     namespace for snapshot state (default: "default")
   --screen           interpret coordinates as absolute screen coordinates
+  --expect-focus S   refuse to type unless the focused element matches S
+
+OPTICAL FALLBACK
+  Some windows draw their own interface and publish nothing useful to the
+  accessibility API; `snapshot` says so when it sees one. `scan` recognises the
+  text in such a window and gives each piece an index in the same space as
+  accessibility elements, so `click --element N` works either way. Recognised
+  text carries no role, no state and no actions, and cannot be re-verified
+  before a click, so scans expire (--max-age, default 60s).
+  `scan --annotate out.png` writes a numbered overlay for a model to look at.
+
+MENUS
+  Menu items and their keyboard equivalents can be read without opening any
+  menu. `menu-item` prefers sending the item's shortcut, which invokes the
+  command without the menu appearing on screen; --press forces the visible
+  route for items that have no shortcut.
+
+WINDOW CONTROL
+  Raising, moving and resizing visibly disturb the user, so no other command
+  does them implicitly — `window` exists to make that an explicit request.
 
 NOTES
   Element indices come from the most recent snapshot in the same session and are
@@ -72,6 +97,11 @@ do {
     case "apps": try Commands.apps(flags)
     case "windows": try Commands.windows(flags)
     case "snapshot": try Commands.snapshot(flags)
+    case "scan": try Commands.scan(flags)
+    case "menu": try Commands.menu(flags)
+    case "menu-item": try Commands.menuItem(flags)
+    case "focus": try Commands.focus(flags)
+    case "window": try Commands.window(flags)
     case "click": try Commands.click(flags)
     case "action": try Commands.action(flags)
     case "set-value": try Commands.setValue(flags)

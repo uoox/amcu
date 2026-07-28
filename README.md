@@ -98,6 +98,9 @@ INSPECT
   umbra apps                                  list running applications
   umbra windows    --app S                    list windows with ids and frames
   umbra snapshot   --app S                    capture the accessibility tree as indexed text
+  umbra scan       --app S                    optical fallback: recognise text and where it is
+  umbra menu       --app S                    read the menu bar without opening it
+  umbra focus      --app S                    report what currently has keyboard focus
   umbra doctor                                check permissions, verify background delivery
 
 ACT
@@ -108,9 +111,71 @@ ACT
   umbra type       --app S --text T           type literal text
   umbra paste      --app S --text T           paste via the pasteboard (input-method safe)
   umbra key        --app S --key K --mod cmd  press a key combination
+  umbra menu-item  --app S --path "A > B"     invoke a menu command
   umbra scroll     --app S --dy N             scroll
   umbra drag       --app S --from X,Y --to X,Y
   umbra screenshot --app S --out FILE         capture one window, occluded or not
+  umbra window     --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
+```
+
+### Menus, without opening them
+
+An application's menu bar is readable whether or not it is frontmost, and the
+items *and their keyboard equivalents* come back without pressing anything — so
+looking around a menu puts nothing on screen.
+
+```console
+$ umbra menu --app com.example.app --filter export
+File > Export > PDF…	[cmd+shift+e]
+```
+
+`menu-item` uses that: when an item advertises a keyboard equivalent, the
+shortcut is sent to the process and the command runs with no menu appearing at
+all. Only items without a shortcut fall back to pressing the menu, which may
+briefly show it.
+
+```console
+$ umbra menu-item --app com.example.app --path "File > Export > PDF…"
+menu-item ok on File > Export > PDF… via shortcut:cmd+shift+e
+```
+
+### When there is no accessibility tree
+
+Some windows draw their own interface and publish nothing useful. `snapshot`
+says so rather than returning a plausible-looking empty tree:
+
+```console
+$ umbra snapshot --app com.example.canvas
+...
+(this window exposes no actionable accessibility elements — it may render its
+own interface; try `umbra scan` for an optical fallback)
+```
+
+`scan` recognises the text in the window and gives each piece an index in the
+**same space** accessibility elements use, so `click --element N` works either
+way. `--annotate out.png` writes a numbered overlay for a model to look at.
+
+This is deliberately *addressable vision*, not a vision agent: umbra reports
+text and where it is, and leaves interpretation to the model driving it. What
+that model lacks is not the ability to read a screenshot — it is a way to turn a
+point in that screenshot into an accurate click on a window nobody is looking
+at, and that is the part umbra already solved.
+
+The trade-off is stated in the output: recognised text carries no role, no
+state and no actions — a disabled button and a caption look identical. It also
+cannot be re-verified before a click the way an element can, so scans expire
+(`--max-age`, default 60s) instead of silently going stale.
+
+### Typing goes where the target's focus is
+
+Keystrokes land on whatever is focused *inside* the target application, which is
+the quietest way for automation to go wrong. Every typing command resolves the
+focus and reports it, and `--expect-focus` turns an assumption into a check:
+
+```console
+$ umbra type --app com.example.app --text "hello" --expect-focus "Search"
+error [element_not_found]: focus is on TextArea "Notes", which does not match 'Search'
+  next: Focus the intended field before typing.
 ```
 
 Add `--json` to any command for machine-readable output on stdout and structured errors on stderr.
@@ -152,10 +217,10 @@ error [app_not_found]: no running application matched 'Gmail'
 
 Stated plainly, because finding these out at runtime is worse:
 
-- **No menu bar, Dock, or system dialogs.** umbra addresses application windows. Menu-driven flows need `--mode foreground` plus keyboard shortcuts, or another tool.
-- **No OCR or vision fallback.** Applications that render their own UI without publishing an accessibility tree — canvas-based editors, some games, a few Electron configurations — are effectively invisible. Screenshots are available, but nothing interprets them for you.
-- **No window management.** umbra will not move, resize, focus or un-minimize windows. It reports `minimized` and offscreen state; acting on it is your call.
-- **Background typing follows the target's own focus.** Keystrokes go to whatever is focused *inside* the target application. Set focus first (via `set-value`, a semantic click, or `action --action AXFocus`) rather than assuming.
+- **No Dock, and no system-owned dialogs.** Save and open panels, sheets and in-app alerts *are* reachable — they appear as windows of the host application, so `--window-index` addresses them normally. What is out of reach is dialogs owned by the system itself: permission prompts, password requests and anything else drawn by SecurityAgent. macOS deliberately refuses automation there, and it should.
+- **Optical fallback is text only.** `scan` finds text and where it is; it cannot tell a button from a caption, cannot see icons or unlabelled controls, and cannot report state. It is a fallback for windows that publish nothing, not a substitute for an accessibility tree.
+- **Window management is opt-in.** `umbra window` moves, resizes, raises and un-minimizes — but no other command will do any of that on your behalf to make its own job easier.
+- **Lazily built menus read as empty.** Applications that populate a submenu only when it opens show that submenu with no items. `menu-item --press` can still reach them by opening the menu.
 - **Private API dependency.** Background *coordinate* clicks rely on `CGEventSetWindowLocation`. Semantic actions and `--mode foreground` do not. The self-check exists so you find out immediately rather than eventually.
 - **macOS only**, 14.0+.
 
@@ -173,6 +238,12 @@ umbra exists because three other projects each solved part of this, and reading 
 swift build            # build
 swift run umbra-tests  # run the test suite
 ```
+
+The suite covers pure logic — coordinate conversion in both directions, snapshot
+rendering and staleness contracts, session handling, menu shortcut spellings,
+and optical recognition against a rendered image (which needs no Screen
+Recording grant, so it runs in CI). The parts that need a real UI session are
+verified with `umbra doctor` on a machine with permissions granted.
 
 Tests are a plain executable rather than an XCTest or swift-testing target: both of those need a full Xcode install to *run*, and this tool is meant to stay verifiable on a machine with only the Command Line Tools. Tests that only some contributors can execute are tests that rot.
 

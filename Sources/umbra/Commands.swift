@@ -157,6 +157,40 @@ enum Commands {
             let (snapshot, node) = try SessionStore.node(index: elementIndex, session: sessionName)
             let app = try Target.resolveApp("pid:\(snapshot.app.pid)")
             let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+
+            // Optically located text has no element behind it to re-resolve, so
+            // it cannot be re-verified the way an accessibility element can.
+            // Freshness is the only guarantee available, so it is enforced
+            // rather than left to the caller to remember.
+            if node.origin == .vision {
+                let maxAge = try flags.double("max-age") ?? 60
+                let age = Date().timeIntervalSince(snapshot.capturedAt)
+                guard age <= maxAge else {
+                    throw UmbraError(.staleSnapshot, "this optical scan is \(Int(age))s old (limit \(Int(maxAge))s) and cannot be re-verified", nextSteps: [
+                        "Re-run `umbra scan` and use the new indices.",
+                        "Raise the bound with --max-age SECONDS if the window is known to be static."
+                    ])
+                }
+                guard let frame = node.frame?.cgRect else {
+                    throw UmbraError(.elementNotFound, "recognised text \(elementIndex) has no recorded position")
+                }
+                let mode = try deliveryMode(flags, requiresRouting: true)
+                try assertForegroundIsSafe(mode, app: app)
+                let center = globalPoint(CGPoint(x: frame.midX, y: frame.midY), window: window.info, isScreenSpace: false)
+                try PointerInput.click(PointerInput.ClickRequest(
+                    pid: app.processIdentifier,
+                    windowID: window.info.windowID,
+                    windowFrame: window.info.frame.cgRect,
+                    global: center,
+                    button: button,
+                    clickCount: clickCount,
+                    mode: mode
+                ))
+                let result = ActionResult(action: "click", mode: mode.rawValue, target: "text \(elementIndex)", detail: node.label.map { "\"\($0)\"" })
+                Output.emit(result) { result.text }
+                return
+            }
+
             let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
 
             let wantsCoordinates = (flags.string("mode") == "foreground") || flags.has("raw")
@@ -264,14 +298,165 @@ enum Commands {
         Output.emit(result) { result.text }
     }
 
+    /// Typed input lands on the target's own focused element, so the focus is
+    /// resolved and reported rather than assumed.
+    static func focusForTyping(_ flags: Flags, app: NSRunningApplication) throws -> FocusInfo {
+        if let expectation = flags.string("expect-focus") {
+            return try Focus.require(expectation, of: app)
+        }
+        return Focus.current(of: app)
+    }
+
     static func type(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
         let app = try Target.resolveApp(try flags.required("app"))
         let mode = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(mode, app: app)
+        let focus = try focusForTyping(flags, app: app)
         try KeyboardInput.type(text: text, pid: app.processIdentifier, mode: mode)
-        let result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters")
+        let result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters into \(focus.summary)")
+        Output.emit(result) { result.text }
+    }
+
+    static func focus(_ flags: Flags) throws {
+        try Permissions.requireAccessibility()
+        let app = try Target.resolveApp(try flags.required("app"))
+        let focus = Focus.current(of: app)
+        struct Payload: Encodable { let ok = true; let focus: FocusInfo }
+        Output.emit(Payload(focus: focus)) { focus.summary }
+    }
+
+    // MARK: - Menus
+
+    static func menu(_ flags: Flags) throws {
+        try Permissions.requireAccessibility()
+        let app = try Target.resolveApp(try flags.required("app"))
+        let depth = try flags.int("depth") ?? 3
+        var items = try Menus.list(of: app, maxDepth: depth)
+        if let filter = flags.string("filter")?.lowercased() {
+            items = items.filter { $0.displayPath.lowercased().contains(filter) }
+        }
+        struct Payload: Encodable { let ok = true; let items: [MenuItem] }
+        Output.emit(Payload(items: items)) {
+            items.map { item in
+                var line = item.displayPath
+                if let shortcut = item.shortcut { line += "\t[\(shortcut)]" }
+                if !item.enabled { line += "\t(disabled)" }
+                if item.hasSubmenu { line += "\t>" }
+                return line
+            }.joined(separator: "\n")
+        }
+    }
+
+    static func menuItem(_ flags: Flags) throws {
+        try Permissions.requireAccessibility()
+        let app = try Target.resolveApp(try flags.required("app"))
+        let raw = try flags.required("path", hint: "For example --path \"File > Save\".")
+        let path = raw.split(separator: ">").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let item = try Menus.find(path, in: app)
+
+        guard item.enabled else {
+            throw UmbraError(.unsupported, "menu item '\(item.displayPath)' is disabled", nextSteps: [
+                "The application does not currently allow this command; change the selection or state it depends on first."
+            ])
+        }
+
+        // A keyboard equivalent reaches the same command without the menu
+        // appearing on screen, so it is preferred whenever the item has one.
+        let wantsPress = flags.has("press") || item.shortcut == nil
+        if !wantsPress, let shortcut = item.shortcut {
+            let parts = shortcut.split(separator: "+").map(String.init)
+            let key = parts.last ?? ""
+            let modifiers = Array(parts.dropLast())
+            try KeyboardInput.press(key: key, modifiers: modifiers, pid: app.processIdentifier, mode: .background)
+            let result = ActionResult(action: "menu-item", mode: "shortcut:\(shortcut)", target: item.displayPath, detail: nil)
+            Output.emit(result) { result.text }
+            return
+        }
+
+        // Pressing an item goes through the menu itself, which may briefly
+        // appear on screen — the reason the shortcut route is preferred.
+        let element = try Menus.resolve(item, in: app)
+        try AX.perform(element, kAXPressAction as String)
+        let result = ActionResult(action: "menu-item", mode: "ax:AXPress", target: item.displayPath, detail: "no keyboard equivalent; the menu may have shown briefly")
+        Output.emit(result) { result.text }
+    }
+
+    // MARK: - Optical fallback
+
+    static func scan(_ flags: Flags) throws {
+        let target = try resolveTarget(flags)
+        guard let windowID = target.windowInfo.windowID else {
+            throw UmbraError(.windowNotFound, "the selected window has no capturable id", nextSteps: [
+                "Run `umbra windows --app <selector>` and pass an explicit --window-id."
+            ])
+        }
+        let image = try Capture.window(id: windowID)
+        let windowSize = target.windowInfo.frame.cgRect.size
+        let languages = flags.list("lang").isEmpty ? ["zh-Hans", "en-US"] : flags.list("lang")
+        let marks = try VisionScan.recognizeText(in: image, windowSize: windowSize, languages: languages)
+
+        let snapshot = SnapshotBuilder.fromVision(app: target.appInfo, window: target.windowInfo, marks: marks)
+        try SessionStore.save(snapshot, session: session(flags))
+
+        var annotatedPath: String?
+        if let out = flags.string("annotate") {
+            guard let annotated = VisionScan.annotate(image, marks: marks, windowSize: windowSize) else {
+                throw UmbraError(.captureFailure, "could not render the annotated capture")
+            }
+            try Capture.writePNG(annotated, to: URL(fileURLWithPath: out))
+            annotatedPath = out
+        }
+
+        struct Payload: Encodable {
+            let ok = true
+            let snapshot: Snapshot
+            let annotated: String?
+        }
+        Output.emit(Payload(snapshot: snapshot, annotated: annotatedPath)) {
+            var lines = [snapshot.renderText()]
+            lines.append("(optical scan: recognised text only — no roles, no state, no actions)")
+            if let annotatedPath { lines.append("annotated capture: \(annotatedPath)") }
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    // MARK: - Window control
+
+    static func window(_ flags: Flags) throws {
+        try Permissions.requireAccessibility()
+        let target = try resolveTarget(flags)
+        var performed: [String] = []
+
+        if flags.has("raise") {
+            try WindowControl.raise(target.windowElement)
+            performed.append("raised")
+        }
+        if let point = try flags.point("move") {
+            try WindowControl.setPosition(target.windowElement, to: point)
+            performed.append("moved to \(Int(point.x)),\(Int(point.y))")
+        }
+        if let size = try flags.point("resize") {
+            try WindowControl.setSize(target.windowElement, to: CGSize(width: size.x, height: size.y))
+            performed.append("resized to \(Int(size.x))x\(Int(size.y))")
+        }
+        if flags.has("minimize") {
+            try WindowControl.setMinimized(target.windowElement, true)
+            performed.append("minimized")
+        }
+        if flags.has("restore") {
+            try WindowControl.setMinimized(target.windowElement, false)
+            performed.append("restored")
+        }
+
+        guard !performed.isEmpty else {
+            throw UmbraError(.invalidArgument, "window needs something to do", nextSteps: [
+                "Pass one or more of --raise, --move X,Y, --resize W,H, --minimize, --restore.",
+                "These visibly disturb the user, which is why no other command does them for you."
+            ])
+        }
+        let result = ActionResult(action: "window", mode: nil, target: target.windowInfo.title ?? "window", detail: performed.joined(separator: ", "))
         Output.emit(result) { result.text }
     }
 
@@ -282,9 +467,10 @@ enum Commands {
         let app = try Target.resolveApp(try flags.required("app"))
         let mode = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(mode, app: app)
+        let focus = try focusForTyping(flags, app: app)
         try KeyboardInput.press(key: key, modifiers: modifiers, pid: app.processIdentifier, mode: mode)
         let combination = (modifiers + [key]).joined(separator: "+")
-        let result = ActionResult(action: "key", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combination)
+        let result = ActionResult(action: "key", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(combination) to \(focus.summary)")
         Output.emit(result) { result.text }
     }
 
@@ -294,6 +480,7 @@ enum Commands {
         let app = try Target.resolveApp(try flags.required("app"))
         let mode = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(mode, app: app)
+        let focus = try focusForTyping(flags, app: app)
         // Pasting sidesteps input methods entirely, which matters for CJK text
         // and for any layout where synthesised keystrokes would be recomposed.
         // The pasteboard belongs to the user, so it is borrowed rather than
@@ -309,7 +496,7 @@ enum Commands {
         try KeyboardInput.press(key: "v", modifiers: ["cmd"], pid: app.processIdentifier, mode: mode)
         // Give the target a moment to read the pasteboard before it is restored.
         usleep(120_000)
-        let result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters via pasteboard")
+        let result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters via pasteboard into \(focus.summary)")
         Output.emit(result) { result.text }
     }
 
