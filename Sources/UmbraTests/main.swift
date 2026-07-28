@@ -417,4 +417,10 @@ do {
     t.expect(!SelfCheck.osBuild.isEmpty, "the OS build is recorded so a cached verdict expires with the system")
 }
 
+// Suites contributed by their own files; wired here because only main.swift
+// may carry top-level code.
+runTreeShapingTests(t)
+runChromiumAccessibilityTests(t)
+runTextInputTests(t)
+
 t.finish()

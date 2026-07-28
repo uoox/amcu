@@ -94,6 +94,13 @@ public struct Snapshot: Codable, Sendable {
     /// Absent in snapshots written before the per-node cap existed.
     public var childrenTruncated: Bool { childrenTruncatedRaw ?? false }
     let childrenTruncatedRaw: Bool?
+    /// Structural containers skipped by tree shaping. Absent in snapshots
+    /// written before shaping existed, which hid nothing.
+    public var elidedCount: Int { elidedCountRaw ?? 0 }
+    let elidedCountRaw: Int?
+    /// Table/outline/list rows dropped by viewport culling.
+    public var rowsOmitted: Int { rowsOmittedRaw ?? 0 }
+    let rowsOmittedRaw: Int?
     public let capturedAt: Date
 
     public init(
@@ -104,6 +111,8 @@ public struct Snapshot: Codable, Sendable {
         truncated: Bool,
         maxDepthReached: Bool,
         childrenTruncated: Bool = false,
+        elidedCount: Int = 0,
+        rowsOmitted: Int = 0,
         capturedAt: Date
     ) {
         self.app = app
@@ -113,12 +122,16 @@ public struct Snapshot: Codable, Sendable {
         self.truncated = truncated
         self.maxDepthReached = maxDepthReached
         self.childrenTruncatedRaw = childrenTruncated
+        self.elidedCountRaw = elidedCount
+        self.rowsOmittedRaw = rowsOmitted
         self.capturedAt = capturedAt
     }
 
     enum CodingKeys: String, CodingKey {
         case app, window, nodes, focusedIndex, truncated, maxDepthReached, capturedAt
         case childrenTruncatedRaw = "childrenTruncated"
+        case elidedCountRaw = "elidedCount"
+        case rowsOmittedRaw = "rowsOmitted"
     }
 
     /// Compact indented text, one line per element, sized for a model's context
@@ -154,6 +167,14 @@ public struct Snapshot: Codable, Sendable {
         if truncated { lines.append("(truncated: node budget reached — narrow the target with --window-id)") }
         if maxDepthReached { lines.append("(truncated: depth budget reached)") }
         if childrenTruncated { lines.append("(truncated: some elements have more children than were listed)") }
+        // Anything the shaping pass hid must be announced: a model reading a
+        // silently thinned tree would conclude the missing rows do not exist.
+        if elidedCount > 0 || rowsOmitted > 0 {
+            var hidden: [String] = []
+            if elidedCount > 0 { hidden.append("\(elidedCount) structural containers") }
+            if rowsOmitted > 0 { hidden.append("\(rowsOmitted) offscreen rows") }
+            lines.append("(hidden: " + hidden.joined(separator: ", ") + ")")
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -180,6 +201,21 @@ public struct Snapshot: Codable, Sendable {
     }
 }
 
+/// Hashable identity for an AXUIElement, so membership tests against a rows
+/// list are set lookups instead of O(rows) CFEqual scans per child — a table
+/// can hold thousands of rows and hundreds of children.
+private struct AXIdentity: Hashable {
+    let element: AXUIElement
+
+    static func == (lhs: AXIdentity, rhs: AXIdentity) -> Bool {
+        CFEqual(lhs.element, rhs.element)
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(CFHash(element))
+    }
+}
+
 public enum SnapshotBuilder {
     public static func capture(
         app: AppInfo,
@@ -191,52 +227,100 @@ public enum SnapshotBuilder {
         var truncated = false
         var depthReached = false
         var childrenTruncated = false
+        var elidedCount = 0
+        var rowsOmitted = 0
         var focusedIndex: Int?
         let origin = window.frame.cgRect.origin
 
         func walk(_ element: AXUIElement, depth: Int, path: [Int], ancestors: [AXUIElement]) {
             if nodes.count >= limits.maxNodes { truncated = true; return }
-            if depth > limits.maxDepth { depthReached = true; return }
+            // The depth budget guards recursion, so it is measured against the
+            // real hierarchy (`path` grows once per level regardless of
+            // elision), while `depth` only drives indentation and skips elided
+            // wrappers so the rendered tree has no phantom indent levels.
+            if path.count > limits.maxDepth { depthReached = true; return }
             // Some hierarchies point back at an ancestor. Following one is an
             // unbounded recursion that ends in a stack overflow, not an error.
             if ancestors.contains(where: { CFEqual($0, element) }) { return }
 
             let role = AX.string(element, kAXRoleAttribute as String) ?? "AXUnknown"
             let focused = AX.bool(element, kAXFocusedAttribute as String) ?? false
-            var frame: FrameJSON?
-            if let absolute = AX.frame(element) {
-                // Window-relative so that moving the window does not invalidate
-                // every coordinate in a snapshot the caller is still holding.
-                frame = FrameJSON(CGRect(
-                    x: absolute.origin.x - origin.x,
-                    y: absolute.origin.y - origin.y,
-                    width: absolute.size.width,
-                    height: absolute.size.height
+            let nodeLabel = label(of: element)
+            let nodeValue = redactedValue(of: element, role: role)
+            let actions = AX.actions(element)
+
+            // A meaningless wrapper is skipped but its subtree is not: the
+            // children keep their real AXChildren indices in `path`, so
+            // `resolve` — which replays the path over AXChildren — still lands
+            // on the right element. The focused element is never elided, or
+            // `focusedIndex` would have nothing to point at.
+            let elided = !focused && TreeShaping.shouldElide(role: role, label: nodeLabel, value: nodeValue, actions: actions)
+            var childDepth = depth
+            if elided {
+                elidedCount += 1
+            } else {
+                var frame: FrameJSON?
+                if let absolute = AX.frame(element) {
+                    // Window-relative so that moving the window does not invalidate
+                    // every coordinate in a snapshot the caller is still holding.
+                    frame = FrameJSON(CGRect(
+                        x: absolute.origin.x - origin.x,
+                        y: absolute.origin.y - origin.y,
+                        width: absolute.size.width,
+                        height: absolute.size.height
+                    ))
+                }
+                let index = nodes.count
+                if focused { focusedIndex = index }
+                nodes.append(SnapshotNode(
+                    index: index,
+                    role: role,
+                    subrole: AX.string(element, kAXSubroleAttribute as String),
+                    identifier: AX.string(element, "AXIdentifier"),
+                    label: nodeLabel,
+                    value: nodeValue,
+                    enabled: AX.bool(element, kAXEnabledAttribute as String) ?? true,
+                    focused: focused,
+                    frame: frame,
+                    actions: actions,
+                    depth: depth,
+                    path: path
                 ))
+                if TreeShaping.shouldSuppressChildren(role: role, label: nodeLabel) { return }
+                childDepth = depth + 1
             }
 
-            let index = nodes.count
-            if focused { focusedIndex = index }
-            nodes.append(SnapshotNode(
-                index: index,
-                role: role,
-                subrole: AX.string(element, kAXSubroleAttribute as String),
-                identifier: AX.string(element, "AXIdentifier"),
-                label: label(of: element),
-                value: redactedValue(of: element, role: role),
-                enabled: AX.bool(element, kAXEnabledAttribute as String) ?? true,
-                focused: focused,
-                frame: frame,
-                actions: AX.actions(element),
-                depth: depth,
-                path: path
-            ))
-
             let children = AX.children(element)
-            if children.count > limits.maxChildrenPerNode { childrenTruncated = true }
+            var kept = Array(children.enumerated())
+            if TreeShaping.usesRowViewport(role: role),
+               let rows = AX.attribute(element, "AXRows") as? [AXUIElement],
+               !rows.isEmpty,
+               let containerFrame = AX.frame(element) {
+                // AXRows indexes a different space than AXChildren, so row
+                // indices must never leak into `path`. The rows list is used
+                // only to decide *which* elements to keep; the walk below
+                // still iterates AXChildren, so every recorded path index is
+                // an AXChildren index and `resolve` stays correct.
+                let visible = rows.filter { row in
+                    guard let rowFrame = AX.frame(row) else { return false }
+                    return rowFrame.intersects(containerFrame)
+                }.prefix(TreeShaping.maxVisibleRows)
+                rowsOmitted += rows.count - visible.count
+                let allRows = Set(rows.map(AXIdentity.init))
+                let keptRows = Set(visible.map(AXIdentity.init))
+                kept = kept.filter { _, child in
+                    let identity = AXIdentity(element: child)
+                    // Non-row children (headers, columns, scrollers) pass through.
+                    return !allRows.contains(identity) || keptRows.contains(identity)
+                }
+            }
+            // The per-node cap counts surviving children, not raw ones —
+            // otherwise a table scrolled past its first few hundred rows
+            // would have its visible rows capped away with the culled ones.
+            if kept.count > limits.maxChildrenPerNode { childrenTruncated = true }
             let lineage = ancestors + [element]
-            for (childIndex, child) in children.prefix(limits.maxChildrenPerNode).enumerated() {
-                walk(child, depth: depth + 1, path: path + [childIndex], ancestors: lineage)
+            for (childIndex, child) in kept.prefix(limits.maxChildrenPerNode) {
+                walk(child, depth: childDepth, path: path + [childIndex], ancestors: lineage)
             }
         }
 
@@ -250,6 +334,8 @@ public enum SnapshotBuilder {
             truncated: truncated,
             maxDepthReached: depthReached,
             childrenTruncated: childrenTruncated,
+            elidedCount: elidedCount,
+            rowsOmitted: rowsOmitted,
             capturedAt: Date()
         )
     }

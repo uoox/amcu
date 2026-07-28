@@ -115,6 +115,13 @@ public enum Target {
     public static func appElement(_ app: NSRunningApplication) -> AXUIElement {
         let element = AXUIElementCreateApplication(app.processIdentifier)
         AX.setMessagingTimeout(element, seconds: 5.0)
+        // Chromium/Electron apps publish an empty tree until told otherwise;
+        // activation is idempotent and whitelisted, so doing it on every
+        // resolution is the cheapest way to guarantee it happened before any
+        // read. Native apps are never touched — the flag degrades their trees.
+        if ChromiumAccessibility.requiresActivation(bundleID: app.bundleIdentifier) {
+            ChromiumAccessibility.activate(pid: app.processIdentifier)
+        }
         return element
     }
 

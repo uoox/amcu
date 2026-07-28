@@ -18,6 +18,28 @@ public enum AX {
         return nil
     }
 
+    /// The full set of attributes an element claims to support, fetched in a
+    /// single IPC round-trip. Probing this once and consulting the set before
+    /// each `attribute` call turns N speculative cross-process reads (most of
+    /// which would fail with `.attributeUnsupported`) into one.
+    ///
+    /// Deliberately uncached: an element's attribute list changes as the app
+    /// mutates its tree (a text field gaining AXSelectedText on focus, a web
+    /// area publishing children after a Chromium activation), and a stale
+    /// cache would silently hide attributes that just appeared — a worse
+    /// failure than the IPC it saves. Callers that walk a tree should hold the
+    /// returned set for the duration of a single element's reads and no longer.
+    public static func attributeNames(_ element: AXUIElement) -> Set<String> {
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &names) == .success,
+              let list = names as? [String] else { return [] }
+        return Set(list)
+    }
+
+    public static func supportsAttribute(_ element: AXUIElement, _ name: String) -> Bool {
+        attributeNames(element).contains(name)
+    }
+
     public static func bool(_ element: AXUIElement, _ name: String) -> Bool? {
         (attribute(element, name) as? NSNumber)?.boolValue
     }

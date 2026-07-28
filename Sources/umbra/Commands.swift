@@ -303,9 +303,66 @@ enum Commands {
                 "Check the snapshot: read-only elements cannot be set."
             ])
         }
-        try AX.setValue(element, kAXValueAttribute as String, value as CFTypeRef)
-        let result = ActionResult(action: "set-value", mode: "ax:AXValue", target: "element \(elementIndex)", detail: nil)
+        let verification = try TextInput.setValue(value, on: element)
+        try requireNoMismatch(verification, elementIndex: elementIndex)
+        let result = VerifiedActionResult(
+            action: "set-value",
+            mode: "ax:AXValue",
+            target: "element \(elementIndex)",
+            detail: nil,
+            verification: verification,
+            resultingValue: nil
+        )
         Output.emit(result) { result.text }
+    }
+
+    /// Replaces the selected text of an element through the accessibility
+    /// value, needing neither focus nor a frontmost application — the preferred
+    /// text path whenever the element supports it.
+    static func replace(_ flags: Flags) throws {
+        try Permissions.requireAccessibility()
+        guard let elementIndex = try flags.int("element") else {
+            throw UmbraError(.invalidArgument, "--element is required", nextSteps: ["Run `umbra snapshot` first to get element indices."])
+        }
+        let text = try flags.required("text")
+        let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
+        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+        let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+        let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
+        guard AX.isSettable(element, kAXValueAttribute as String) else {
+            throw UmbraError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
+                "Use `umbra type --app <selector> --text ...` after focusing the field.",
+                "Check the snapshot: read-only elements cannot be set."
+            ])
+        }
+        let (verification, resultingValue) = try TextInput.replaceSelection(with: text, on: element)
+        try requireNoMismatch(verification, elementIndex: elementIndex)
+        let result = VerifiedActionResult(
+            action: "replace",
+            mode: "ax:AXValue",
+            target: "element \(elementIndex)",
+            detail: node.label,
+            verification: verification,
+            resultingValue: resultingValue
+        )
+        Output.emit(result) { result.text }
+    }
+
+    /// A write whose read-back disagrees is a failure, not a caveat: reporting
+    /// success while the value never landed is exactly the silent error class
+    /// this tool exists to eliminate. `notReadable` stays a success with a
+    /// caveat — there was nothing to compare, which is different from a
+    /// comparison that failed.
+    static func requireNoMismatch(_ verification: ActionVerification, elementIndex: Int) throws {
+        guard case let .unverified(reason, expected, actual) = verification, reason == .valueMismatch else { return }
+        throw UmbraError(
+            .accessibilityFailure,
+            "element \(elementIndex) accepted the write but holds a different value: wrote '\(expected ?? "")', read back '\(actual ?? "")'",
+            nextSteps: [
+                "The application may normalise input (trimming, reformatting); compare the two values and decide whether the result is acceptable.",
+                "If the value was rejected outright, focus the field and use `umbra type` instead."
+            ]
+        )
     }
 
     /// Typed input lands on the target's own focused element, so the focus is
@@ -613,5 +670,27 @@ enum Commands {
             }
             return lines.joined(separator: "\n")
         }
+    }
+}
+
+/// `ActionResult` plus the proof: whether the write was read back intact, and
+/// (for replacements) the full value the element now holds. Lives beside the
+/// commands that produce it rather than in Output.swift because only the
+/// value-writing commands can offer verification.
+struct VerifiedActionResult: Encodable {
+    let ok = true
+    let action: String
+    let mode: String?
+    let target: String
+    let detail: String?
+    let verification: ActionVerification
+    let resultingValue: String?
+
+    var text: String {
+        var parts = ["\(action) ok on \(target)"]
+        if let mode { parts.append("via \(mode)") }
+        if let detail { parts.append("(\(detail))") }
+        parts.append("(\(verification.summary))")
+        return parts.joined(separator: " ")
     }
 }

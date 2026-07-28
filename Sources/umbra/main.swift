@@ -22,7 +22,8 @@ ACT
   click        --app S --element N      press an element by its snapshot index
   click        --app S --at X,Y         click a point (window-relative unless --screen)
   action       --element N --action A   perform any action the element advertises
-  set-value    --element N --value V    set an element's value directly
+  set-value    --element N --value V    set an element's value directly, then read it back
+  replace      --element N --text T     replace the selection through the accessibility API
   type         --app S --text T         type literal text into the focused element
   paste        --app S --text T         paste text via the pasteboard (input-method safe)
   key          --app S --key K          press a key, with --mod cmd,shift
@@ -69,6 +70,13 @@ WINDOW CONTROL
   Raising, moving and resizing visibly disturb the user, so no other command
   does them implicitly — `window` exists to make that an explicit request.
 
+TEXT INPUT
+  `set-value` and `replace` write through the accessibility API and read the
+  value back, so a write the application silently refused is reported as a
+  failure rather than a success. Neither needs focus, the front window, or a
+  compatible input method — unlike `type`, which synthesises keystrokes and
+  therefore cannot be verified.
+
 NOTES
   Element indices come from the most recent snapshot in the same session and are
   re-verified before use; if the interface changed, umbra reports a stale
@@ -106,6 +114,7 @@ do {
     case "click": try Commands.click(flags)
     case "action": try Commands.action(flags)
     case "set-value": try Commands.setValue(flags)
+    case "replace": try Commands.replace(flags)
     case "type": try Commands.type(flags)
     case "paste": try Commands.paste(flags)
     case "key": try Commands.key(flags)
