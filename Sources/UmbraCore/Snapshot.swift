@@ -222,9 +222,15 @@ public enum SnapshotBuilder {
                 "Re-run `umbra snapshot`; the interface changed after it was captured."
             ])
         }
+        // Compared as optionals: a label appearing or disappearing is as much a
+        // change of identity as a label being edited, and skipping the check
+        // when either side is nil would let an unlabelled element of the same
+        // role silently take the place of the one that was described.
         let currentLabel = label(of: current)
-        if let recorded = node.label, let live = currentLabel, recorded != live {
-            throw UmbraError(.staleSnapshot, "element \(node.index) changed label (\"\(recorded)\" -> \"\(live)\")", nextSteps: [
+        if node.label != currentLabel {
+            let recorded = node.label.map { "\"\($0)\"" } ?? "no label"
+            let live = currentLabel.map { "\"\($0)\"" } ?? "no label"
+            throw UmbraError(.staleSnapshot, "element \(node.index) changed label (\(recorded) -> \(live))", nextSteps: [
                 "Re-run `umbra snapshot`; the interface changed after it was captured."
             ])
         }
