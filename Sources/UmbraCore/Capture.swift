@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -16,7 +17,21 @@ public enum Capture {
         init(_ value: T) { self.value = value }
     }
 
+    /// ScreenCaptureKit needs the process to hold a window-server connection.
+    /// A plain command-line tool has none until AppKit is initialized, and
+    /// without it CoreGraphics aborts the process outright rather than
+    /// returning an error. Initializing as an accessory keeps umbra out of the
+    /// Dock and out of the user's way.
+    private static let windowServerReady: Bool = {
+        let app = NSApplication.shared
+        if app.activationPolicy() != .accessory {
+            app.setActivationPolicy(.accessory)
+        }
+        return true
+    }()
+
     public static func window(id windowID: CGWindowID, scale: Bool = true) throws -> CGImage {
+        _ = windowServerReady
         // A one-shot CLI has no event loop to return to, so the async capture is
         // bridged by blocking the calling thread. This is only safe because
         // nothing awaited below is main-actor-isolated; if that ever changes,
