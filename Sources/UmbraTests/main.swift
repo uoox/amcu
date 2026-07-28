@@ -299,6 +299,26 @@ do {
     t.expect(canvas.renderText().contains("umbra scan"), "a blind window points at the optical fallback")
 }
 
+do {
+    // ScreenCaptureKit aborts the process rather than returning an error when
+    // there is no window-server connection, so the connection has to exist
+    // before any capture is attempted. Reaching this line at all proves the
+    // capture path can be entered; a regression would crash the runner here
+    // rather than fail an assertion.
+    let missing = CGWindowID(0xFFFF_FFFE)
+    do {
+        _ = try Capture.window(id: missing)
+        t.expect(false, "capturing a non-existent window should not succeed")
+    } catch let error as UmbraError {
+        t.expect(
+            error.code == .windowNotFound || error.code == .captureFailure,
+            "a capture attempt reports a structured error instead of aborting the process"
+        )
+    } catch {
+        t.expect(false, "capture threw an unexpected error type: \(error)")
+    }
+}
+
 // MARK: - Menu shortcuts
 
 t.suite("menu shortcuts")
