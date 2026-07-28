@@ -1,5 +1,5 @@
 import Foundation
-import UmbraCore
+import AmcuCore
 
 /// Pure-logic coverage of the Chromium activation whitelist. `activate` itself
 /// needs a live renderer process and mutates real application state, so it is

@@ -1,11 +1,11 @@
-# umbra
+# amcu — another macOS computer use
 
 Read and drive macOS applications **without taking over the screen**.
 
-umbra is a small, dependency-free command-line tool for computer-use agents on macOS. It reads an application's accessibility tree, and clicks, types, scrolls and drags inside a target window — while you keep using your Mac. The cursor does not move. Focus does not change. The window does not come to the front.
+amcu is a small, dependency-free command-line tool for computer-use agents on macOS. It reads an application's accessibility tree, and clicks, types, scrolls and drags inside a target window — while you keep using your Mac. The cursor does not move. Focus does not change. The window does not come to the front.
 
 ```console
-$ umbra snapshot --app com.apple.textedit
+$ amcu snapshot --app com.apple.textedit
 app: TextEdit [com.apple.textedit]
 window: Untitled id=8471 frame=(320,180 700x520)
 coordinates: window-relative
@@ -15,7 +15,7 @@ coordinates: window-relative
   3 Button "Close" @12,12 14x14
   ...
 
-$ umbra click --element 3
+$ amcu click --element 3
 click ok on element 3 via ax:AXPress
 ```
 
@@ -23,7 +23,7 @@ click ok on element 3 via ax:AXPress
 
 Most macOS automation tools are *foreground* automation: they activate the target application, move the real cursor, and post events to the global HID stream. While the agent works, the machine is not yours — and on a shared cursor, you and the agent fight over every click.
 
-Doing better requires three things, and umbra does all three:
+Doing better requires three things, and amcu does all three:
 
 1. **Read semantically, not visually.** The accessibility tree gives roles, labels, values and available actions. It is faster than screenshots, costs an order of magnitude fewer tokens, and yields element references that survive the window moving.
 2. **Act semantically where possible.** `AXPress` on a button needs no coordinates at all, and works even when the control is occluded.
@@ -56,15 +56,15 @@ both                    → delivered to window, landed at (200, 150) ← exact
 
 The real cursor never moved and the frontmost application never changed.
 
-## The catch, and what umbra does about it
+## The catch, and what amcu does about it
 
 `CGEventSetWindowLocation` is **not public API**. It is resolved at runtime with `dlsym`, and Apple can change or remove it. Worse, its likely failure mode is quiet: clicks keep being delivered, they just stop landing where they were aimed — the kind of breakage that corrupts data before anyone notices.
 
-So umbra does not trust the symbol's presence. On first use for a given OS build it runs a **self-check**: it opens its own throwaway window, clicks it at a deliberately asymmetric point through the full background path, and verifies where the click actually arrived. Only an exact hit counts as usable. The verdict is cached per OS build, so the cost is paid once per system update.
+So amcu does not trust the symbol's presence. On first use for a given OS build it runs a **self-check**: it opens its own throwaway window, clicks it at a deliberately asymmetric point through the full background path, and verifies where the click actually arrived. Only an exact hit counts as usable. The verdict is cached per OS build, so the cost is paid once per system update.
 
 ```console
-$ umbra doctor
-umbra doctor — 27.0 (26A5388g)
+$ amcu doctor
+amcu doctor — 27.0 (26A5388g)
   [ok] accessibility: reading and acting on user interfaces is permitted
   [ok] screen_recording: window capture is permitted
   [ok] ax window ids: resolvable
@@ -78,44 +78,44 @@ If the self-check ever fails, background coordinate clicks are refused with an e
 Requires macOS 14 or later and a Swift toolchain (the Command Line Tools are enough — no Xcode needed).
 
 ```bash
-git clone https://github.com/uoox/umbra
-cd umbra
+git clone https://github.com/uoox/amcu
+cd amcu
 swift build -c release
-cp .build/release/umbra /usr/local/bin/
+cp .build/release/amcu /usr/local/bin/
 ```
 
-Then grant permissions to whatever runs umbra (your terminal, or the agent host):
+Then grant permissions to whatever runs amcu (your terminal, or the agent host):
 
 - **Accessibility** — required for everything.
-- **Screen Recording** — only for `umbra screenshot`.
+- **Screen Recording** — only for `amcu screenshot`.
 
-`umbra doctor --request` triggers the system prompts.
+`amcu doctor --request` triggers the system prompts.
 
 ## Usage
 
 ```
 INSPECT
-  umbra apps                                  list running applications
-  umbra windows    --app S                    list windows with ids and frames
-  umbra snapshot   --app S                    capture the accessibility tree as indexed text
-  umbra scan       --app S                    optical fallback: recognise text and where it is
-  umbra menu       --app S                    read the menu bar without opening it
-  umbra focus      --app S                    report what currently has keyboard focus
-  umbra doctor                                check permissions, verify background delivery
+  amcu apps                                  list running applications
+  amcu windows    --app S                    list windows with ids and frames
+  amcu snapshot   --app S                    capture the accessibility tree as indexed text
+  amcu scan       --app S                    optical fallback: recognise text and where it is
+  amcu menu       --app S                    read the menu bar without opening it
+  amcu focus      --app S                    report what currently has keyboard focus
+  amcu doctor                                check permissions, verify background delivery
 
 ACT
-  umbra click      --app S --element N        press an element by its snapshot index
-  umbra click      --app S --at X,Y           click a point (window-relative unless --screen)
-  umbra action     --element N --action A     perform any action the element advertises
-  umbra set-value  --element N --value V      set an element's value directly
-  umbra type       --app S --text T           type literal text
-  umbra paste      --app S --text T           paste via the pasteboard (input-method safe)
-  umbra key        --app S --key K --mod cmd  press a key combination
-  umbra menu-item  --app S --path "A > B"     invoke a menu command
-  umbra scroll     --app S --dy N             scroll
-  umbra drag       --app S --from X,Y --to X,Y
-  umbra screenshot --app S --out FILE         capture one window, occluded or not
-  umbra window     --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
+  amcu click      --app S --element N        press an element by its snapshot index
+  amcu click      --app S --at X,Y           click a point (window-relative unless --screen)
+  amcu action     --element N --action A     perform any action the element advertises
+  amcu set-value  --element N --value V      set an element's value directly
+  amcu type       --app S --text T           type literal text
+  amcu paste      --app S --text T           paste via the pasteboard (input-method safe)
+  amcu key        --app S --key K --mod cmd  press a key combination
+  amcu menu-item  --app S --path "A > B"     invoke a menu command
+  amcu scroll     --app S --dy N             scroll
+  amcu drag       --app S --from X,Y --to X,Y
+  amcu screenshot --app S --out FILE         capture one window, occluded or not
+  amcu window     --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
 ```
 
 ### Menus, without opening them
@@ -125,7 +125,7 @@ items *and their keyboard equivalents* come back without pressing anything — s
 looking around a menu puts nothing on screen.
 
 ```console
-$ umbra menu --app com.example.app --filter export
+$ amcu menu --app com.example.app --filter export
 File > Export > PDF…	[cmd+shift+e]
 ```
 
@@ -135,7 +135,7 @@ all. Only items without a shortcut fall back to pressing the menu, which may
 briefly show it.
 
 ```console
-$ umbra menu-item --app com.example.app --path "File > Export > PDF…"
+$ amcu menu-item --app com.example.app --path "File > Export > PDF…"
 menu-item ok on File > Export > PDF… via shortcut:cmd+shift+e
 ```
 
@@ -145,21 +145,21 @@ Some windows draw their own interface and publish nothing useful. `snapshot`
 says so rather than returning a plausible-looking empty tree:
 
 ```console
-$ umbra snapshot --app com.example.canvas
+$ amcu snapshot --app com.example.canvas
 ...
 (this window exposes no actionable accessibility elements — it may render its
-own interface; try `umbra scan` for an optical fallback)
+own interface; try `amcu scan` for an optical fallback)
 ```
 
 `scan` recognises the text in the window and gives each piece an index in the
 **same space** accessibility elements use, so `click --element N` works either
 way. `--annotate out.png` writes a numbered overlay for a model to look at.
 
-This is deliberately *addressable vision*, not a vision agent: umbra reports
+This is deliberately *addressable vision*, not a vision agent: amcu reports
 text and where it is, and leaves interpretation to the model driving it. What
 that model lacks is not the ability to read a screenshot — it is a way to turn a
 point in that screenshot into an accurate click on a window nobody is looking
-at, and that is the part umbra already solved.
+at, and that is the part amcu already solved.
 
 The trade-off is stated in the output: recognised text carries no role, no
 state and no actions — a disabled button and a caption look identical. It also
@@ -173,7 +173,7 @@ the quietest way for automation to go wrong. Every typing command resolves the
 focus and reports it, and `--expect-focus` turns an assumption into a check:
 
 ```console
-$ umbra type --app com.example.app --text "hello" --expect-focus "Search"
+$ amcu type --app com.example.app --text "hello" --expect-focus "Search"
 error [element_not_found]: focus is on TextArea "Notes", which does not match 'Search'
   next: Focus the intended field before typing.
 ```
@@ -186,12 +186,12 @@ Add `--json` to any command for machine-readable output on stdout and structured
 
 ### Element indices are checked, not trusted
 
-Indices come from the most recent `snapshot` in the same `--session`. Before acting, umbra re-resolves the element by its recorded path and verifies the role and label still match. If the interface changed underneath, you get a `stale_snapshot` error instead of a click on whatever moved into that position.
+Indices come from the most recent `snapshot` in the same `--session`. Before acting, amcu re-resolves the element by its recorded path and verifies the role and label still match. If the interface changed underneath, you get a `stale_snapshot` error instead of a click on whatever moved into that position.
 
 ```console
-$ umbra click --element 4 --session inbox
+$ amcu click --element 4 --session inbox
 error [stale_snapshot]: element 4 changed label ("Archive" -> "Delete")
-  next: Re-run `umbra snapshot`; the interface changed after it was captured.
+  next: Re-run `amcu snapshot`; the interface changed after it was captured.
 ```
 
 ### Delivery modes
@@ -205,15 +205,15 @@ error [stale_snapshot]: element 4 changed label ("Archive" -> "Delete")
 Every failure carries a machine-readable code and concrete next steps, including when *not* to retry:
 
 ```console
-$ umbra click --app Gmail --at 100,200
+$ amcu click --app Gmail --at 100,200
 error [app_not_found]: no running application matched 'Gmail'
-  next: Run `umbra apps` to list running applications with their pid and bundle id.
+  next: Run `amcu apps` to list running applications with their pid and bundle id.
   next: Prefer a bundle id (com.apple.finder) or pid:1234 over a display name — display names are localized and differ per system language.
   next: If the target is a website, select the browser application that shows it; selectors address desktop applications, not web pages.
   next: Do not retry the same selector unchanged.
 ```
 
-## What umbra will not do
+## What amcu will not do
 
 - **Values that announce themselves as secrets are withheld.** A snapshot goes
   straight to a model and usually into a transcript. Any element whose role,
@@ -237,31 +237,31 @@ Stated plainly, because finding these out at runtime is worse:
 
 - **No Dock, and no system-owned dialogs.** Save and open panels, sheets and in-app alerts *are* reachable — they appear as windows of the host application, so `--window-index` addresses them normally. What is out of reach is dialogs owned by the system itself: permission prompts, password requests and anything else drawn by SecurityAgent. macOS deliberately refuses automation there, and it should.
 - **Optical fallback is text only.** `scan` finds text and where it is; it cannot tell a button from a caption, cannot see icons or unlabelled controls, and cannot report state. It is a fallback for windows that publish nothing, not a substitute for an accessibility tree.
-- **Window management is opt-in.** `umbra window` moves, resizes, raises and un-minimizes — but no other command will do any of that on your behalf to make its own job easier.
+- **Window management is opt-in.** `amcu window` moves, resizes, raises and un-minimizes — but no other command will do any of that on your behalf to make its own job easier.
 - **Lazily built menus read as empty.** Applications that populate a submenu only when it opens show that submenu with no items. `menu-item --press` can still reach them by opening the menu.
 - **Private API dependency.** Background *coordinate* clicks rely on `CGEventSetWindowLocation`. Semantic actions and `--mode foreground` do not. The self-check exists so you find out immediately rather than eventually.
 - **macOS only**, 14.0+.
 
 ## Prior art
 
-umbra exists because three other projects each solved part of this, and reading them was worth more than starting from scratch:
+amcu exists because three other projects each solved part of this, and reading them was worth more than starting from scratch:
 
 - **[stablyai/orca](https://github.com/stablyai/orca)** (MIT) — its `native/computer-use-macos` helper is the reference design for this space: AX tree as the primary channel, ScreenCaptureKit per-window capture, semantic actions first, and error messages written for the agent rather than the developer. The permission-scoped helper architecture is worth copying wherever you can.
 - **[steipete/Peekaboo](https://github.com/steipete/Peekaboo)** — documents the corner-click failure and works around it with an accessibility hit-test, using only public API. If you want zero private-API exposure, that approach is the sound one, at the cost of not being able to deliver a genuine positioned click.
-- **[andelf/axcli](https://github.com/andelf/axcli)** — demonstrates that the corner-click limitation *is* surmountable, via the `CGEventSetWindowLocation` route (in turn credited to [Lakr233/bgclick-rev-skill](https://github.com/Lakr233)). umbra's window-routing recipe follows this finding, and adds runtime verification of it.
+- **[andelf/axcli](https://github.com/andelf/axcli)** — demonstrates that the corner-click limitation *is* surmountable, via the `CGEventSetWindowLocation` route (in turn credited to [Lakr233/bgclick-rev-skill](https://github.com/Lakr233)). amcu's window-routing recipe follows this finding, and adds runtime verification of it.
 
 ## Development
 
 ```bash
 swift build            # build
-swift run umbra-tests  # run the test suite
+swift run amcu-tests  # run the test suite
 ```
 
 The suite covers pure logic — coordinate conversion in both directions, snapshot
 rendering and staleness contracts, session handling, menu shortcut spellings,
 and optical recognition against a rendered image (which needs no Screen
 Recording grant, so it runs in CI). The parts that need a real UI session are
-verified with `umbra doctor` on a machine with permissions granted.
+verified with `amcu doctor` on a machine with permissions granted.
 
 Tests are a plain executable rather than an XCTest or swift-testing target: both of those need a full Xcode install to *run*, and this tool is meant to stay verifiable on a machine with only the Command Line Tools. Tests that only some contributors can execute are tests that rot.
 

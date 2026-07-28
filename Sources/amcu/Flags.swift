@@ -1,5 +1,5 @@
 import Foundation
-import UmbraCore
+import AmcuCore
 
 /// Minimal flag parser. A dependency-free CLI keeps the whole tool auditable in
 /// one read, which matters more here than argument-parsing conveniences.
@@ -25,7 +25,7 @@ struct Flags {
                     booleans.insert(name)
                 } else {
                     guard index + 1 < arguments.count else {
-                        throw UmbraError(.invalidArgument, "flag --\(name) expects a value")
+                        throw AmcuError(.invalidArgument, "flag --\(name) expects a value")
                     }
                     values[name] = arguments[index + 1]
                     index += 1
@@ -42,7 +42,7 @@ struct Flags {
 
     func required(_ name: String, hint: String? = nil) throws -> String {
         guard let value = values[name] else {
-            throw UmbraError(.invalidArgument, "missing required flag --\(name)", nextSteps: [hint ?? "Run `umbra help` for this command's flags."])
+            throw AmcuError(.invalidArgument, "missing required flag --\(name)", nextSteps: [hint ?? "Run `amcu help` for this command's flags."])
         }
         return value
     }
@@ -50,7 +50,7 @@ struct Flags {
     func int(_ name: String) throws -> Int? {
         guard let raw = values[name] else { return nil }
         guard let value = Int(raw) else {
-            throw UmbraError(.invalidArgument, "--\(name) expects an integer, got '\(raw)'")
+            throw AmcuError(.invalidArgument, "--\(name) expects an integer, got '\(raw)'")
         }
         return value
     }
@@ -61,7 +61,7 @@ struct Flags {
     func int32(_ name: String, min lower: Int32 = .min, max upper: Int32 = .max) throws -> Int32? {
         guard let value = try int(name) else { return nil }
         guard let narrowed = NumericBounds.narrow(value, min: lower, max: upper) else {
-            throw UmbraError(.invalidArgument, "--\(name) must be between \(lower) and \(upper), got \(value)", nextSteps: [
+            throw AmcuError(.invalidArgument, "--\(name) must be between \(lower) and \(upper), got \(value)", nextSteps: [
                 "Scroll and drag distances are in points; values beyond a screen's size have no additional effect."
             ])
         }
@@ -78,7 +78,7 @@ struct Flags {
     func double(_ name: String) throws -> Double? {
         guard let raw = values[name] else { return nil }
         guard let value = Double(raw) else {
-            throw UmbraError(.invalidArgument, "--\(name) expects a number, got '\(raw)'")
+            throw AmcuError(.invalidArgument, "--\(name) expects a number, got '\(raw)'")
         }
         return value
     }
@@ -88,7 +88,7 @@ struct Flags {
         guard let raw = values[name] else { return nil }
         let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]) else {
-            throw UmbraError(.invalidArgument, "--\(name) expects 'x,y', got '\(raw)'")
+            throw AmcuError(.invalidArgument, "--\(name) expects 'x,y', got '\(raw)'")
         }
         return CGPoint(x: x, y: y)
     }

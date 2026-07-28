@@ -162,7 +162,7 @@ public struct Snapshot: Codable, Sendable {
         }
         if focusedIndex == nil { lines.append("(no element currently focused)") }
         if looksAccessibilityBlind {
-            lines.append("(this window exposes no actionable accessibility elements — it may render its own interface; try `umbra scan` for an optical fallback)")
+            lines.append("(this window exposes no actionable accessibility elements — it may render its own interface; try `amcu scan` for an optical fallback)")
         }
         if truncated { lines.append("(truncated: node budget reached — narrow the target with --window-id)") }
         if maxDepthReached { lines.append("(truncated: depth budget reached)") }
@@ -181,7 +181,7 @@ public struct Snapshot: Codable, Sendable {
     /// True when the window publishes a hierarchy but nothing in it can be
     /// acted on — the signature of a canvas-rendered or otherwise
     /// accessibility-opaque interface. Reporting this is the difference between
-    /// "this window is empty" and "umbra cannot see into this window".
+    /// "this window is empty" and "amcu cannot see into this window".
     public var looksAccessibilityBlind: Bool {
         guard nodes.contains(where: { $0.origin == .accessibility }) else { return false }
         let actionable = nodes.filter { node in
@@ -350,7 +350,7 @@ public enum SnapshotBuilder {
         let nodes = marks.enumerated().map { index, mark in
             SnapshotNode(
                 index: index,
-                role: "UmbraText",
+                role: "AmcuText",
                 subrole: nil,
                 identifier: nil,
                 label: mark.text,
@@ -411,8 +411,8 @@ public enum SnapshotBuilder {
     /// promise gets checked instead of silently clicking the wrong control.
     public static func resolve(node: SnapshotNode, windowElement: AXUIElement) throws -> AXUIElement {
         guard node.origin == .accessibility else {
-            throw UmbraError(.unsupported, "element \(node.index) came from an optical scan and has no accessibility element behind it", nextSteps: [
-                "Optically located targets can only be clicked by coordinate; that is what `umbra click --element` does for them automatically.",
+            throw AmcuError(.unsupported, "element \(node.index) came from an optical scan and has no accessibility element behind it", nextSteps: [
+                "Optically located targets can only be clicked by coordinate; that is what `amcu click --element` does for them automatically.",
                 "This error means something asked for a semantic action on recognised text."
             ])
         }
@@ -420,8 +420,8 @@ public enum SnapshotBuilder {
         for step in node.path {
             let children = AX.children(current)
             guard step < children.count else {
-                throw UmbraError(.staleSnapshot, "element \(node.index) no longer exists at its recorded position", nextSteps: [
-                    "Re-run `umbra snapshot` and use the new indices.",
+                throw AmcuError(.staleSnapshot, "element \(node.index) no longer exists at its recorded position", nextSteps: [
+                    "Re-run `amcu snapshot` and use the new indices.",
                     "Snapshot indices are only valid until the interface changes."
                 ])
             }
@@ -429,22 +429,22 @@ public enum SnapshotBuilder {
         }
         let role = AX.string(current, kAXRoleAttribute as String) ?? "AXUnknown"
         guard role == node.role else {
-            throw UmbraError(.staleSnapshot, "element \(node.index) changed role (\(node.role) -> \(role))", nextSteps: [
-                "Re-run `umbra snapshot`; the interface changed after it was captured."
+            throw AmcuError(.staleSnapshot, "element \(node.index) changed role (\(node.role) -> \(role))", nextSteps: [
+                "Re-run `amcu snapshot`; the interface changed after it was captured."
             ])
         }
         let subrole = AX.string(current, kAXSubroleAttribute as String)
         guard subrole == node.subrole else {
-            throw UmbraError(.staleSnapshot, "element \(node.index) changed subrole (\(node.subrole ?? "none") -> \(subrole ?? "none"))", nextSteps: [
-                "Re-run `umbra snapshot`; the interface changed after it was captured."
+            throw AmcuError(.staleSnapshot, "element \(node.index) changed subrole (\(node.subrole ?? "none") -> \(subrole ?? "none"))", nextSteps: [
+                "Re-run `amcu snapshot`; the interface changed after it was captured."
             ])
         }
         // An identifier is the strongest signal available, so when the
         // application publishes one it decides the question on its own.
         let identifier = AX.string(current, "AXIdentifier")
         guard identifier == node.identifier else {
-            throw UmbraError(.staleSnapshot, "element \(node.index) changed identifier (\(node.identifier ?? "none") -> \(identifier ?? "none"))", nextSteps: [
-                "Re-run `umbra snapshot`; the interface changed after it was captured."
+            throw AmcuError(.staleSnapshot, "element \(node.index) changed identifier (\(node.identifier ?? "none") -> \(identifier ?? "none"))", nextSteps: [
+                "Re-run `amcu snapshot`; the interface changed after it was captured."
             ])
         }
         // Compared as optionals: a label appearing or disappearing is as much a
@@ -455,8 +455,8 @@ public enum SnapshotBuilder {
         if node.label != currentLabel {
             let recorded = node.label.map { "\"\($0)\"" } ?? "no label"
             let live = currentLabel.map { "\"\($0)\"" } ?? "no label"
-            throw UmbraError(.staleSnapshot, "element \(node.index) changed label (\(recorded) -> \(live))", nextSteps: [
-                "Re-run `umbra snapshot`; the interface changed after it was captured."
+            throw AmcuError(.staleSnapshot, "element \(node.index) changed label (\(recorded) -> \(live))", nextSteps: [
+                "Re-run `amcu snapshot`; the interface changed after it was captured."
             ])
         }
         return current

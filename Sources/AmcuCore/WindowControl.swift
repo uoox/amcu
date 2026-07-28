@@ -6,7 +6,7 @@ import Foundation
 /// Window manipulation, kept behind its own command on purpose.
 ///
 /// Raising, moving or resizing a window is exactly the kind of visible
-/// disturbance the rest of umbra is built to avoid, so it is never something
+/// disturbance the rest of amcu is built to avoid, so it is never something
 /// another command does on your behalf to make its own job easier. If a window
 /// needs to move, the caller says so.
 public enum WindowControl {
@@ -16,33 +16,33 @@ public enum WindowControl {
 
     public static func setPosition(_ element: AXUIElement, to point: CGPoint) throws {
         guard AX.isSettable(element, kAXPositionAttribute as String) else {
-            throw UmbraError(.unsupported, "this window's position is not settable", nextSteps: [
+            throw AmcuError(.unsupported, "this window's position is not settable", nextSteps: [
                 "Some windows are fixed by their application; nothing can move them."
             ])
         }
         var value = point
         guard let axValue = AXValueCreate(.cgPoint, &value) else {
-            throw UmbraError(.unsupported, "could not encode a position value")
+            throw AmcuError(.unsupported, "could not encode a position value")
         }
         try AX.setValue(element, kAXPositionAttribute as String, axValue)
     }
 
     public static func setSize(_ element: AXUIElement, to size: CGSize) throws {
         guard AX.isSettable(element, kAXSizeAttribute as String) else {
-            throw UmbraError(.unsupported, "this window's size is not settable", nextSteps: [
+            throw AmcuError(.unsupported, "this window's size is not settable", nextSteps: [
                 "Fixed-size windows, panels and sheets usually refuse resizing."
             ])
         }
         var value = size
         guard let axValue = AXValueCreate(.cgSize, &value) else {
-            throw UmbraError(.unsupported, "could not encode a size value")
+            throw AmcuError(.unsupported, "could not encode a size value")
         }
         try AX.setValue(element, kAXSizeAttribute as String, axValue)
     }
 
     public static func setMinimized(_ element: AXUIElement, _ minimized: Bool) throws {
         guard AX.isSettable(element, kAXMinimizedAttribute as String) else {
-            throw UmbraError(.unsupported, "this window cannot be minimized or restored", nextSteps: [
+            throw AmcuError(.unsupported, "this window cannot be minimized or restored", nextSteps: [
                 "Panels and sheets have no minimize state."
             ])
         }
@@ -98,13 +98,13 @@ public enum Focus {
     public static func require(_ expectation: String, of app: NSRunningApplication) throws -> FocusInfo {
         let focus = current(of: app)
         guard !focus.isEmpty else {
-            throw UmbraError(.elementNotFound, "nothing is focused in '\(app.localizedName ?? "the target")', so typed input has nowhere to go", nextSteps: [
-                "Focus a field first: `umbra click --element N` on it, or `umbra action --element N --action AXFocus`.",
-                "Run `umbra focus --app <selector>` to see the current focus."
+            throw AmcuError(.elementNotFound, "nothing is focused in '\(app.localizedName ?? "the target")', so typed input has nowhere to go", nextSteps: [
+                "Focus a field first: `amcu click --element N` on it, or `amcu action --element N --action AXFocus`.",
+                "Run `amcu focus --app <selector>` to see the current focus."
             ])
         }
         guard focus.matches(expectation) else {
-            throw UmbraError(.elementNotFound, "focus is on \(focus.summary), which does not match '\(expectation)'", nextSteps: [
+            throw AmcuError(.elementNotFound, "focus is on \(focus.summary), which does not match '\(expectation)'", nextSteps: [
                 "Focus the intended field before typing.",
                 "Drop --expect-focus to type into whatever is focused."
             ])

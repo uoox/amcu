@@ -17,7 +17,7 @@ jobs:
       # The suite is a plain executable, so it needs no Xcode test host and no
       # Accessibility grant — it covers the pure logic (coordinate conversion,
       # snapshot rendering, session handling, error contracts). The parts that
-      # require a real UI session are verified by `umbra doctor` on a machine
+      # require a real UI session are verified by `amcu doctor` on a machine
       # with permissions granted.
       - name: Test
-        run: swift run -c release umbra-tests
+        run: swift run -c release amcu-tests

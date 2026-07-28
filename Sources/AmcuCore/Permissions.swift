@@ -16,7 +16,7 @@ public enum Permissions {
             granted: trusted,
             detail: trusted
                 ? "reading and acting on user interfaces is permitted"
-                : "System Settings > Privacy & Security > Accessibility — add and enable the application running umbra"
+                : "System Settings > Privacy & Security > Accessibility — add and enable the application running amcu"
         )
     }
 
@@ -27,7 +27,7 @@ public enum Permissions {
             granted: granted,
             detail: granted
                 ? "window capture is permitted"
-                : "System Settings > Privacy & Security > Screen Recording — required only for `umbra screenshot`"
+                : "System Settings > Privacy & Security > Screen Recording — required only for `amcu screenshot`"
         )
     }
 
@@ -43,6 +43,6 @@ public enum Permissions {
     }
 
     public static func requireAccessibility() throws {
-        guard AXIsProcessTrusted() else { throw UmbraError.notTrusted() }
+        guard AXIsProcessTrusted() else { throw AmcuError.notTrusted() }
     }
 }

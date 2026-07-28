@@ -20,10 +20,10 @@ public struct VisionMark: Sendable {
 /// Optical fallback for windows that publish no usable accessibility tree.
 ///
 /// This deliberately stops at *addressable* vision: it returns text and where
-/// that text is, and leaves interpretation to the caller's model. umbra does
+/// that text is, and leaves interpretation to the caller's model. amcu does
 /// not embed a vision model of its own — the agent driving it already has one,
 /// and what that agent lacks is a way to turn a point in a screenshot into an
-/// accurate click on a window it is not looking at. That part umbra does have.
+/// accurate click on a window it is not looking at. That part amcu does have.
 ///
 /// The trade-off against the accessibility tree is real and worth stating:
 /// recognised text carries no role, no state, and no actions. A disabled button
@@ -45,16 +45,16 @@ public enum VisionScan {
         do {
             try handler.perform([request])
         } catch {
-            throw UmbraError(.captureFailure, "text recognition failed: \(error.localizedDescription)", nextSteps: [
+            throw AmcuError(.captureFailure, "text recognition failed: \(error.localizedDescription)", nextSteps: [
                 "Confirm the window is still on screen and re-run.",
-                "If this keeps happening, capture with `umbra screenshot` and inspect the image."
+                "If this keeps happening, capture with `amcu screenshot` and inspect the image."
             ])
         }
 
         guard let observations = request.results else { return [] }
 
         // Vision reports normalized coordinates with a bottom-left origin; the
-        // rest of umbra speaks window-relative points with a top-left origin.
+        // rest of amcu speaks window-relative points with a top-left origin.
         let scaleX = windowSize.width
         let scaleY = windowSize.height
 

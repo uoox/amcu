@@ -1,5 +1,5 @@
 import Foundation
-import UmbraCore
+import AmcuCore
 
 /// Pure-logic coverage of the text-replacement path. The AX write/read-back
 /// round trip needs a live application and would mutate real UI state, so it

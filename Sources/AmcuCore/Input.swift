@@ -52,7 +52,7 @@ public enum PointerInput {
         routing: (windowID: CGWindowID, local: CGPoint)?
     ) throws -> CGEvent {
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: global, mouseButton: button) else {
-            throw UmbraError(.unsupported, "could not construct mouse event", nextSteps: ["Retry; if this persists the process may lack Accessibility rights."])
+            throw AmcuError(.unsupported, "could not construct mouse event", nextSteps: ["Retry; if this persists the process may lack Accessibility rights."])
         }
         event.setIntegerValueField(.mouseEventClickState, value: clickState)
         if let routing {
@@ -103,13 +103,13 @@ public enum PointerInput {
         var routing: (windowID: CGWindowID, local: CGPoint)?
         if request.mode == .background {
             guard supportsWindowRouting else {
-                throw UmbraError(.unsupported, "window-routed events are unavailable on this system", nextSteps: [
-                    "Run `umbra doctor` for details.",
-                    "Use --mode foreground, or address the element semantically with `umbra click --element N`."
+                throw AmcuError(.unsupported, "window-routed events are unavailable on this system", nextSteps: [
+                    "Run `amcu doctor` for details.",
+                    "Use --mode foreground, or address the element semantically with `amcu click --element N`."
                 ])
             }
             guard let windowID = request.windowID, let frame = request.windowFrame else {
-                throw UmbraError(.invalidArgument, "background clicks need a resolvable target window", nextSteps: [
+                throw AmcuError(.invalidArgument, "background clicks need a resolvable target window", nextSteps: [
                     "Pass --window-id, or use --mode foreground."
                 ])
             }
@@ -143,13 +143,13 @@ public enum PointerInput {
             wheel2: deltaX,
             wheel3: 0
         ) else {
-            throw UmbraError(.unsupported, "could not construct scroll event")
+            throw AmcuError(.unsupported, "could not construct scroll event")
         }
         event.location = global
         if mode == .background {
             guard supportsWindowRouting, let windowID, let windowFrame else {
-                throw UmbraError(.unsupported, "background scrolling needs window routing and a target window", nextSteps: [
-                    "Run `umbra doctor`, pass --window-id, or use --mode foreground."
+                throw AmcuError(.unsupported, "background scrolling needs window routing and a target window", nextSteps: [
+                    "Run `amcu doctor`, pass --window-id, or use --mode foreground."
                 ])
             }
             event.setIntegerValueField(kMouseEventWindowUnderMousePointer, value: Int64(windowID))
@@ -172,8 +172,8 @@ public enum PointerInput {
         func routingFor(_ point: CGPoint) throws -> (windowID: CGWindowID, local: CGPoint)? {
             guard mode == .background else { return nil }
             guard supportsWindowRouting, let windowID, let windowFrame else {
-                throw UmbraError(.unsupported, "background dragging needs window routing and a target window", nextSteps: [
-                    "Run `umbra doctor`, pass --window-id, or use --mode foreground."
+                throw AmcuError(.unsupported, "background dragging needs window routing and a target window", nextSteps: [
+                    "Run `amcu doctor`, pass --window-id, or use --mode foreground."
                 ])
             }
             return (windowID, windowLocal(global: point, windowFrame: windowFrame))
@@ -213,7 +213,7 @@ public enum KeyboardInput {
         for chunk in TextChunker.split(text, by: 16) {
             guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
-                throw UmbraError(.unsupported, "could not construct keyboard event")
+                throw AmcuError(.unsupported, "could not construct keyboard event")
             }
             let utf16 = Array(chunk.utf16)
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
@@ -226,15 +226,15 @@ public enum KeyboardInput {
 
     public static func press(key: String, modifiers: [String], pid: pid_t, mode: DeliveryMode) throws {
         guard let code = KeyCodes.code(for: key) else {
-            throw UmbraError(.invalidArgument, "unknown key '\(key)'", nextSteps: [
+            throw AmcuError(.invalidArgument, "unknown key '\(key)'", nextSteps: [
                 "Known keys: \(KeyCodes.knownNames.joined(separator: ", "))",
-                "For literal characters use `umbra type` instead."
+                "For literal characters use `amcu type` instead."
             ])
         }
         var flags: CGEventFlags = []
         for modifier in modifiers {
             guard let flag = KeyCodes.modifier(for: modifier) else {
-                throw UmbraError(.invalidArgument, "unknown modifier '\(modifier)'", nextSteps: [
+                throw AmcuError(.invalidArgument, "unknown modifier '\(modifier)'", nextSteps: [
                     "Known modifiers: cmd, shift, alt (option), ctrl, fn."
                 ])
             }
@@ -242,7 +242,7 @@ public enum KeyboardInput {
         }
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
               let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
-            throw UmbraError(.unsupported, "could not construct keyboard event")
+            throw AmcuError(.unsupported, "could not construct keyboard event")
         }
         down.flags = flags
         up.flags = flags

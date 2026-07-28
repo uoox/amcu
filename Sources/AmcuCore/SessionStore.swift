@@ -7,12 +7,12 @@ public enum SessionStore {
     public static var directory: URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("umbra", isDirectory: true)
+        return base.appendingPathComponent("amcu", isDirectory: true)
     }
 
     public static func url(for session: String) throws -> URL {
         guard !session.isEmpty, !session.contains("/"), !session.contains("..") else {
-            throw UmbraError(.invalidArgument, "invalid session name '\(session)'", nextSteps: ["Use a plain name such as `--session default`."])
+            throw AmcuError(.invalidArgument, "invalid session name '\(session)'", nextSteps: ["Use a plain name such as `--session default`."])
         }
         return directory.appendingPathComponent("session-\(session).json")
     }
@@ -28,8 +28,8 @@ public enum SessionStore {
     public static func load(session: String) throws -> Snapshot {
         let location = try url(for: session)
         guard let data = FileManager.default.contents(atPath: location.path) else {
-            throw UmbraError(.staleSnapshot, "no snapshot recorded for session '\(session)'", nextSteps: [
-                "Run `umbra snapshot --app <selector>` first; element indices come from a snapshot."
+            throw AmcuError(.staleSnapshot, "no snapshot recorded for session '\(session)'", nextSteps: [
+                "Run `amcu snapshot --app <selector>` first; element indices come from a snapshot."
             ])
         }
         let decoder = JSONDecoder()
@@ -40,8 +40,8 @@ public enum SessionStore {
     public static func node(index: Int, session: String) throws -> (Snapshot, SnapshotNode) {
         let snapshot = try load(session: session)
         guard index >= 0, index < snapshot.nodes.count else {
-            throw UmbraError(.elementNotFound, "element \(index) is outside the recorded snapshot (0..\(snapshot.nodes.count - 1))", nextSteps: [
-                "Re-run `umbra snapshot` and read the indices from its output."
+            throw AmcuError(.elementNotFound, "element \(index) is outside the recorded snapshot (0..\(snapshot.nodes.count - 1))", nextSteps: [
+                "Re-run `amcu snapshot` and read the indices from its output."
             ])
         }
         return (snapshot, snapshot.nodes[index])

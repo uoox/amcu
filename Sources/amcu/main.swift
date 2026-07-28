@@ -1,13 +1,13 @@
 import Foundation
-import UmbraCore
+import AmcuCore
 
 let version = "0.1.0"
 
 let helpText = """
-umbra \(version) — read and drive macOS applications without taking the user's screen
+amcu \(version) — read and drive macOS applications without taking the user's screen
 
 USAGE
-  umbra <command> [flags]
+  amcu <command> [flags]
 
 INSPECT
   apps                                  list running applications (pid, bundle id, name)
@@ -79,7 +79,7 @@ TEXT INPUT
 
 NOTES
   Element indices come from the most recent snapshot in the same session and are
-  re-verified before use; if the interface changed, umbra reports a stale
+  re-verified before use; if the interface changed, amcu reports a stale
   snapshot instead of clicking the wrong control.
 """
 
@@ -125,7 +125,7 @@ do {
     case "help": print(helpText)
     case "version": print(version)
     default:
-        Output.fail(UmbraError(.invalidArgument, "unknown command '\(command)'", nextSteps: ["Run `umbra help` for the command list."]))
+        Output.fail(AmcuError(.invalidArgument, "unknown command '\(command)'", nextSteps: ["Run `amcu help` for the command list."]))
     }
 } catch {
     Output.fail(error)

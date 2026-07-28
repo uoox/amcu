@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import UmbraCore
+import AmcuCore
 
 /// Tree-shaping policy tests. Defined here and wired into main.swift by the
 /// runner, so this file stays additive while other work touches main.swift.

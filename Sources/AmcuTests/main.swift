@@ -2,14 +2,14 @@ import AppKit
 import CoreGraphics
 import CoreText
 import Foundation
-import UmbraCore
+import AmcuCore
 
 /// A self-contained test runner.
 ///
 /// XCTest and swift-testing both need a full Xcode installation to *run*, and
-/// umbra's whole premise is that it works on a plain macOS box with the Command
+/// amcu's whole premise is that it works on a plain macOS box with the Command
 /// Line Tools. Tests that only a subset of users can execute are tests that rot,
-/// so the harness is thirty lines of local code and `swift run umbra-tests`
+/// so the harness is thirty lines of local code and `swift run amcu-tests`
 /// works anywhere the tool itself builds.
 final class Harness {
     private var failures: [String] = []
@@ -180,7 +180,7 @@ do {
     do {
         _ = try SessionStore.node(index: 7, session: name)
         t.expect(false, "an out-of-range index is refused")
-    } catch let error as UmbraError {
+    } catch let error as AmcuError {
         t.expectEqual(error.code, .elementNotFound, "an out-of-range index is refused with a specific code")
         t.expect(!error.nextSteps.isEmpty, "an out-of-range index comes with guidance")
     } catch {
@@ -252,7 +252,7 @@ do {
             t.expect(found != nil, "the recognised text matches what was drawn")
             if let found {
                 // Vision reports a bottom-left origin; marks must come back in
-                // the top-left space the rest of umbra clicks in.
+                // the top-left space the rest of amcu clicks in.
                 t.expect(found.frame.minY < size.height / 2, "a mark drawn near the top reports a small y, not a flipped one")
                 t.expect(found.frame.minX > 10 && found.frame.minX < 200, "the mark's x lands near where the text was drawn")
                 t.expect(found.frame.width > 0 && found.frame.height > 0, "the mark has a usable size")
@@ -296,7 +296,7 @@ do {
                      enabled: true, focused: false, frame: nil, actions: [], depth: 1, path: [0])
     ])
     t.expect(canvas.looksAccessibilityBlind, "a window offering only AXRaise is reported as blind")
-    t.expect(canvas.renderText().contains("umbra scan"), "a blind window points at the optical fallback")
+    t.expect(canvas.renderText().contains("amcu scan"), "a blind window points at the optical fallback")
 }
 
 do {
@@ -309,7 +309,7 @@ do {
     do {
         _ = try Capture.window(id: missing)
         t.expect(false, "capturing a non-existent window should not succeed")
-    } catch let error as UmbraError {
+    } catch let error as AmcuError {
         t.expect(
             error.code == .windowNotFound || error.code == .captureFailure,
             "a capture attempt reports a structured error instead of aborting the process"
@@ -369,11 +369,11 @@ do {
 t.suite("errors")
 
 do {
-    let error = UmbraError.appNotFound("Finder")
+    let error = AmcuError.appNotFound("Finder")
     t.expectEqual(error.code, .appNotFound, "a missing application reports app_not_found")
     // The guidance exists so an agent stops retrying the same failing call.
     t.expect(error.nextSteps.contains { $0.contains("Do not retry") }, "a missing application tells the caller not to retry unchanged")
-    t.expect(UmbraError(.timeout, "took too long").description.hasPrefix("timeout:"), "descriptions lead with the machine-readable code")
+    t.expect(AmcuError(.timeout, "took too long").description.hasPrefix("timeout:"), "descriptions lead with the machine-readable code")
 }
 
 // MARK: - Self-check verdicts

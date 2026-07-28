@@ -4,7 +4,7 @@ import Foundation
 /// Chromium (and by extension every Electron app) treats its accessibility
 /// tree as expensive to maintain and only builds it once something asks for
 /// it. Unlike VoiceOver, a plain AXUIElement client is not one of the signals
-/// it listens for, so umbra would otherwise see an empty tree or a lone app
+/// it listens for, so amcu would otherwise see an empty tree or a lone app
 /// root. Setting `AXManualAccessibility` (Chromium's documented opt-in) and
 /// `AXEnhancedUserInterface` (the older assistive-client hint it also honors)
 /// on the application element flips that switch.

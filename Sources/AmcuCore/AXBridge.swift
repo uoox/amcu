@@ -103,8 +103,8 @@ public enum AX {
     public static func perform(_ element: AXUIElement, _ action: String) throws {
         let status = AXUIElementPerformAction(element, action as CFString)
         guard status == .success else {
-            throw UmbraError(.accessibilityFailure, "action '\(action)' failed with AXError \(status.rawValue)", nextSteps: [
-                "Re-run `umbra snapshot` — the element may have moved or been replaced.",
+            throw AmcuError(.accessibilityFailure, "action '\(action)' failed with AXError \(status.rawValue)", nextSteps: [
+                "Re-run `amcu snapshot` — the element may have moved or been replaced.",
                 "Check the element's Actions list in the snapshot; only listed actions are supported."
             ])
         }
@@ -113,9 +113,9 @@ public enum AX {
     public static func setValue(_ element: AXUIElement, _ name: String, _ value: CFTypeRef) throws {
         let status = AXUIElementSetAttributeValue(element, name as CFString, value)
         guard status == .success else {
-            throw UmbraError(.accessibilityFailure, "setting '\(name)' failed with AXError \(status.rawValue)", nextSteps: [
+            throw AmcuError(.accessibilityFailure, "setting '\(name)' failed with AXError \(status.rawValue)", nextSteps: [
                 "Confirm the attribute is settable — the snapshot marks read-only elements.",
-                "For text fields, focus the element first or use `umbra type` instead."
+                "For text fields, focus the element first or use `amcu type` instead."
             ])
         }
     }

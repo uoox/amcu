@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 ///
 /// A window filter is used rather than a display filter so that a window which
 /// is occluded, or belongs to an application that is not frontmost, still
-/// captures correctly — the same property that makes the rest of umbra work
+/// captures correctly — the same property that makes the rest of amcu work
 /// without disturbing the user.
 public enum Capture {
     private final class Box<T>: @unchecked Sendable {
@@ -20,7 +20,7 @@ public enum Capture {
     /// ScreenCaptureKit needs the process to hold a window-server connection.
     /// A plain command-line tool has none until AppKit is initialized, and
     /// without it CoreGraphics aborts the process outright rather than
-    /// returning an error. Initializing as an accessory keeps umbra out of the
+    /// returning an error. Initializing as an accessory keeps amcu out of the
     /// Dock and out of the user's way.
     private static let windowServerReady: Bool = {
         let app = NSApplication.shared
@@ -43,8 +43,8 @@ public enum Capture {
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
                 guard let target = content.windows.first(where: { $0.windowID == windowID }) else {
-                    throw UmbraError(.windowNotFound, "window \(windowID) is not available for capture", nextSteps: [
-                        "Run `umbra windows --app <selector>` to list capturable windows.",
+                    throw AmcuError(.windowNotFound, "window \(windowID) is not available for capture", nextSteps: [
+                        "Run `amcu windows --app <selector>` to list capturable windows.",
                         "Minimised windows cannot be captured; restore the window first."
                     ])
                 }
@@ -57,12 +57,12 @@ public enum Capture {
                 configuration.captureResolution = .best
                 let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
                 box.value = .success(image)
-            } catch let error as UmbraError {
+            } catch let error as AmcuError {
                 box.value = .failure(error)
             } catch {
-                box.value = .failure(UmbraError(.captureFailure, "screen capture failed: \(error.localizedDescription)", nextSteps: [
-                    "Grant Screen Recording to the application running umbra in System Settings > Privacy & Security > Screen Recording.",
-                    "Run `umbra doctor` to re-check permissions."
+                box.value = .failure(AmcuError(.captureFailure, "screen capture failed: \(error.localizedDescription)", nextSteps: [
+                    "Grant Screen Recording to the application running amcu in System Settings > Privacy & Security > Screen Recording.",
+                    "Run `amcu doctor` to re-check permissions."
                 ]))
             }
             semaphore.signal()
@@ -70,29 +70,29 @@ public enum Capture {
 
         semaphore.wait()
         guard let result = box.value else {
-            throw UmbraError(.captureFailure, "screen capture produced no result")
+            throw AmcuError(.captureFailure, "screen capture produced no result")
         }
         return try result.get()
     }
 
     public static func writePNG(_ image: CGImage, to url: URL) throws {
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-            throw UmbraError(.captureFailure, "could not create image file at \(url.path)")
+            throw AmcuError(.captureFailure, "could not create image file at \(url.path)")
         }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else {
-            throw UmbraError(.captureFailure, "could not write PNG to \(url.path)")
+            throw AmcuError(.captureFailure, "could not write PNG to \(url.path)")
         }
     }
 
     public static func pngData(_ image: CGImage) throws -> Data {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
-            throw UmbraError(.captureFailure, "could not encode PNG")
+            throw AmcuError(.captureFailure, "could not encode PNG")
         }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else {
-            throw UmbraError(.captureFailure, "could not encode PNG")
+            throw AmcuError(.captureFailure, "could not encode PNG")
         }
         return data as Data
     }

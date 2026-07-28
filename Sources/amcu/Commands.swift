@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
-import UmbraCore
+import AmcuCore
 
 enum Commands {
     // MARK: - Shared resolution
@@ -15,7 +15,7 @@ enum Commands {
     }
 
     static func resolveTarget(_ flags: Flags) throws -> ResolvedTarget {
-        let selector = try flags.required("app", hint: "Pass --app with a bundle id, pid:N, or application name. `umbra apps` lists them.")
+        let selector = try flags.required("app", hint: "Pass --app with a bundle id, pid:N, or application name. `amcu apps` lists them.")
         let app = try Target.resolveApp(selector)
         try SensitiveApps.guardAgainst(app, allowed: flags.has("allow-sensitive"))
         let windowID = try flags.int("window-id").map { CGWindowID($0) }
@@ -62,15 +62,15 @@ enum Commands {
             guard requiresRouting else { return .background }
             let check = SelfCheck.ensure()
             guard check.usable else {
-                throw UmbraError(.unsupported, "background pointer delivery is not usable on this system: \(check.summary)", nextSteps: [
-                    "Run `umbra doctor` for the full verdict.",
+                throw AmcuError(.unsupported, "background pointer delivery is not usable on this system: \(check.summary)", nextSteps: [
+                    "Run `amcu doctor` for the full verdict.",
                     "Re-run with --mode foreground to accept moving the cursor and taking focus.",
-                    "Or address the element semantically: `umbra snapshot` then `umbra click --element N`."
+                    "Or address the element semantically: `amcu snapshot` then `amcu click --element N`."
                 ])
             }
             return .background
         default:
-            throw UmbraError(.invalidArgument, "unknown --mode '\(raw)'", nextSteps: ["Use one of: auto, background, foreground."])
+            throw AmcuError(.invalidArgument, "unknown --mode '\(raw)'", nextSteps: ["Use one of: auto, background, foreground."])
         }
     }
 
@@ -82,7 +82,7 @@ enum Commands {
     static func assertForegroundIsSafe(_ mode: DeliveryMode, app: NSRunningApplication) throws {
         guard mode == .foreground, !app.isActive else { return }
         let frontmost = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another application"
-        throw UmbraError(.unsupported, "--mode foreground would deliver to '\(frontmost)', not '\(app.localizedName ?? "the target")'", nextSteps: [
+        throw AmcuError(.unsupported, "--mode foreground would deliver to '\(frontmost)', not '\(app.localizedName ?? "the target")'", nextSteps: [
             "Use --mode background so the event is routed to the target window regardless of what is frontmost.",
             "Or bring the target to the front yourself first, if taking focus is acceptable."
         ])
@@ -155,7 +155,7 @@ enum Commands {
         case "right": button = .right
         case "middle": button = .center
         case let other:
-            throw UmbraError(.invalidArgument, "unknown --button '\(other)'", nextSteps: ["Use one of: left, right, middle."])
+            throw AmcuError(.invalidArgument, "unknown --button '\(other)'", nextSteps: ["Use one of: left, right, middle."])
         }
         let clickCount = try flags.boundedInt("count", min: 1, max: 10) ?? 1
 
@@ -176,13 +176,13 @@ enum Commands {
                 let maxAge = try flags.double("max-age") ?? 60
                 let age = Date().timeIntervalSince(snapshot.capturedAt)
                 guard age <= maxAge else {
-                    throw UmbraError(.staleSnapshot, "this optical scan is \(Int(age))s old (limit \(Int(maxAge))s) and cannot be re-verified", nextSteps: [
-                        "Re-run `umbra scan` and use the new indices.",
+                    throw AmcuError(.staleSnapshot, "this optical scan is \(Int(age))s old (limit \(Int(maxAge))s) and cannot be re-verified", nextSteps: [
+                        "Re-run `amcu scan` and use the new indices.",
                         "Raise the bound with --max-age SECONDS if the window is known to be static."
                     ])
                 }
                 guard let frame = node.frame?.cgRect else {
-                    throw UmbraError(.elementNotFound, "recognised text \(elementIndex) has no recorded position")
+                    throw AmcuError(.elementNotFound, "recognised text \(elementIndex) has no recorded position")
                 }
                 let mode = try deliveryMode(flags, requiresRouting: true)
                 try assertForegroundIsSafe(mode, app: app)
@@ -221,9 +221,9 @@ enum Commands {
                 dx: window.info.frame.cgRect.minX,
                 dy: window.info.frame.cgRect.minY
             ) else {
-                throw UmbraError(.unsupported, "element \(elementIndex) advertises no '\(action)' action and has no frame to click", nextSteps: [
-                    "Inspect the element's actions in `umbra snapshot` output.",
-                    "Try `umbra action --element \(elementIndex) --action <name>` with a listed action."
+                throw AmcuError(.unsupported, "element \(elementIndex) advertises no '\(action)' action and has no frame to click", nextSteps: [
+                    "Inspect the element's actions in `amcu snapshot` output.",
+                    "Try `amcu action --element \(elementIndex) --action <name>` with a listed action."
                 ])
             }
             let mode = try deliveryMode(flags, requiresRouting: true)
@@ -250,8 +250,8 @@ enum Commands {
 
         // Coordinate addressing.
         guard let point = try flags.point("at") else {
-            throw UmbraError(.invalidArgument, "click needs either --element N or --at x,y", nextSteps: [
-                "Run `umbra snapshot --app <selector>` and click by element index — it is stable and needs no coordinates.",
+            throw AmcuError(.invalidArgument, "click needs either --element N or --at x,y", nextSteps: [
+                "Run `amcu snapshot --app <selector>` and click by element index — it is stable and needs no coordinates.",
                 "Coordinates are window-relative unless --screen is passed."
             ])
         }
@@ -275,9 +275,9 @@ enum Commands {
     static func action(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         guard let elementIndex = try flags.int("element") else {
-            throw UmbraError(.invalidArgument, "--element is required", nextSteps: ["Run `umbra snapshot` first to get element indices."])
+            throw AmcuError(.invalidArgument, "--element is required", nextSteps: ["Run `amcu snapshot` first to get element indices."])
         }
-        let name = try flags.required("action", hint: "Pass an action listed for that element in `umbra snapshot`.")
+        let name = try flags.required("action", hint: "Pass an action listed for that element in `amcu snapshot`.")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
         let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
         let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
@@ -290,7 +290,7 @@ enum Commands {
     static func setValue(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         guard let elementIndex = try flags.int("element") else {
-            throw UmbraError(.invalidArgument, "--element is required", nextSteps: ["Run `umbra snapshot` first to get element indices."])
+            throw AmcuError(.invalidArgument, "--element is required", nextSteps: ["Run `amcu snapshot` first to get element indices."])
         }
         let value = try flags.required("value")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
@@ -298,8 +298,8 @@ enum Commands {
         let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         guard AX.isSettable(element, kAXValueAttribute as String) else {
-            throw UmbraError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
-                "Use `umbra type --app <selector> --text ...` after focusing the field.",
+            throw AmcuError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
+                "Use `amcu type --app <selector> --text ...` after focusing the field.",
                 "Check the snapshot: read-only elements cannot be set."
             ])
         }
@@ -322,7 +322,7 @@ enum Commands {
     static func replace(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         guard let elementIndex = try flags.int("element") else {
-            throw UmbraError(.invalidArgument, "--element is required", nextSteps: ["Run `umbra snapshot` first to get element indices."])
+            throw AmcuError(.invalidArgument, "--element is required", nextSteps: ["Run `amcu snapshot` first to get element indices."])
         }
         let text = try flags.required("text")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
@@ -330,8 +330,8 @@ enum Commands {
         let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         guard AX.isSettable(element, kAXValueAttribute as String) else {
-            throw UmbraError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
-                "Use `umbra type --app <selector> --text ...` after focusing the field.",
+            throw AmcuError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
+                "Use `amcu type --app <selector> --text ...` after focusing the field.",
                 "Check the snapshot: read-only elements cannot be set."
             ])
         }
@@ -355,12 +355,12 @@ enum Commands {
     /// comparison that failed.
     static func requireNoMismatch(_ verification: ActionVerification, elementIndex: Int) throws {
         guard case let .unverified(reason, expected, actual) = verification, reason == .valueMismatch else { return }
-        throw UmbraError(
+        throw AmcuError(
             .accessibilityFailure,
             "element \(elementIndex) accepted the write but holds a different value: wrote '\(expected ?? "")', read back '\(actual ?? "")'",
             nextSteps: [
                 "The application may normalise input (trimming, reformatting); compare the two values and decide whether the result is acceptable.",
-                "If the value was rejected outright, focus the field and use `umbra type` instead."
+                "If the value was rejected outright, focus the field and use `amcu type` instead."
             ]
         )
     }
@@ -424,7 +424,7 @@ enum Commands {
         let item = try Menus.find(path, in: app)
 
         guard item.enabled else {
-            throw UmbraError(.unsupported, "menu item '\(item.displayPath)' is disabled", nextSteps: [
+            throw AmcuError(.unsupported, "menu item '\(item.displayPath)' is disabled", nextSteps: [
                 "The application does not currently allow this command; change the selection or state it depends on first."
             ])
         }
@@ -455,8 +455,8 @@ enum Commands {
     static func scan(_ flags: Flags) throws {
         let target = try resolveTarget(flags)
         guard let windowID = target.windowInfo.windowID else {
-            throw UmbraError(.windowNotFound, "the selected window has no capturable id", nextSteps: [
-                "Run `umbra windows --app <selector>` and pass an explicit --window-id."
+            throw AmcuError(.windowNotFound, "the selected window has no capturable id", nextSteps: [
+                "Run `amcu windows --app <selector>` and pass an explicit --window-id."
             ])
         }
         let image = try Capture.window(id: windowID)
@@ -470,7 +470,7 @@ enum Commands {
         var annotatedPath: String?
         if let out = flags.string("annotate") {
             guard let annotated = VisionScan.annotate(image, marks: marks, windowSize: windowSize) else {
-                throw UmbraError(.captureFailure, "could not render the annotated capture")
+                throw AmcuError(.captureFailure, "could not render the annotated capture")
             }
             try Capture.writePNG(annotated, to: URL(fileURLWithPath: out))
             annotatedPath = out
@@ -518,7 +518,7 @@ enum Commands {
         }
 
         guard !performed.isEmpty else {
-            throw UmbraError(.invalidArgument, "window needs something to do", nextSteps: [
+            throw AmcuError(.invalidArgument, "window needs something to do", nextSteps: [
                 "Pass one or more of --raise, --move X,Y, --resize W,H, --minimize, --restore.",
                 "These visibly disturb the user, which is why no other command does them for you."
             ])
@@ -573,7 +573,7 @@ enum Commands {
         let deltaX = try flags.int32("dx", min: -100_000, max: 100_000) ?? 0
         let deltaY = try flags.int32("dy", min: -100_000, max: 100_000) ?? 0
         guard deltaX != 0 || deltaY != 0 else {
-            throw UmbraError(.invalidArgument, "scroll needs --dx and/or --dy", nextSteps: ["Positive --dy scrolls up, negative scrolls down."])
+            throw AmcuError(.invalidArgument, "scroll needs --dx and/or --dy", nextSteps: ["Positive --dy scrolls up, negative scrolls down."])
         }
         let windowFrame = target.windowInfo.frame.cgRect
         let point = try flags.point("at") ?? CGPoint(x: windowFrame.width / 2, y: windowFrame.height / 2)
@@ -597,7 +597,7 @@ enum Commands {
         try Permissions.requireAccessibility()
         let target = try resolveTarget(flags)
         guard let from = try flags.point("from"), let to = try flags.point("to") else {
-            throw UmbraError(.invalidArgument, "drag needs --from x,y and --to x,y")
+            throw AmcuError(.invalidArgument, "drag needs --from x,y and --to x,y")
         }
         let mode = try deliveryMode(flags, requiresRouting: true)
         try assertForegroundIsSafe(mode, app: target.app)
@@ -618,13 +618,13 @@ enum Commands {
     static func screenshot(_ flags: Flags) throws {
         let target = try resolveTarget(flags)
         guard let windowID = target.windowInfo.windowID else {
-            throw UmbraError(.windowNotFound, "the selected window has no capturable id", nextSteps: [
-                "Run `umbra windows --app <selector>` and pass an explicit --window-id."
+            throw AmcuError(.windowNotFound, "the selected window has no capturable id", nextSteps: [
+                "Run `amcu windows --app <selector>` and pass an explicit --window-id."
             ])
         }
         let image = try Capture.window(id: windowID)
         let path = flags.string("out") ?? FileManager.default.temporaryDirectory
-            .appendingPathComponent("umbra-\(windowID).png").path
+            .appendingPathComponent("amcu-\(windowID).png").path
         try Capture.writePNG(image, to: URL(fileURLWithPath: path))
         struct Payload: Encodable {
             let ok = true
@@ -659,14 +659,14 @@ enum Commands {
             osBuild: SelfCheck.osBuild
         )
         Output.emit(payload) {
-            var lines = ["umbra doctor — \(SelfCheck.osBuild)"]
+            var lines = ["amcu doctor — \(SelfCheck.osBuild)"]
             for permission in permissions {
                 lines.append("  [\(permission.granted ? "ok" : "  ")] \(permission.id): \(permission.detail)")
             }
             lines.append("  [\(AX.canResolveWindowID ? "ok" : "  ")] ax window ids: \(AX.canResolveWindowID ? "resolvable" : "unavailable — background pointer events cannot be routed")")
             lines.append("  [\(check.usable ? "ok" : "  ")] background pointer delivery: \(check.summary)")
             if !check.usable {
-                lines.append("  next: use --mode foreground, or drive elements semantically via `umbra snapshot` + `umbra click --element N`.")
+                lines.append("  next: use --mode foreground, or drive elements semantically via `amcu snapshot` + `amcu click --element N`.")
             }
             return lines.joined(separator: "\n")
         }

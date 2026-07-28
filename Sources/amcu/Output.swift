@@ -1,5 +1,5 @@
 import Foundation
-import UmbraCore
+import AmcuCore
 
 enum Output {
     static var json = false
@@ -22,8 +22,8 @@ enum Output {
     }
 
     static func fail(_ error: Error) -> Never {
-        let umbraError = error as? UmbraError
-            ?? UmbraError(.unsupported, (error as NSError).localizedDescription)
+        let amcuError = error as? AmcuError
+            ?? AmcuError(.unsupported, (error as NSError).localizedDescription)
         if json {
             struct Payload: Encodable {
                 let ok = false
@@ -31,13 +31,13 @@ enum Output {
                 let message: String
                 let nextSteps: [String]
             }
-            let payload = Payload(code: umbraError.code.rawValue, message: umbraError.message, nextSteps: umbraError.nextSteps)
+            let payload = Payload(code: amcuError.code.rawValue, message: amcuError.message, nextSteps: amcuError.nextSteps)
             if let data = try? encoder().encode(payload), let string = String(data: data, encoding: .utf8) {
                 FileHandle.standardError.write(Data((string + "\n").utf8))
             }
         } else {
-            var lines = ["error [\(umbraError.code.rawValue)]: \(umbraError.message)"]
-            lines.append(contentsOf: umbraError.nextSteps.map { "  next: \($0)" })
+            var lines = ["error [\(amcuError.code.rawValue)]: \(amcuError.message)"]
+            lines.append(contentsOf: amcuError.nextSteps.map { "  next: \($0)" })
             FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
         }
         exit(1)

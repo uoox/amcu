@@ -83,10 +83,10 @@ public enum Target {
         if selector.hasPrefix("pid:") {
             let raw = String(selector.dropFirst(4))
             guard let value = pid_t(raw) else {
-                throw UmbraError(.invalidArgument, "'\(selector)' is not a valid pid selector", nextSteps: ["Use pid:1234 with a decimal process id from `umbra apps`."])
+                throw AmcuError(.invalidArgument, "'\(selector)' is not a valid pid selector", nextSteps: ["Use pid:1234 with a decimal process id from `amcu apps`."])
             }
             guard let match = apps.first(where: { $0.processIdentifier == value }) else {
-                throw UmbraError.appNotFound(selector)
+                throw AmcuError.appNotFound(selector)
             }
             return match
         }
@@ -105,11 +105,11 @@ public enum Target {
         if prefixed.count == 1 { return prefixed[0] }
         if prefixed.count > 1 {
             let names = prefixed.compactMap { $0.bundleIdentifier ?? $0.localizedName }.joined(separator: ", ")
-            throw UmbraError(.invalidArgument, "'\(selector)' is ambiguous: \(names)", nextSteps: [
+            throw AmcuError(.invalidArgument, "'\(selector)' is ambiguous: \(names)", nextSteps: [
                 "Re-run with a full bundle id or pid:N to disambiguate."
             ])
         }
-        throw UmbraError.appNotFound(selector)
+        throw AmcuError.appNotFound(selector)
     }
 
     public static func appElement(_ app: NSRunningApplication) -> AXUIElement {
@@ -129,8 +129,8 @@ public enum Target {
         let appElement = appElement(app)
         let windowElements = AX.windows(appElement)
         if windowElements.isEmpty {
-            if !AXIsProcessTrusted() { throw UmbraError.notTrusted() }
-            throw UmbraError(.windowNotFound, "'\(app.localizedName ?? "app")' exposes no accessibility windows", nextSteps: [
+            if !AXIsProcessTrusted() { throw AmcuError.notTrusted() }
+            throw AmcuError(.windowNotFound, "'\(app.localizedName ?? "app")' exposes no accessibility windows", nextSteps: [
                 "The application may have no open window, or it may not publish an accessibility hierarchy.",
                 "If it clearly has visible windows, toggle Accessibility off and on for the host application in System Settings — macOS can hold a stale grant."
             ])
@@ -159,23 +159,23 @@ public enum Target {
         let all = try windows(of: app)
         if let windowID {
             guard let match = all.first(where: { $0.info.windowID == windowID }) else {
-                throw UmbraError(.windowNotFound, "no window with id \(windowID) in '\(app.localizedName ?? "app")'", nextSteps: [
-                    "Run `umbra windows --app <selector>` to list current window ids."
+                throw AmcuError(.windowNotFound, "no window with id \(windowID) in '\(app.localizedName ?? "app")'", nextSteps: [
+                    "Run `amcu windows --app <selector>` to list current window ids."
                 ])
             }
             return match
         }
         if let windowIndex {
             guard windowIndex >= 0, windowIndex < all.count else {
-                throw UmbraError(.windowNotFound, "window index \(windowIndex) out of range (0..\(all.count - 1))", nextSteps: [
-                    "Run `umbra windows --app <selector>` to list current windows."
+                throw AmcuError(.windowNotFound, "window index \(windowIndex) out of range (0..\(all.count - 1))", nextSteps: [
+                    "Run `amcu windows --app <selector>` to list current windows."
                 ])
             }
             return all[windowIndex]
         }
         if let main = all.first(where: { $0.info.main }) { return main }
         guard let first = all.first else {
-            throw UmbraError(.windowNotFound, "no windows available", nextSteps: ["Open a window in the target application first."])
+            throw AmcuError(.windowNotFound, "no windows available", nextSteps: ["Open a window in the target application first."])
         }
         return first
     }

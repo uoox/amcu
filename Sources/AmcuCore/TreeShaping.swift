@@ -42,7 +42,7 @@ public enum TreeShaping {
     /// its own snapshot line does not already carry. An unlabelled compact
     /// control still gets expanded — its inner text may be the only way to
     /// tell two buttons apart. Menu bar items are cut unconditionally because
-    /// their subtree is the entire menu, which `umbra menu` covers on its own.
+    /// their subtree is the entire menu, which `amcu menu` covers on its own.
     public static func shouldSuppressChildren(role: String, label: String?) -> Bool {
         if role == "AXMenuBarItem" { return true }
         guard compactRoles.contains(role) else { return false }

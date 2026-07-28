@@ -76,7 +76,7 @@ private final class ProbeView: NSView {
 /// `CGEventSetWindowLocation` is private, so its behaviour is not guaranteed
 /// across macOS releases — and the way it fails is quiet: clicks keep being
 /// delivered, they just stop landing where they were aimed. Rather than trust
-/// the symbol's presence, umbra clicks its own throwaway window at a known
+/// the symbol's presence, amcu clicks its own throwaway window at a known
 /// asymmetric point and checks where the click actually arrived. The result is
 /// cached per OS build, so the cost is paid once per system update.
 public enum SelfCheck {

@@ -31,10 +31,10 @@ public enum Menus {
     static func menuBar(of app: NSRunningApplication) throws -> AXUIElement {
         let appElement = Target.appElement(app)
         guard let bar = AX.element(appElement, "AXMenuBar") else {
-            if !AXIsProcessTrusted() { throw UmbraError.notTrusted() }
-            throw UmbraError(.unsupported, "'\(app.localizedName ?? "app")' publishes no menu bar", nextSteps: [
+            if !AXIsProcessTrusted() { throw AmcuError.notTrusted() }
+            throw AmcuError(.unsupported, "'\(app.localizedName ?? "app")' publishes no menu bar", nextSteps: [
                 "Background-only agents and some Electron applications have no menu bar of their own.",
-                "Run `umbra apps` to confirm the target is the application you meant."
+                "Run `amcu apps` to confirm the target is the application you meant."
             ])
         }
         return bar
@@ -83,7 +83,7 @@ public enum Menus {
         return items
     }
 
-    /// Renders a menu item's keyboard equivalent in the same syntax `umbra key`
+    /// Renders a menu item's keyboard equivalent in the same syntax `amcu key`
     /// accepts, so the shortcut a listing shows can be used directly.
     static func shortcut(of element: AXUIElement) -> String? {
         guard let character = AX.string(element, "AXMenuItemCmdChar"), !character.isEmpty else { return nil }
@@ -94,7 +94,7 @@ public enum Menus {
         if raw & 1 != 0 { modifiers.append("shift") }
         if raw & 2 != 0 { modifiers.append("alt") }
         if raw & 4 != 0 { modifiers.append("ctrl") }
-        // Normalise the glyph spelling so the printed shortcut is one `umbra
+        // Normalise the glyph spelling so the printed shortcut is one `amcu
         // key` accepts verbatim.
         let key = KeyCodes.glyphs[character] ?? character.lowercased()
         return (modifiers + [key]).joined(separator: "+")
@@ -114,13 +114,13 @@ public enum Menus {
         }
         if suffixed.count == 1 { return suffixed[0] }
         if suffixed.count > 1 {
-            throw UmbraError(.invalidArgument, "'\(path.joined(separator: " > "))' matches \(suffixed.count) menu items", nextSteps: [
+            throw AmcuError(.invalidArgument, "'\(path.joined(separator: " > "))' matches \(suffixed.count) menu items", nextSteps: [
                 "Give the full path, for example --path \"File > Export > PDF\".",
-                "Run `umbra menu --app <selector>` to see the available paths."
+                "Run `amcu menu --app <selector>` to see the available paths."
             ])
         }
-        throw UmbraError(.elementNotFound, "no menu item at '\(path.joined(separator: " > "))'", nextSteps: [
-            "Run `umbra menu --app <selector>` to list what this application publishes.",
+        throw AmcuError(.elementNotFound, "no menu item at '\(path.joined(separator: " > "))'", nextSteps: [
+            "Run `amcu menu --app <selector>` to list what this application publishes.",
             "Some applications build submenu items only when the menu is opened; those appear empty here."
         ])
     }
@@ -130,16 +130,16 @@ public enum Menus {
         for step in item.route {
             let children = AX.children(current)
             guard step < children.count else {
-                throw UmbraError(.staleSnapshot, "menu item '\(item.displayPath)' is no longer at its recorded position", nextSteps: [
-                    "Re-run `umbra menu --app <selector>`; the menu changed."
+                throw AmcuError(.staleSnapshot, "menu item '\(item.displayPath)' is no longer at its recorded position", nextSteps: [
+                    "Re-run `amcu menu --app <selector>`; the menu changed."
                 ])
             }
             current = children[step]
         }
         let title = AX.string(current, kAXTitleAttribute as String) ?? ""
         guard title == item.path.last else {
-            throw UmbraError(.staleSnapshot, "menu item changed ('\(item.path.last ?? "")' -> '\(title)')", nextSteps: [
-                "Re-run `umbra menu --app <selector>`; the menu changed."
+            throw AmcuError(.staleSnapshot, "menu item changed ('\(item.path.last ?? "")' -> '\(title)')", nextSteps: [
+                "Re-run `amcu menu --app <selector>`; the menu changed."
             ])
         }
         return current
