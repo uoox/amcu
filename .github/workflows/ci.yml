@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: swift --version
+      - name: Build
+        run: swift build -c release
+      # The suite is a plain executable, so it needs no Xcode test host and no
+      # Accessibility grant — it covers the pure logic (coordinate conversion,
+      # snapshot rendering, session handling, error contracts). The parts that
+      # require a real UI session are verified by `umbra doctor` on a machine
+      # with permissions granted.
+      - name: Test
+        run: swift run -c release umbra-tests
