@@ -19,6 +19,9 @@ public struct SnapshotNode: Codable, Sendable {
     public let index: Int
     public let role: String
     public let subrole: String?
+    /// AXIdentifier when the application publishes one. It is the only part of
+    /// an element's identity that is meant to be stable across layout changes.
+    public let identifier: String?
     public let label: String?
     public let value: String?
     public let enabled: Bool
@@ -32,6 +35,7 @@ public struct SnapshotNode: Codable, Sendable {
         index: Int,
         role: String,
         subrole: String?,
+        identifier: String? = nil,
         label: String?,
         value: String?,
         enabled: Bool,
@@ -44,6 +48,7 @@ public struct SnapshotNode: Codable, Sendable {
         self.index = index
         self.role = role
         self.subrole = subrole
+        self.identifier = identifier
         self.label = label
         self.value = value
         self.enabled = enabled
@@ -160,6 +165,7 @@ public enum SnapshotBuilder {
                 index: index,
                 role: role,
                 subrole: AX.string(element, kAXSubroleAttribute as String),
+                identifier: AX.string(element, "AXIdentifier"),
                 label: label(of: element),
                 value: AX.string(element, kAXValueAttribute as String),
                 enabled: AX.bool(element, kAXEnabledAttribute as String) ?? true,
@@ -219,6 +225,20 @@ public enum SnapshotBuilder {
         let role = AX.string(current, kAXRoleAttribute as String) ?? "AXUnknown"
         guard role == node.role else {
             throw UmbraError(.staleSnapshot, "element \(node.index) changed role (\(node.role) -> \(role))", nextSteps: [
+                "Re-run `umbra snapshot`; the interface changed after it was captured."
+            ])
+        }
+        let subrole = AX.string(current, kAXSubroleAttribute as String)
+        guard subrole == node.subrole else {
+            throw UmbraError(.staleSnapshot, "element \(node.index) changed subrole (\(node.subrole ?? "none") -> \(subrole ?? "none"))", nextSteps: [
+                "Re-run `umbra snapshot`; the interface changed after it was captured."
+            ])
+        }
+        // An identifier is the strongest signal available, so when the
+        // application publishes one it decides the question on its own.
+        let identifier = AX.string(current, "AXIdentifier")
+        guard identifier == node.identifier else {
+            throw UmbraError(.staleSnapshot, "element \(node.index) changed identifier (\(node.identifier ?? "none") -> \(identifier ?? "none"))", nextSteps: [
                 "Re-run `umbra snapshot`; the interface changed after it was captured."
             ])
         }

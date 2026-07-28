@@ -17,6 +17,10 @@ public enum Capture {
     }
 
     public static func window(id windowID: CGWindowID, scale: Bool = true) throws -> CGImage {
+        // A one-shot CLI has no event loop to return to, so the async capture is
+        // bridged by blocking the calling thread. This is only safe because
+        // nothing awaited below is main-actor-isolated; if that ever changes,
+        // this command needs to become async rather than gain another hop.
         let box = Box<Result<CGImage, Error>?>(nil)
         let semaphore = DispatchSemaphore(value: 0)
 

@@ -118,7 +118,11 @@ public enum SelfCheck {
     public static func ensure(force: Bool = false) -> SelfCheckResult {
         if !force, let cached = cached() { return cached }
         let result = probe()
-        store(result)
+        // `.undelivered` can mean nothing worse than a starved event pump on a
+        // busy machine. Caching it would disable background delivery for the
+        // rest of this OS build over a one-off timeout, so only durable
+        // verdicts are persisted.
+        if result.verdict != .undelivered { store(result) }
         return result
     }
 

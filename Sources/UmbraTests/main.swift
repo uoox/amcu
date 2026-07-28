@@ -187,6 +187,26 @@ do {
     try? FileManager.default.removeItem(at: SessionStore.url(for: name))
 }
 
+do {
+    // Snapshots written before AXIdentifier was recorded must still load, or an
+    // upgrade would strand every session cached on disk.
+    let legacy = """
+    {"app":{"pid":1,"name":"Test","active":false,"hasWindows":true},
+     "window":{"index":0,"frame":{"x":0,"y":0,"width":100,"height":100},"minimized":false,"main":true},
+     "nodes":[{"index":0,"role":"AXWindow","enabled":true,"focused":false,"actions":[],"depth":0,"path":[]}],
+     "truncated":false,"maxDepthReached":false,"capturedAt":"1970-01-01T00:00:00Z"}
+    """
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    do {
+        let decoded = try decoder.decode(Snapshot.self, from: Data(legacy.utf8))
+        t.expectEqual(decoded.nodes.count, 1, "a snapshot without an identifier field still decodes")
+        t.expect(decoded.nodes[0].identifier == nil, "a missing identifier decodes as nil rather than failing")
+    } catch {
+        t.expect(false, "legacy snapshot failed to decode: \(error)")
+    }
+}
+
 t.expectThrows("a session name cannot escape the cache directory") { _ = try SessionStore.url(for: "../../etc/passwd") }
 t.expectThrows("an empty session name is refused") { _ = try SessionStore.url(for: "") }
 

@@ -168,16 +168,23 @@ enum Commands {
                 return
             }
 
-            guard let frame = node.frame?.cgRect else {
+            // Read the position from the element that was just re-resolved, not
+            // from the snapshot: the element can survive a reflow or a scroll
+            // with its identity intact while its recorded frame points at
+            // whatever now occupies that spot.
+            let liveFrame = AX.frame(element)
+            guard let target = liveFrame ?? node.frame?.cgRect.offsetBy(
+                dx: window.info.frame.cgRect.minX,
+                dy: window.info.frame.cgRect.minY
+            ) else {
                 throw UmbraError(.unsupported, "element \(elementIndex) advertises no '\(action)' action and has no frame to click", nextSteps: [
                     "Inspect the element's actions in `umbra snapshot` output.",
                     "Try `umbra action --element \(elementIndex) --action <name>` with a listed action."
                 ])
             }
-            let center = CGPoint(x: frame.midX, y: frame.midY)
             let mode = try deliveryMode(flags, requiresRouting: true)
             try assertForegroundIsSafe(mode, app: app)
-            let global = globalPoint(center, window: window.info, isScreenSpace: false)
+            let global = CGPoint(x: target.midX, y: target.midY)
             try PointerInput.click(PointerInput.ClickRequest(
                 pid: app.processIdentifier,
                 windowID: window.info.windowID,
@@ -187,7 +194,12 @@ enum Commands {
                 clickCount: clickCount,
                 mode: mode
             ))
-            let result = ActionResult(action: "click", mode: mode.rawValue, target: "element \(elementIndex)", detail: "coordinate fallback")
+            let result = ActionResult(
+                action: "click",
+                mode: mode.rawValue,
+                target: "element \(elementIndex)",
+                detail: liveFrame == nil ? "coordinate fallback (recorded frame)" : "coordinate fallback (live frame)"
+            )
             Output.emit(result) { result.text }
             return
         }
@@ -284,10 +296,19 @@ enum Commands {
         try assertForegroundIsSafe(mode, app: app)
         // Pasting sidesteps input methods entirely, which matters for CJK text
         // and for any layout where synthesised keystrokes would be recomposed.
+        // The pasteboard belongs to the user, so it is borrowed rather than
+        // taken: whatever was on it goes back afterwards.
         let pasteboard = NSPasteboard.general
+        let previous = pasteboard.string(forType: .string)
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let previous { pasteboard.setString(previous, forType: .string) }
+        }
         try KeyboardInput.press(key: "v", modifiers: ["cmd"], pid: app.processIdentifier, mode: mode)
+        // Give the target a moment to read the pasteboard before it is restored.
+        usleep(120_000)
         let result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters via pasteboard")
         Output.emit(result) { result.text }
     }
