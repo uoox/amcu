@@ -102,6 +102,7 @@ INSPECT
   amcu menu       --app S                    read the menu bar without opening it
   amcu focus      --app S                    report what currently has keyboard focus
   amcu doctor                                check permissions, verify background delivery
+  amcu guide                                 operating instructions for an agent driving this
 
 ACT
   amcu click      --app S --element N        press an element by its snapshot index
@@ -118,6 +119,25 @@ ACT
   amcu screenshot --app S --out FILE         capture one window, occluded or not
   amcu window     --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
 ```
+
+### Driving it from an agent
+
+`amcu guide` prints the operating conventions — the normal sequence, why bundle
+ids beat display names, when indices go stale, which text path can be verified,
+what is refused. It lives in the binary rather than in this README or a skill
+file because those drift: a flag changes and the prose keeps teaching last
+quarter's usage to a model with no way to know it is wrong.
+
+For Claude Code, that makes the whole integration one line in `CLAUDE.md`:
+
+```markdown
+To read or operate a macOS desktop application, use `amcu`. Run `amcu guide`
+before the first use in a session.
+```
+
+No wrapper, no MCP server, nothing to keep in sync. An MCP server is only worth
+building for clients that have no shell — and then as four or five grouped
+tools, not one per command.
 
 ### Menus, without opening them
 

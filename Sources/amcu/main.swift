@@ -17,6 +17,7 @@ INSPECT
   menu         --app S                  read the menu bar without opening it
   focus        --app S                  report what currently has keyboard focus
   doctor                                check permissions and verify background delivery
+  guide                                 operating instructions for an agent driving this tool
 
 ACT
   click        --app S --element N      press an element by its snapshot index
@@ -124,6 +125,7 @@ do {
     case "drag": try Commands.drag(flags)
     case "screenshot": try Commands.screenshot(flags)
     case "doctor": try Commands.doctor(flags)
+    case "guide": print(guideText)
     case "help": print(helpText)
     case "version": print(version)
     default:
