@@ -52,6 +52,9 @@ COMMON FLAGS
                      culling; the escape hatch when shaping hides too much
   --screen           interpret coordinates as absolute screen coordinates
   --expect-focus S   refuse to type unless the focused element matches S
+  --force            act on an element that currently reports itself disabled
+                     (normally refused: the app ignores the event); the
+                     override is annotated in the result
   --allow-sensitive  permit acting on a password manager (refused by default)
 
 OPTICAL FALLBACK

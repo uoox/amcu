@@ -70,8 +70,10 @@ assert_eq() { # description actual expected
     fi
 }
 
-launch_probe() { # binary-name -> sets PROBE_PID, waits for its window
-    "$WORK/$1" &
+launch_probe() { # binary-name [stdout-log] -> sets PROBE_PID, waits for its window
+    # Probes normally print nothing; the ones that report received events get
+    # their stdout captured so assertions can count what the app actually saw.
+    "$WORK/$1" > "${2:-/dev/null}" &
     PROBE_PID=$!
     PIDS="$PIDS $PROBE_PID"
     local i=0
@@ -92,10 +94,21 @@ frontmost() {
 
 echo "== building amcu and probes =="
 (cd "$ROOT" && swift build -c release >/dev/null) || { echo "swift build failed" >&2; exit 1; }
-for probe in TableProbe TextProbe CanvasProbe ComboProbe; do
+for probe in TableProbe TextProbe CanvasProbe ComboProbe ButtonProbe; do
     swiftc -O -o "$WORK/$probe" "$E2E/$probe.swift" -framework AppKit \
         || { echo "swiftc failed for $probe" >&2; exit 1; }
 done
+
+# Cursor witness: the promise is that background delivery never moves the real
+# pointer, so its position is read before and after the pointer-event commands
+# and compared for *exact* equality — any displacement at all is a defect.
+cat > "$WORK/CursorPos.swift" <<'EOF'
+import AppKit
+let p = NSEvent.mouseLocation
+print("\(p.x),\(p.y)")
+EOF
+swiftc -O -o "$WORK/CursorPos" "$WORK/CursorPos.swift" -framework AppKit \
+    || { echo "swiftc failed for CursorPos" >&2; exit 1; }
 
 # Selection helper: finds the target app's focused element and sets
 # AXSelectedTextRange, so the replace test runs against a real selection
@@ -141,6 +154,7 @@ echo "== table: click by index after culling =="
 TABLE_SNAP="$("$AMCU" snapshot --app "pid:$TABLE_PID" --session "$SESSION" 2>&1)"
 ROW_INDEX=$(echo "$TABLE_SNAP" | awk '$2 == "Row" { print $1; exit }')
 FRONT_BEFORE="$(frontmost)"
+CURSOR_BEFORE="$("$WORK/CursorPos")"
 if [ -z "$ROW_INDEX" ]; then
     fail "a visible row exists to click" "no 'Row' line in snapshot" "$(echo "$TABLE_SNAP" | head -10)"
 else
@@ -150,6 +164,22 @@ else
         fail "click --element $ROW_INDEX on a culled-snapshot row exits 0" "exit code: $?"
     fi
 fi
+
+echo "== pointer promise: background scroll and drag leave the real cursor alone =="
+# Genuine pointer events (not AXPress): window-routed background delivery is
+# the exact code path whose promise is "the cursor never moves".
+if "$AMCU" scroll --app "pid:$TABLE_PID" --dy -30 --mode background >/dev/null 2>&1; then
+    pass "background scroll exits 0"
+else
+    fail "background scroll exits 0" "exit code: $?"
+fi
+if "$AMCU" drag --app "pid:$TABLE_PID" --from 200,100 --to 200,160 --mode background >/dev/null 2>&1; then
+    pass "background drag exits 0"
+else
+    fail "background drag exits 0" "exit code: $?"
+fi
+CURSOR_AFTER="$("$WORK/CursorPos")"
+assert_eq "real cursor position unchanged across click/scroll/drag (exact)" "$CURSOR_AFTER" "$CURSOR_BEFORE"
 
 echo "== text field: set-value verifies, replace respects the selection =="
 launch_probe TextProbe
@@ -213,7 +243,63 @@ assert_eq "focused combo's drop-down button is visible (focus chain)" "${FOCUSED
 # The unfocused combo is the decisive case: no focus protects it, so only the
 # actionable-direct-child rule can be keeping its button in the snapshot.
 assert_eq "unfocused combo's drop-down button is visible (actionable child)" "${IDLE_BUTTON:-missing}" "found"
-assert_matches "focus inside the compact control survives shaping" "$COMBO_SNAP" '\(focused\)'
+# A focus nested more than one level inside a compact control cannot be built
+# from stock AppKit: NSComboBox reports keyboard focus on the control itself
+# (its field editor is not exposed as a deeper AX descendant), and faking a
+# deeper chain would need a custom NSAccessibility tree — which tests the
+# probe, not amcu. So focusAncestry's observable contract is tested directly
+# instead: with focus inside the window, focusedIndex must be non-null and
+# must point at the focused combo, not merely at "some line somewhere".
+FOCUS_LINE=$(echo "$COMBO_SNAP" | grep -E '\(focused\)' | head -1)
+assert_matches "the (focused) marker sits on the focused combo, not elsewhere" "$FOCUS_LINE" 'ComboBox.*"Flavour"'
+COMBO_JSON="$("$AMCU" snapshot --app "pid:$PROBE_PID" --session "$SESSION-combo-json" --json 2>&1)"
+FOCUSED_INDEX=$(echo "$COMBO_JSON" | sed -n 's/.*"focusedIndex" *: *\([0-9][0-9]*\).*/\1/p' | head -1)
+FLAVOUR_INDEX=$(echo "$COMBO_SNAP" | awk '/"Flavour"/ { print $1; exit }')
+if [ -z "$FLAVOUR_INDEX" ]; then
+    fail "focusedIndex points at the focused combo" "no \"Flavour\" line to compare against"
+else
+    assert_eq "focusedIndex is non-null and points at the focused combo" "${FOCUSED_INDEX:-null}" "$FLAVOUR_INDEX"
+fi
+
+echo "== disabled control: a click that cannot land must not report success =="
+launch_probe ButtonProbe "$WORK/button.log"
+BUTTON_PID=$PROBE_PID
+sleep 0.5
+BUTTON_SNAP="$("$AMCU" snapshot --app "pid:$BUTTON_PID" --session "$SESSION-buttons" 2>&1)"
+USABLE_INDEX=$(echo "$BUTTON_SNAP" | awk '/Button "Usable"/ { print $1; exit }')
+BLOCKED_INDEX=$(echo "$BUTTON_SNAP" | awk '/Button "Blocked"/ { print $1; exit }')
+if [ -z "$USABLE_INDEX" ] || [ -z "$BLOCKED_INDEX" ]; then
+    fail "button probe exposes both buttons" "usable='$USABLE_INDEX' blocked='$BLOCKED_INDEX'" "$(echo "$BUTTON_SNAP" | head -10)"
+else
+    assert_matches "snapshot marks the blocked button disabled" "$BUTTON_SNAP" 'Button "Blocked" \(disabled\)'
+    if "$AMCU" click --element "$USABLE_INDEX" --session "$SESSION-buttons" >/dev/null 2>&1; then
+        pass "click on the enabled button exits 0"
+    else
+        fail "click on the enabled button exits 0" "exit code: $?"
+    fi
+    DISABLED_OUT="$("$AMCU" click --element "$BLOCKED_INDEX" --session "$SESSION-buttons" 2>&1)"
+    DISABLED_STATUS=$?
+    if [ "$DISABLED_STATUS" -ne 0 ]; then
+        pass "click on the disabled button fails (exit $DISABLED_STATUS)"
+    else
+        fail "click on the disabled button fails" "exit code: 0" "output: $DISABLED_OUT"
+    fi
+    assert_matches "the refusal names the disabled state" "$DISABLED_OUT" 'disabled'
+    FORCED_OUT="$("$AMCU" click --element "$BLOCKED_INDEX" --session "$SESSION-buttons" --force 2>&1)"
+    FORCED_STATUS=$?
+    if [ "$FORCED_STATUS" -eq 0 ]; then
+        pass "--force overrides the refusal (exit 0)"
+    else
+        fail "--force overrides the refusal (exit 0)" "exit code: $FORCED_STATUS" "output: $FORCED_OUT"
+    fi
+    assert_matches "a forced click is annotated, never silent" "$FORCED_OUT" 'forced: element reports disabled'
+    # The app-side ledger is the real evidence: AX reported success for the
+    # forced press too, but only the enabled button's action can have run.
+    sleep 0.5
+    CLICKS_SEEN=$(grep -c '^CLICKED' "$WORK/button.log" 2>/dev/null | tr -d ' ')
+    assert_eq "the app received exactly one click" "$CLICKS_SEEN" "1"
+    assert_matches "and it was the enabled button's" "$(cat "$WORK/button.log")" '^CLICKED Usable$'
+fi
 
 echo "== frontmost application was never disturbed =="
 FRONT_AFTER="$(frontmost)"

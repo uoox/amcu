@@ -32,6 +32,20 @@ SELECTORS
   `amcu apps` lists all three forms.
   A web page is not an application. Target the browser that shows it.
 
+A JUST-LAUNCHED APPLICATION IS NOT READY
+  For a second or two after an application starts, its accessibility tree may
+  not exist yet. What comes back is a placeholder: one window with a zero size,
+  no window id, and the application's own name as its title. Snapshotting then
+  gives you the application element and its menu bar instead of the interface.
+  If a snapshot looks like that, wait and take it again rather than acting on it.
+
+DISABLED CONTROLS ARE REFUSED
+  Pressing a disabled control through the accessibility API reports success
+  while the application ignores it entirely, so element commands read the live
+  enabled state first and refuse. A refusal means a precondition is unmet —
+  select the row, fill the required field, then re-snapshot. `--force` acts
+  anyway and says so in the result.
+
 ELEMENT INDICES ARE CHECKED, NOT TRUSTED
   Before acting, the element is re-resolved and its role, subrole, identifier
   and label are compared against what the snapshot recorded. A mismatch is a

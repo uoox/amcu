@@ -96,6 +96,67 @@ enum Commands {
         return CGPoint(x: frame.minX + point.x, y: frame.minY + point.y)
     }
 
+    /// Re-selects the window a snapshot was captured in, for the commands that
+    /// replay a recorded element path against the live hierarchy.
+    ///
+    /// A recorded CGWindowID is authoritative. But `AX.windowID` rides on a
+    /// private function and legitimately comes back nil for some sheets and
+    /// panels — and in that case `Target.selectWindow` would silently fall back
+    /// to the main window. Replaying AXChildren indices in a look-alike window
+    /// resolves cleanly onto a control in the *wrong* window and reports
+    /// success, so the fallback instead pins the window by its recorded index
+    /// and cross-checks the title before any path is replayed.
+    private static func snapshotWindow(
+        for snapshot: Snapshot,
+        app: NSRunningApplication
+    ) throws -> (element: AXUIElement, info: WindowInfo) {
+        if snapshot.window.windowID != nil {
+            return try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+        }
+        let selected = try Target.selectWindow(of: app, windowID: nil, windowIndex: snapshot.window.index)
+        guard selected.info.title == snapshot.window.title else {
+            let recorded = snapshot.window.title.map { "'\($0)'" } ?? "(untitled)"
+            let live = selected.info.title.map { "'\($0)'" } ?? "(untitled)"
+            throw AmcuError(.staleSnapshot, "the snapshot's window cannot be re-identified: index \(snapshot.window.index) is now \(live), the snapshot recorded \(recorded)", nextSteps: [
+                "The application's window order or titles changed since the snapshot was captured.",
+                "Re-run `amcu snapshot` and use the new indices."
+            ])
+        }
+        return selected
+    }
+
+    /// Refuses to act on an element whose *live* AXEnabled is false:
+    /// `AXUIElementPerformAction` on a disabled control returns success while
+    /// the application ignores the press entirely — exactly the "report success
+    /// on a no-op" failure this tool promises never to commit. The coordinate
+    /// fallback is just as silent about it, so both paths consult this check.
+    /// The snapshot's recorded state is deliberately not used: enablement flips
+    /// as the application's preconditions change, and only the state at act
+    /// time decides whether the event can land.
+    ///
+    /// A missing AXEnabled attribute counts as enabled — many elements never
+    /// publish it, and refusing them all would make the tool unusable.
+    ///
+    /// Returns the annotation to surface in the result when `--force` overrode
+    /// the check, so a forced act is never dressed up as an ordinary success.
+    private static func requireEnabled(_ element: AXUIElement, elementIndex: Int, flags: Flags) throws -> String? {
+        guard AX.bool(element, kAXEnabledAttribute as String) == false else { return nil }
+        guard flags.has("force") else {
+            throw AmcuError(.unsupported, "element \(elementIndex) is currently disabled; the application would ignore the event while amcu reported success", nextSteps: [
+                "A disabled control usually means a precondition is unmet: select the item, fill the field, or change whatever state it depends on, then re-run `amcu snapshot`.",
+                "If the application wrongly reports a usable control as disabled, re-run with --force to act anyway; the override is annotated in the result."
+            ])
+        }
+        return "forced: element reports disabled"
+    }
+
+    /// Joins the optional fragments an action result wants in its detail slot,
+    /// so a forced-override annotation never displaces the element's label.
+    private static func combinedDetail(_ parts: String?...) -> String? {
+        let kept = parts.compactMap { $0 }.filter { !$0.isEmpty }
+        return kept.isEmpty ? nil : kept.joined(separator: "; ")
+    }
+
     // MARK: - Inspection
 
     static func apps(_ flags: Flags) throws {
@@ -169,7 +230,7 @@ enum Commands {
             let sessionName = session(flags)
             let (snapshot, node) = try SessionStore.node(index: elementIndex, session: sessionName)
             let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
-            let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+            let window = try snapshotWindow(for: snapshot, app: app)
 
             // Optically located text has no element behind it to re-resolve, so
             // it cannot be re-verified the way an accessibility element can.
@@ -205,12 +266,13 @@ enum Commands {
             }
 
             let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
+            let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
 
             let wantsCoordinates = (flags.string("mode") == "foreground") || flags.has("raw")
             let action = button == .right ? "AXShowMenu" : (kAXPressAction as String)
             if !wantsCoordinates, node.actions.contains(action) {
                 try AX.perform(element, action)
-                let result = ActionResult(action: "click", mode: "ax:\(action)", target: "element \(elementIndex)", detail: node.label)
+                let result = ActionResult(action: "click", mode: "ax:\(action)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
                 Output.emit(result) { result.text }
                 return
             }
@@ -245,7 +307,10 @@ enum Commands {
                 action: "click",
                 mode: mode.rawValue,
                 target: "element \(elementIndex)",
-                detail: liveFrame == nil ? "coordinate fallback (recorded frame)" : "coordinate fallback (live frame)"
+                detail: combinedDetail(
+                    liveFrame == nil ? "coordinate fallback (recorded frame)" : "coordinate fallback (live frame)",
+                    forcedNote
+                )
             )
             Output.emit(result) { result.text }
             return
@@ -283,10 +348,11 @@ enum Commands {
         let name = try flags.required("action", hint: "Pass an action listed for that element in `amcu snapshot`.")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
         let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
-        let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+        let window = try snapshotWindow(for: snapshot, app: app)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
+        let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
         try AX.perform(element, name)
-        let result = ActionResult(action: "action", mode: "ax:\(name)", target: "element \(elementIndex)", detail: node.label)
+        let result = ActionResult(action: "action", mode: "ax:\(name)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
         Output.emit(result) { result.text }
     }
 
@@ -298,8 +364,9 @@ enum Commands {
         let value = try flags.required("value")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
         let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
-        let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+        let window = try snapshotWindow(for: snapshot, app: app)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
+        let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
         guard AX.isSettable(element, kAXValueAttribute as String) else {
             throw AmcuError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
                 "Use `amcu type --app <selector> --text ...` after focusing the field.",
@@ -312,7 +379,7 @@ enum Commands {
             action: "set-value",
             mode: "ax:AXValue",
             target: "element \(elementIndex)",
-            detail: nil,
+            detail: forcedNote,
             verification: verification,
             resultingValue: nil
         )
@@ -330,8 +397,9 @@ enum Commands {
         let text = try flags.required("text")
         let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
         let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
-        let window = try Target.selectWindow(of: app, windowID: snapshot.window.windowID, windowIndex: nil)
+        let window = try snapshotWindow(for: snapshot, app: app)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
+        let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
         guard AX.isSettable(element, kAXValueAttribute as String) else {
             throw AmcuError(.unsupported, "element \(elementIndex) does not accept a value", nextSteps: [
                 "Use `amcu type --app <selector> --text ...` after focusing the field.",
@@ -344,7 +412,7 @@ enum Commands {
             action: "replace",
             mode: "ax:AXValue",
             target: "element \(elementIndex)",
-            detail: node.label,
+            detail: combinedDetail(node.label, forcedNote),
             verification: verification,
             resultingValue: resultingValue,
             // A whole-value overwrite discarded whatever was in the field; the
