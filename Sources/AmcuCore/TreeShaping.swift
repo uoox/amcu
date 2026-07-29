@@ -20,10 +20,22 @@ public enum TreeShaping {
     ]
 
     /// Actions the system attaches to almost everything; their presence says
-    /// nothing about whether an element is worth showing. The list matches the
-    /// one `looksAccessibilityBlind` uses, so "kept because actionable" and
-    /// "window is blind" cannot disagree about what actionable means.
+    /// nothing about whether an element is worth showing.
+    ///
+    /// `AXShowMenu` sits in this list for *rendering* (a context menu is not
+    /// worth a line in every node's action list) but not in
+    /// `elisionIgnoredActions`: an unlabelled group whose only affordance is a
+    /// context menu is the sole addressable carrier of that menu, and eliding
+    /// it would make the menu unreachable through `action --action AXShowMenu`.
+    /// The two filters answer different questions — "is this worth printing?"
+    /// versus "can this node do anything its children cannot?" — so they are
+    /// allowed to disagree about `AXShowMenu` and only about it.
     private static let presentationalActions: Set<String> = ["AXRaise", "AXScrollToVisible", "AXShowMenu"]
+
+    /// Actions that never save a node from elision. Matches the ignore list in
+    /// `Snapshot.looksAccessibilityBlind`, so "kept because actionable" and
+    /// "window is blind" cannot disagree about what actionable means.
+    private static let elisionIgnoredActions: Set<String> = ["AXRaise", "AXScrollToVisible"]
 
     /// Rows beyond this many survive viewport culling only as a count.
     public static let maxVisibleRows: Int = 20
@@ -35,7 +47,7 @@ public enum TreeShaping {
         guard structuralRoles.contains(role) else { return false }
         if let label, !label.isEmpty { return false }
         if let value, !value.isEmpty { return false }
-        return meaningfulActions(actions).isEmpty
+        return actions.allSatisfy { elisionIgnoredActions.contains($0) }
     }
 
     /// Whether descending into this element's subtree could reveal anything

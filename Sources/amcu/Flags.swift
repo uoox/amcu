@@ -9,7 +9,7 @@ struct Flags {
     private(set) var positional: [String] = []
 
     static let knownBooleans: Set<String> = [
-        "json", "force", "request", "no-snapshot", "screen", "help", "raw", "quiet",
+        "json", "force", "request", "no-snapshot", "no-shaping", "screen", "help", "raw", "quiet",
         "press", "raise", "minimize", "restore", "allow-sensitive"
     ]
 

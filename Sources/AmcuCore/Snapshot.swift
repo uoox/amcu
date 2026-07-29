@@ -184,9 +184,14 @@ public struct Snapshot: Codable, Sendable {
     /// "this window is empty" and "amcu cannot see into this window".
     public var looksAccessibilityBlind: Bool {
         guard nodes.contains(where: { $0.origin == .accessibility }) else { return false }
+        // `AXShowMenu` counts as actionable here for the same reason it saves a
+        // node from elision (see `TreeShaping.elisionIgnoredActions`): a window
+        // whose only affordance is context menus can still be driven through
+        // `action --action AXShowMenu`, and calling it blind while the snapshot
+        // lists that very action would be self-contradictory.
         let actionable = nodes.filter { node in
             node.origin == .accessibility
-                && node.actions.contains { $0 != "AXShowMenu" && $0 != "AXRaise" && $0 != "AXScrollToVisible" }
+                && node.actions.contains { $0 != "AXRaise" && $0 != "AXScrollToVisible" }
         }
         return actionable.isEmpty
     }
@@ -221,7 +226,8 @@ public enum SnapshotBuilder {
         app: AppInfo,
         window: WindowInfo,
         windowElement: AXUIElement,
-        limits: SnapshotLimits = SnapshotLimits()
+        limits: SnapshotLimits = SnapshotLimits(),
+        shaping: Bool = true
     ) -> Snapshot {
         var nodes: [SnapshotNode] = []
         var truncated = false
@@ -254,7 +260,7 @@ public enum SnapshotBuilder {
             // `resolve` — which replays the path over AXChildren — still lands
             // on the right element. The focused element is never elided, or
             // `focusedIndex` would have nothing to point at.
-            let elided = !focused && TreeShaping.shouldElide(role: role, label: nodeLabel, value: nodeValue, actions: actions)
+            let elided = shaping && !focused && TreeShaping.shouldElide(role: role, label: nodeLabel, value: nodeValue, actions: actions)
             var childDepth = depth
             if elided {
                 elidedCount += 1
@@ -286,32 +292,75 @@ public enum SnapshotBuilder {
                     depth: depth,
                     path: path
                 ))
-                if TreeShaping.shouldSuppressChildren(role: role, label: nodeLabel) { return }
+                if shaping, TreeShaping.shouldSuppressChildren(role: role, label: nodeLabel) {
+                    // Suppression must yield to focus for the same reason
+                    // elision does: a hidden focused element leaves
+                    // `focusedIndex` with nothing to point at. Only direct
+                    // children are probed — the focused control inside a
+                    // compact wrapper (a combo box's editable text field) is
+                    // a direct child in AppKit, and a full subtree search
+                    // would cost exactly the traversal suppression exists to
+                    // avoid. A focus buried deeper stays hidden; that is the
+                    // accepted trade-off.
+                    let focusYields = AX.children(element).contains {
+                        AX.bool($0, kAXFocusedAttribute as String) ?? false
+                    }
+                    if !focusYields { return }
+                }
                 childDepth = depth + 1
             }
 
             let children = AX.children(element)
             var kept = Array(children.enumerated())
-            if TreeShaping.usesRowViewport(role: role),
+            if shaping, TreeShaping.usesRowViewport(role: role),
                let rows = AX.attribute(element, "AXRows") as? [AXUIElement],
-               !rows.isEmpty,
-               let containerFrame = AX.frame(element) {
+               !rows.isEmpty {
                 // AXRows indexes a different space than AXChildren, so row
                 // indices must never leak into `path`. The rows list is used
                 // only to decide *which* elements to keep; the walk below
                 // still iterates AXChildren, so every recorded path index is
                 // an AXChildren index and `resolve` stays correct.
-                let visible = rows.filter { row in
-                    guard let rowFrame = AX.frame(row) else { return false }
-                    return rowFrame.intersects(containerFrame)
-                }.prefix(TreeShaping.maxVisibleRows)
-                rowsOmitted += rows.count - visible.count
-                let allRows = Set(rows.map(AXIdentity.init))
-                let keptRows = Set(visible.map(AXIdentity.init))
-                kept = kept.filter { _, child in
-                    let identity = AXIdentity(element: child)
-                    // Non-row children (headers, columns, scrollers) pass through.
-                    return !allRows.contains(identity) || keptRows.contains(identity)
+                //
+                // Which rows count as visible, in order of trust:
+                // 1. `AXVisibleRows` — the toolkit's own answer to exactly
+                //    this question; no geometry needed.
+                // 2. Rows intersecting the nearest AXScrollArea ancestor's
+                //    frame. The table's *own* frame is useless as a viewport:
+                //    an NSTableView is the scroll view's document view, so
+                //    its AX frame spans all content including everything
+                //    scrolled offscreen — every row intersects it, and
+                //    culling against it keeps the first rows in AXRows order
+                //    instead of the rows on screen. The scroll area is the
+                //    clip through which the user actually looks.
+                // 3. Neither available: cull nothing. A wrong cull shows the
+                //    model rows the user cannot see and hides the ones they
+                //    can, which is strictly worse than a big snapshot.
+                let visible: [AXUIElement]?
+                if let toolkitVisible = AX.attribute(element, "AXVisibleRows") as? [AXUIElement],
+                   !toolkitVisible.isEmpty {
+                    visible = toolkitVisible
+                } else if let viewport = nearestScrollAreaFrame(ancestors: ancestors) {
+                    visible = rows.filter { row in
+                        guard let rowFrame = AX.frame(row) else { return false }
+                        return rowFrame.intersects(viewport)
+                    }
+                } else {
+                    visible = nil
+                }
+                if let visible {
+                    let allRows = Set(rows.map(AXIdentity.init))
+                    let keptRows = Set(visible.prefix(TreeShaping.maxVisibleRows).map(AXIdentity.init))
+                    let beforeCull = kept.count
+                    kept = kept.filter { _, child in
+                        let identity = AXIdentity(element: child)
+                        // Non-row children (headers, columns, scrollers) pass through.
+                        return !allRows.contains(identity) || keptRows.contains(identity)
+                    }
+                    // Counted from children actually dropped, not from
+                    // `rows.count`: an outline nests rows under rows, so not
+                    // every AXRows entry is a direct child, and the footer
+                    // must never claim culling that did not happen.
+                    rowsOmitted += beforeCull - kept.count
                 }
             }
             // The per-node cap counts surviving children, not raw ones —
@@ -338,6 +387,18 @@ public enum SnapshotBuilder {
             rowsOmitted: rowsOmitted,
             capturedAt: Date()
         )
+    }
+
+    /// The frame of the innermost AXScrollArea above a row container. The
+    /// *innermost* one, because scroll views nest (a table inside a scrollable
+    /// inspector pane) and only the nearest clip decides which rows are on
+    /// screen; an outer one would admit rows the inner clip hides.
+    private static func nearestScrollAreaFrame(ancestors: [AXUIElement]) -> CGRect? {
+        for ancestor in ancestors.reversed() {
+            guard AX.string(ancestor, kAXRoleAttribute as String) == "AXScrollArea" else { continue }
+            return AX.frame(ancestor)
+        }
+        return nil
     }
 
     /// Wraps recognised text in the same snapshot shape as accessibility

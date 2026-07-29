@@ -107,7 +107,8 @@ ACT
   amcu click      --app S --element N        press an element by its snapshot index
   amcu click      --app S --at X,Y           click a point (window-relative unless --screen)
   amcu action     --element N --action A     perform any action the element advertises
-  amcu set-value  --element N --value V      set an element's value directly
+  amcu set-value  --element N --value V      set an element's value, then read it back
+  amcu replace    --element N --text T        replace the selection through the accessibility API
   amcu type       --app S --text T           type literal text
   amcu paste      --app S --text T           paste via the pasteboard (input-method safe)
   amcu key        --app S --key K --mod cmd  press a key combination
@@ -165,6 +166,37 @@ The trade-off is stated in the output: recognised text carries no role, no
 state and no actions — a disabled button and a caption look identical. It also
 cannot be re-verified before a click the way an element can, so scans expire
 (`--max-age`, default 60s) instead of silently going stale.
+
+### Writes are read back
+
+`set-value` and `replace` write through the accessibility API and read the value
+back. A write the application silently refused is reported as a failure carrying
+both strings, not as success:
+
+```console
+$ amcu set-value --element 7 --value "hello"
+set-value ok on element 7 via ax:AXValue (verified)
+```
+
+`replace` edits `AXValue` at the selected range. It needs no focus, no front
+window and no compatible input method — and unlike synthesised keystrokes, the
+result can be verified at all. When the element exposes no selection range it
+falls back to replacing the whole value and says which it did.
+
+### Snapshots are shaped, and say so
+
+An unfiltered tree is mostly scaffolding. Chrome used to fill the entire
+1500-node budget and truncate — which reads to a model as "the rest of the page
+does not exist". Structural containers with no label, value or behaviour are
+skipped while their children are still walked, controls whose label already says
+everything are not expanded, and long tables report only the rows actually on
+screen. Chrome now captures in ~800 nodes without truncating.
+
+What was hidden is counted in the output. `--no-shaping` turns all of it off.
+
+```
+(hidden: 341 structural containers, 186 offscreen rows)
+```
 
 ### Typing goes where the target's focus is
 

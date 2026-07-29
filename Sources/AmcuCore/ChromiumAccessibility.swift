@@ -5,15 +5,21 @@ import Foundation
 /// tree as expensive to maintain and only builds it once something asks for
 /// it. Unlike VoiceOver, a plain AXUIElement client is not one of the signals
 /// it listens for, so amcu would otherwise see an empty tree or a lone app
-/// root. Setting `AXManualAccessibility` (Chromium's documented opt-in) and
-/// `AXEnhancedUserInterface` (the older assistive-client hint it also honors)
-/// on the application element flips that switch.
+/// root. Setting `AXManualAccessibility` (Chromium's documented opt-in) on the
+/// application element flips that switch.
 ///
-/// This is a whitelist on purpose. `AXEnhancedUserInterface` set on a native
-/// Cocoa application changes AppKit's behavior — some apps collapse their tree
-/// to the app root, and window-move animations start interfering with frame
-/// reads — so blanket activation would break exactly the apps that already
-/// worked. Only bundle ids known to be Chromium/Electron hosts are touched.
+/// `AXEnhancedUserInterface` — the older assistive-client hint Chromium also
+/// honors — is deliberately not set. AppKit reacts to that flag too: with it
+/// raised, writes to `AXPosition` are ignored or animated (the long-documented
+/// conflict that Rectangle and yabai work around), which would break
+/// `WindowControl.setPosition` — and since activation here is one-way and
+/// never reset, the breakage would outlive the snapshot that caused it.
+/// `AXManualAccessibility` alone is Chromium's documented switch and is
+/// sufficient to build the tree.
+///
+/// This is a whitelist on purpose: `AXManualAccessibility` is a Chromium-ism,
+/// meaningless to native applications, so only bundle ids known to be
+/// Chromium/Electron hosts are touched.
 public enum ChromiumAccessibility {
     /// Known Chromium/Electron hosts that need the explicit opt-in.
     public static let bundleIDs: Set<String> = [
@@ -52,7 +58,8 @@ public enum ChromiumAccessibility {
         // A short timeout keeps a hung renderer from stalling every command
         // that merely resolves the app; the flags stick once the app recovers.
         AX.setMessagingTimeout(app, seconds: 1.0)
+        // Only Chromium's own switch — see the type comment for why
+        // AXEnhancedUserInterface must stay untouched.
         _ = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        _ = AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     }
 }

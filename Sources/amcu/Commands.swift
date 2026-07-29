@@ -138,7 +138,10 @@ enum Commands {
             app: target.appInfo,
             window: target.windowInfo,
             windowElement: target.windowElement,
-            limits: limits
+            limits: limits,
+            // The escape hatch for when shaping guesses wrong: every node,
+            // every row, no elision — at full token cost.
+            shaping: !flags.has("no-shaping")
         )
         try SessionStore.save(snapshot, session: session(flags))
         Output.emit(snapshot) { snapshot.renderText() }
@@ -335,7 +338,7 @@ enum Commands {
                 "Check the snapshot: read-only elements cannot be set."
             ])
         }
-        let (verification, resultingValue) = try TextInput.replaceSelection(with: text, on: element)
+        let (verification, resultingValue, scope) = try TextInput.replaceSelection(with: text, on: element)
         try requireNoMismatch(verification, elementIndex: elementIndex)
         let result = VerifiedActionResult(
             action: "replace",
@@ -343,7 +346,10 @@ enum Commands {
             target: "element \(elementIndex)",
             detail: node.label,
             verification: verification,
-            resultingValue: resultingValue
+            resultingValue: resultingValue,
+            // A whole-value overwrite discarded whatever was in the field; the
+            // caller must hear that from the result, not discover it later.
+            scope: scope
         )
         Output.emit(result) { result.text }
     }
@@ -685,11 +691,15 @@ struct VerifiedActionResult: Encodable {
     let detail: String?
     let verification: ActionVerification
     let resultingValue: String?
+    /// Only `replace` sets this; `set-value` always overwrites by contract, so
+    /// there is nothing to disclose there.
+    var scope: ReplacementScope? = nil
 
     var text: String {
         var parts = ["\(action) ok on \(target)"]
         if let mode { parts.append("via \(mode)") }
         if let detail { parts.append("(\(detail))") }
+        if let scope { parts.append("(\(scope.label))") }
         parts.append("(\(verification.summary))")
         return parts.joined(separator: " ")
     }

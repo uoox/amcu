@@ -47,6 +47,8 @@ DELIVERY
 COMMON FLAGS
   --json             machine-readable output on stdout, structured errors on stderr
   --session NAME     namespace for snapshot state (default: "default")
+  --no-shaping       snapshot: keep every node — no elision, no offscreen-row
+                     culling; the escape hatch when shaping hides too much
   --screen           interpret coordinates as absolute screen coordinates
   --expect-focus S   refuse to type unless the focused element matches S
   --allow-sensitive  permit acting on a password manager (refused by default)

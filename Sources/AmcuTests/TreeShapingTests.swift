@@ -37,6 +37,16 @@ func runTreeShapingTests(_ t: Harness) {
         !TreeShaping.shouldElide(role: "AXButton", label: nil, value: nil, actions: []),
         "elision only applies to structural roles"
     )
+    // A group whose only affordance is a context menu is the only addressable
+    // carrier of that menu; eliding it would make the menu unreachable.
+    t.expect(
+        !TreeShaping.shouldElide(role: "AXGroup", label: nil, value: nil, actions: ["AXShowMenu"]),
+        "a group advertising only AXShowMenu is kept"
+    )
+    t.expect(
+        !TreeShaping.shouldElide(role: "AXGroup", label: nil, value: nil, actions: ["AXRaise", "AXShowMenu"]),
+        "AXShowMenu saves a group even alongside presentational actions"
+    )
 
     t.suite("tree shaping: child suppression")
 
@@ -80,12 +90,37 @@ func runTreeShapingTests(_ t: Harness) {
     t.expect(!TreeShaping.usesRowViewport(role: "AXScrollArea"), "a scroll area is not row-culled itself")
     t.expectEqual(TreeShaping.maxVisibleRows, 20, "at most 20 rows survive culling")
 
+    // The rendering filter deliberately still drops AXShowMenu — the two
+    // filters answer different questions (worth printing vs worth keeping).
     t.expectEqual(
         TreeShaping.meaningfulActions(["AXPress", "AXScrollToVisible", "AXRaise", "AXShowMenu", "AXConfirm"]),
         ["AXPress", "AXConfirm"],
         "presentational actions are filtered, real ones kept in order"
     )
     t.expectEqual(TreeShaping.meaningfulActions([]), [], "no actions filter to no actions")
+
+    // Blindness must agree with elision about AXShowMenu: a kept element whose
+    // snapshot line lists the action cannot coexist with a footer claiming the
+    // window has no actionable elements.
+    func actionSnapshot(actions: [String]) -> Snapshot {
+        Snapshot(
+            app: AppInfo(pid: 1, name: "Test", bundleID: nil, active: false, hasWindows: true),
+            window: WindowInfo(windowID: 1, index: 0, title: nil, frame: FrameJSON(.zero), minimized: false, main: true),
+            nodes: [SnapshotNode(
+                index: 0, role: "AXGroup", subrole: nil, label: nil, value: nil,
+                enabled: true, focused: false, frame: nil, actions: actions, depth: 0, path: []
+            )],
+            focusedIndex: nil, truncated: false, maxDepthReached: false, capturedAt: Date()
+        )
+    }
+    t.expect(
+        !actionSnapshot(actions: ["AXShowMenu"]).looksAccessibilityBlind,
+        "a window whose only affordance is a context menu is not blind"
+    )
+    t.expect(
+        actionSnapshot(actions: ["AXRaise", "AXScrollToVisible"]).looksAccessibilityBlind,
+        "purely presentational actions still leave a window blind"
+    )
 
     t.suite("tree shaping: snapshot accounting")
 

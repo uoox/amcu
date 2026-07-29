@@ -63,6 +63,36 @@ func runTextInputTests(_ t: Harness) {
         t.expectEqual(caret, 0, "deleting a selection leaves the caret at its start")
     }
 
+    t.suite("text replacement: scope disclosure")
+
+    do {
+        // A whole-value overwrite discards the field's previous content; the
+        // wording must say so plainly, because it is what the caller reads.
+        t.expect(
+            ReplacementScope.wholeValue.label.contains("whole value"),
+            "the whole-value fallback names itself as an overwrite"
+        )
+        t.expect(
+            ReplacementScope.selection.label.contains("selection"),
+            "a selection replacement names itself as such"
+        )
+        t.expect(
+            ReplacementScope.selection.label != ReplacementScope.wholeValue.label,
+            "the two scopes are distinguishable in text output"
+        )
+        // The scope rides inside JSON command output, so it must encode as a
+        // stable machine-readable token.
+        do {
+            let encoded = String(decoding: try JSONEncoder().encode([ReplacementScope.wholeValue, .selection]), as: UTF8.self)
+            t.expect(
+                encoded.contains("\"wholeValue\"") && encoded.contains("\"selection\""),
+                "scopes encode as stable JSON tokens"
+            )
+        } catch {
+            t.expect(false, "encoding a replacement scope threw: \(error)")
+        }
+    }
+
     t.suite("action verification")
 
     do {

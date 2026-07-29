@@ -77,6 +77,25 @@ public enum UnverifiedReason: String, Sendable, Codable {
     }
 }
 
+/// How much of the element's value a replacement actually touched. The two
+/// outcomes differ enough — one edits the selection, the other discards
+/// everything that was there — that reporting them under the same name would
+/// hide a data-loss-shaped surprise from the caller.
+public enum ReplacementScope: String, Sendable, Codable {
+    /// The element exposed a usable `AXSelectedTextRange`; only that range
+    /// (or the caret position) was rewritten.
+    case selection
+    /// No usable selection range: the entire value was overwritten.
+    case wholeValue
+
+    public var label: String {
+        switch self {
+        case .selection: return "replaced selection"
+        case .wholeValue: return "no selection range available — replaced the whole value"
+        }
+    }
+}
+
 /// Text entry through the accessibility value attributes rather than the
 /// keyboard. This path needs no focus, no frontmost window, and no cooperation
 /// from the active input method — which is why it is the preferred route
@@ -92,19 +111,24 @@ public enum TextInput {
     /// is empty) by rewriting AXValue at the string level, then parks the caret
     /// just after the inserted text. When the element exposes no usable
     /// selection, the whole value is replaced instead — still a real write,
-    /// just a coarser one.
+    /// just a coarser one, and the returned scope says which one happened so
+    /// the caller learns "your previous content is gone" from the result
+    /// instead of from the next read.
     public static func replaceSelection(
         with text: String,
         on element: AXUIElement
-    ) throws -> (verification: ActionVerification, resultingValue: String) {
+    ) throws -> (verification: ActionVerification, resultingValue: String, scope: ReplacementScope) {
         let newValue: String
         let caret: Int
+        let scope: ReplacementScope
         if let current = AX.string(element, kAXValueAttribute as String),
            let range = selectedTextRange(of: element) {
             (newValue, caret) = replacing(text, in: current, utf16Range: range)
+            scope = .selection
         } else {
             newValue = text
             caret = text.utf16.count
+            scope = .wholeValue
         }
 
         try AX.setValue(element, kAXValueAttribute as String, newValue as CFTypeRef)
@@ -124,7 +148,7 @@ public enum TextInput {
         case let .unverified(_, _, actual):
             resulting = actual ?? newValue
         }
-        return (verification, resulting)
+        return (verification, resulting, scope)
     }
 
     /// Splices `replacement` into `value` over a UTF-16 range.
