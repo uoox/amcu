@@ -82,6 +82,27 @@ func runTreeShapingTests(_ t: Harness) {
         )
     }
 
+    // Suppression yields to an actionable direct child through the same
+    // notion of actionable that elision uses, so a subtree cannot be cut for
+    // carrying exactly the kind of action that would save a group from
+    // elision (a combo box's inner drop-down button, a context-menu carrier).
+    t.expect(
+        TreeShaping.advertisesRealAction(["AXPress"]),
+        "AXPress is a real action"
+    )
+    t.expect(
+        TreeShaping.advertisesRealAction(["AXShowMenu"]),
+        "AXShowMenu counts as real — its carrier must stay reachable"
+    )
+    t.expect(
+        !TreeShaping.advertisesRealAction(["AXRaise", "AXScrollToVisible"]),
+        "system-attached actions alone are not real"
+    )
+    t.expect(
+        !TreeShaping.advertisesRealAction([]),
+        "no actions is not actionable"
+    )
+
     t.suite("tree shaping: viewport and actions")
 
     for role in ["AXTable", "AXOutline", "AXList"] {

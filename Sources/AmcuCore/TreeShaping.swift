@@ -47,7 +47,18 @@ public enum TreeShaping {
         guard structuralRoles.contains(role) else { return false }
         if let label, !label.isEmpty { return false }
         if let value, !value.isEmpty { return false }
-        return actions.allSatisfy { elisionIgnoredActions.contains($0) }
+        return !advertisesRealAction(actions)
+    }
+
+    /// Whether an action list promises anything beyond what the system attaches
+    /// to everything. This is the `elisionIgnoredActions` notion of actionable
+    /// (AXShowMenu counts), not the `presentationalActions` one: child
+    /// suppression uses it to decide whether hiding a subtree would hide the
+    /// only carrier of a real affordance, which is exactly the question elision
+    /// answers — a combo box's inner drop-down button must survive for the same
+    /// reason a context-menu-only group does.
+    public static func advertisesRealAction(_ actions: [String]) -> Bool {
+        !actions.allSatisfy { elisionIgnoredActions.contains($0) }
     }
 
     /// Whether descending into this element's subtree could reveal anything

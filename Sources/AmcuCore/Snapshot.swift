@@ -237,6 +237,12 @@ public enum SnapshotBuilder {
         var rowsOmitted = 0
         var focusedIndex: Int?
         let origin = window.frame.cgRect.origin
+        // Resolved once up front rather than probed during the walk: the walk
+        // can only see focus one level at a time, and a focused element buried
+        // more than one level under an elided or suppressed node would vanish
+        // — taking `focusedIndex` with it. The ancestry chain makes the
+        // protection depth-independent.
+        let focusPath = shaping ? focusAncestry(pid: app.pid, limits: limits) : []
 
         func walk(_ element: AXUIElement, depth: Int, path: [Int], ancestors: [AXUIElement]) {
             if nodes.count >= limits.maxNodes { truncated = true; return }
@@ -258,9 +264,13 @@ public enum SnapshotBuilder {
             // A meaningless wrapper is skipped but its subtree is not: the
             // children keep their real AXChildren indices in `path`, so
             // `resolve` — which replays the path over AXChildren — still lands
-            // on the right element. The focused element is never elided, or
-            // `focusedIndex` would have nothing to point at.
-            let elided = shaping && !focused && TreeShaping.shouldElide(role: role, label: nodeLabel, value: nodeValue, actions: actions)
+            // on the right element. The focused element and its ancestors are
+            // never elided, or `focusedIndex` would have nothing to point at.
+            // Both signals are honoured: the chain covers elements whose own
+            // AXFocused is stale or unpublished, and the per-node flag covers
+            // apps whose AXFocusedUIElement could not be read at all.
+            let onFocusPath = focusPath.contains(AXIdentity(element: element))
+            let elided = shaping && !focused && !onFocusPath && TreeShaping.shouldElide(role: role, label: nodeLabel, value: nodeValue, actions: actions)
             var childDepth = depth
             if elided {
                 elidedCount += 1
@@ -292,25 +302,29 @@ public enum SnapshotBuilder {
                     depth: depth,
                     path: path
                 ))
-                if shaping, TreeShaping.shouldSuppressChildren(role: role, label: nodeLabel) {
-                    // Suppression must yield to focus for the same reason
-                    // elision does: a hidden focused element leaves
-                    // `focusedIndex` with nothing to point at. Only direct
-                    // children are probed — the focused control inside a
-                    // compact wrapper (a combo box's editable text field) is
-                    // a direct child in AppKit, and a full subtree search
-                    // would cost exactly the traversal suppression exists to
-                    // avoid. A focus buried deeper stays hidden; that is the
-                    // accepted trade-off.
-                    let focusYields = AX.children(element).contains {
-                        AX.bool($0, kAXFocusedAttribute as String) ?? false
-                    }
-                    if !focusYields { return }
-                }
                 childDepth = depth + 1
             }
 
             let children = AX.children(element)
+            if shaping, !elided, TreeShaping.shouldSuppressChildren(role: role, label: nodeLabel) {
+                // Suppression must yield in two cases. To focus, for the same
+                // reason elision does: a hidden focused element leaves
+                // `focusedIndex` with nothing to point at — the ancestry chain
+                // makes this hold however deep the focus is buried. And to an
+                // actionable direct child: a labelled combo box's snapshot
+                // line does not repeat its inner drop-down button, so hiding
+                // it would take away the only way to open the list. Only
+                // direct children are probed for actions — one extra IPC call
+                // per child of a compact control, versus the full traversal
+                // suppression exists to avoid. An affordance buried deeper
+                // than one level stays hidden; unlike focus (which the app
+                // hands over in one call) finding it would cost the walk
+                // being saved, so that is the accepted trade-off.
+                let hasActionableChild = children.contains {
+                    TreeShaping.advertisesRealAction(AX.actions($0))
+                }
+                if !onFocusPath, !hasActionableChild { return }
+            }
             var kept = Array(children.enumerated())
             if shaping, TreeShaping.usesRowViewport(role: role),
                let rows = AX.attribute(element, "AXRows") as? [AXUIElement],
@@ -387,6 +401,37 @@ public enum SnapshotBuilder {
             rowsOmitted: rowsOmitted,
             capturedAt: Date()
         )
+    }
+
+    /// The focused element and every ancestor above it, as identities the walk
+    /// can test membership against. Asking the application once and walking
+    /// AXParent upward is correct by construction — every node the walk will
+    /// visit on the way down to the focus is in this set, however deeply the
+    /// focus is nested — where probing focus during the walk can only see one
+    /// level past whatever is about to be hidden.
+    ///
+    /// The chain deliberately runs all the way to the application element
+    /// rather than stopping at the window being captured: the focus may live
+    /// in another window, in which case none of its ancestors appear in this
+    /// walk and the set is simply never matched.
+    private static func focusAncestry(pid: pid_t, limits: SnapshotLimits) -> Set<AXIdentity> {
+        let appElement = AXUIElementCreateApplication(pid)
+        guard let focusedElement = AX.element(appElement, kAXFocusedUIElementAttribute as String) else {
+            // No focus means nothing needs protecting; an empty set leaves
+            // elision and suppression to their ordinary rules.
+            return []
+        }
+        var chain: Set<AXIdentity> = []
+        var current: AXUIElement? = focusedElement
+        // Same ceiling as the walk itself: a parent chain longer than the
+        // deepest tree the walk will visit cannot protect anything the walk
+        // can reach. The membership check doubles as the cycle guard —
+        // a hierarchy whose AXParent loops would otherwise never terminate.
+        while let element = current, chain.count <= limits.maxDepth {
+            guard chain.insert(AXIdentity(element: element)).inserted else { break }
+            current = AX.element(element, kAXParentAttribute as String)
+        }
+        return chain
     }
 
     /// The frame of the innermost AXScrollArea above a row container. The

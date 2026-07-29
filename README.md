@@ -337,6 +337,27 @@ verified with `amcu doctor` on a machine with permissions granted.
 
 Tests are a plain executable rather than an XCTest or swift-testing target: both of those need a full Xcode install to *run*, and this tool is meant to stay verifiable on a machine with only the Command Line Tools. Tests that only some contributors can execute are tests that rot.
 
+### End-to-end tests
+
+```bash
+AMCU_E2E=1 Tests/e2e/run.sh
+```
+
+This compiles a handful of tiny AppKit probe windows (a scrolled 200-row
+table, a focused text field, a self-drawn canvas that hides itself from the
+accessibility API, a pair of combo boxes) and drives the real `amcu` binary
+against them: viewport culling, `--no-shaping`, click-by-index, verified
+`set-value`/`replace` with a live selection, blind-window detection, and a
+check that no action command ever changes the frontmost application.
+
+It is opt-in via `AMCU_E2E=1` — without it the script exits 0 with a note —
+because it needs everything CI lacks: a logged-in window server session,
+Accessibility permission for the invoking terminal, and Automation permission
+for System Events. These scenarios earn their keep by catching bugs the unit
+suite structurally cannot (culling against the wrong reference frame,
+ScreenCaptureKit aborting the process outside a UI session), and faking those
+conditions in CI would test the fake.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
