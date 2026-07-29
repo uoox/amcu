@@ -23,10 +23,13 @@ THE NORMAL SEQUENCE
   4. Re-snapshot after anything that changes the interface. Indices describe a
      moment, not an identity.
 
-SELECTORS — THE MOST COMMON MISTAKE
-  Use a bundle id (`com.apple.finder`) or `pid:1234`. Display names are
-  localized: on a Chinese system `--app Finder` fails because the application is
-  called 访达. `amcu apps` lists all three forms.
+SELECTORS
+  Prefer a bundle id (`com.apple.finder`) or `pid:1234`. Both are exact.
+  Display names are localized — the application called Finder in English is 访达
+  on a Chinese system. An English name often still resolves, because the
+  selector also matches against part of the bundle id, but that is luck rather
+  than a rule, and an ambiguous name is rejected rather than guessed at.
+  `amcu apps` lists all three forms.
   A web page is not an application. Target the browser that shows it.
 
 ELEMENT INDICES ARE CHECKED, NOT TRUSTED
@@ -78,6 +81,10 @@ SNAPSHOTS ARE SHAPED
   exhaust the node budget before reaching the content. Whatever was hidden is
   counted at the end of the output. `--no-shaping` turns it off if something you
   expect is missing.
+  How much this helps varies. One web page shrank from the full 1500-node budget
+  to 803 nodes; another saved twelve and still truncated. When the output says
+  it truncated, narrow the target with `--window-id`, or raise `--max-nodes` —
+  do not assume the missing part of the interface is absent.
 
 READING ERRORS
   Every failure carries a code and concrete next steps. Follow them. When they
