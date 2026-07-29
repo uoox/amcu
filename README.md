@@ -198,6 +198,21 @@ What was hidden is counted in the output. `--no-shaping` turns all of it off.
 (hidden: 341 structural containers, 186 offscreen rows)
 ```
 
+### Reaching Chromium and Electron hierarchies
+
+Whitelisted hosts are asked to publish their accessibility tree — only
+`AXManualAccessibility`, never `AXEnhancedUserInterface`, because that second
+flag makes `AXPosition` writes be ignored and would quietly break this tool's
+own `window --move`.
+
+Measured honestly: on macOS 27 it changed nothing. Chrome reported 151 nodes
+before activation and 152 after; Lark, a genuine Electron app with a real
+window, reported 502 both times. Recent macOS appears to enable Chromium
+accessibility on its own once any assistive client is active. The flag is kept
+because it is one idempotent write, it is what these hosts document, and older
+systems may still need it — but it is a defensive measure that demonstrated no
+benefit here, not a fix for anything observed.
+
 ### Typing goes where the target's focus is
 
 Keystrokes land on whatever is focused *inside* the target application, which is
