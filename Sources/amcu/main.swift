@@ -1,7 +1,7 @@
 import Foundation
 import AmcuCore
 
-let version = "0.3.0"
+let version = "0.4.0"
 
 let helpText = """
 amcu \(version) — read and drive macOS applications without taking the user's screen
