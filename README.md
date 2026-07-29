@@ -81,8 +81,13 @@ Requires macOS 14 or later and a Swift toolchain (the Command Line Tools are eno
 git clone https://github.com/uoox/amcu
 cd amcu
 swift build -c release
-cp .build/release/amcu /usr/local/bin/
+install -m 755 .build/release/amcu ~/.local/bin/amcu   # or anywhere on your PATH
 ```
+
+Do not install it into a package manager's prefix (`/opt/homebrew/bin`,
+`/usr/local/bin` on Intel): those directories belong to the manager, and a
+hand-built binary sitting in one is something `brew doctor` will complain about
+and a future cleanup may remove.
 
 Then grant permissions to whatever runs amcu (your terminal, or the agent host):
 
