@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px/1.45 -apple-system, system-ui, sans-serif; margin: 0; padding: 12px 14px; width: 300px; color: #222; background: #fff; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .row { display: flex; justify-content: space-between; margin: 3px 0; }
+  .ok { color: #1a7f37; } .bad { color: #b42318; }
+  code { font: 12px ui-monospace, Menlo, monospace; background: #f3f3f3; padding: 1px 4px; border-radius: 3px; }
+  p { margin: 8px 0 0; color: #555; }
+  button { margin-top: 10px; font: inherit; padding: 4px 10px; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } code { background: #333; } p { color: #aaa; } .ok { color: #4caf50; } .bad { color: #ff6b6b; } }
+</style>
+</head>
+<body>
+<h1>amcu bridge <span id="version"></span></h1>
+<div class="row"><span>host</span><span id="host">…</span></div>
+<div class="row"><span>requests served</span><span id="requests">0</span></div>
+<div class="row"><span>debugger attached to</span><span id="attached">no tabs</span></div>
+<p id="hint"></p>
+<button id="detach">Detach debugger from all tabs</button>
+<script src="popup.js"></script>
+</body>
+</html>

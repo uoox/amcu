@@ -1,8 +1,8 @@
 # amcu — another macOS computer use
 
-Read and drive macOS applications **without taking over the screen**.
+Read and drive macOS applications **without taking over the screen** — and, through a small browser extension, web pages inside your own browser without tokens, ports or a separate profile.
 
-amcu is a small, dependency-free command-line tool for computer-use agents on macOS. It reads an application's accessibility tree, and clicks, types, scrolls and drags inside a target window — while you keep using your Mac. The cursor does not move. Focus does not change. The window does not come to the front.
+amcu is a small, dependency-free command-line tool for computer-use agents on macOS. It reads an application's accessibility tree, and clicks, types, scrolls and drags inside a target window — while you keep using your Mac. The cursor does not move. Focus does not change. The window does not come to the front. `amcu browser` does the same for tabs in Chrome (or any Chromium browser): an accessibility outline of the page with stable refs, and real input events delivered to tabs that need not even be visible.
 
 ```console
 $ amcu snapshot --app com.apple.textedit
@@ -123,7 +123,75 @@ ACT
   amcu drag       --app S --from X,Y --to X,Y
   amcu screenshot --app S --out FILE         capture one window, occluded or not
   amcu window     --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
+
+WEB PAGES
+  amcu browser install                       one-time: register the native host, write the extension
+  amcu browser tabs | tab --new --url U | tab --select ID | navigate --url U
+  amcu browser snapshot                      the page as an outline with [ref=e12] on every control
+  amcu browser click --ref e12 | fill --ref e7 --value V | type --ref e7 --text T --submit
+  amcu browser select-option | key | scroll | drag | hover | upload | dialog
+  amcu browser screenshot | eval --js EXPR | console | network | wait --text T
 ```
+
+### Web pages: `amcu browser`
+
+The desktop path can already read a browser window's accessibility tree, but a web page deserves better than what the window publishes: the whole document rather than the visible part, refs that survive a re-render, real input events on tabs that are not in front, navigation, evaluation, console and network. Playwright's MCP server does all of that through its "extension mode" — and needs a relay process, a token pasted into the extension, and a connection that has to be re-established every time either side restarts. That is what kept breaking, so amcu carries the same capability with none of the moving parts:
+
+- **The extension talks to amcu through Chrome's native messaging.** `amcu browser install` writes a manifest that names this binary as the host for the `amcu bridge` extension. The browser starts the host itself when the extension loads and enforces which extension id may connect. There is no listening port for a web page to probe, and no token, because the operating system already knows who is talking to whom.
+- **`amcu browser …` reaches that host over a Unix socket** in `~/Library/Caches/amcu/browser/`, one per running browser. If the extension is reloaded, the browser starts a new host and the next command finds it. If the browser quits, the socket goes away and the CLI says so instead of hanging.
+- **Reading is a content script; acting is the debugger protocol.** The snapshot is computed in the page (roles, accessible names, states, visibility, refs) and needs no debugger. Clicks, keys, drags, screenshots, evaluation, console and network go through `chrome.debugger`, so input events are indistinguishable from a user's — including for tabs that are not visible. The one visible side effect is the browser's "amcu bridge started debugging this browser" infobar while a tab stays attached; `amcu browser detach` removes it.
+
+Setup, once:
+
+```console
+$ swift build -c release && install -m 755 .build/release/amcu ~/.local/bin/amcu
+$ amcu browser install
+registered native host for chrome: ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/cc.uoox.amcu.json
+wrote extension 0.5.0 (id cgpbockoghamineoofoonidkickapbok) to ~/Library/Application Support/amcu/extension
+
+next: in the browser open chrome://extensions, turn on Developer mode (top right), click "Load unpacked"
+      and choose:  ~/Library/Application Support/amcu/extension
+then: amcu browser doctor
+```
+
+The extension is loaded unpacked from that folder; a fixed key in its manifest gives it the same id everywhere, which is what the native messaging manifest allows. Upgrading amcu means running `amcu browser install` again — it rewrites the folder and, when a browser is connected, asks the running extension to reload itself. Chrome, Chrome Beta/Dev/Canary, Chromium, Edge, Brave, Vivaldi, Arc and Opera all read the same kind of manifest, and `install` writes one for each that is present.
+
+Then it is the familiar shape:
+
+```console
+$ amcu browser tabs
+id=727784600	win=727784597:2	GitHub - uoox/amcu: another macOS computer use	https://github.com/uoox/amcu  (active)
+$ amcu browser snapshot
+tab 727784600 "GitHub - uoox/amcu: another macOS computer use" https://github.com/uoox/amcu  [chrome]
+- link "Skip to content" [ref=e1]:
+  - /url: https://github.com/uoox/amcu#start-of-content
+- banner:
+  - heading "Navigation Menu" [ref=e2] [level=2]
+  - link "Homepage" [ref=e3]:
+    - /url: https://github.com/
+  - navigation "Global":
+    - list:
+      - listitem:
+        - button "Platform" [ref=e4]
+...
+  - button "Search or jump to, type / to search" [ref=e10]
+...
+$ amcu browser click --ref e10
+click ok on e10 (button "Search or jump to, type / to search" [ref=e10]) at 827,36 via cdp
+$ amcu browser snapshot --interactive | grep combobox
+- combobox "Search or jump to" [ref=e170] [active] [expanded]
+$ amcu browser fill --ref e170 --value "background click"
+fill ok on e170 (combobox "Search or jump to" [ref=e170]) via cdp:insertText (verified)
+$ amcu browser key --key Enter
+key ok: Enter to tab 727784600 "GitHub - uoox/amcu: another macOS computer use" https://github.com/uoox/amcu
+→ navigated to https://github.com/search?q=background+click&type=repositories
+```
+
+Refs are checked the way element indices are: before an action, the element is re-resolved and its role and accessible name compared with what the snapshot recorded, so a page that changed underneath you yields `stale_snapshot` instead of a click on whatever moved there. Frames are part of the address — `f42e12` is element 12 of frame 42, and the snapshot prints each frame as its own section, with the iframe it sits in and coordinates translated on the way to a click. Each `--session` has its own current tab, so concurrent agents do not steal each other's; `tab --new` opens in the background unless `--activate` says otherwise.
+
+What `amcu browser` will not do, stated plainly: it cannot script `chrome://` pages, the Web Store or `file://` URLs unless the extension is granted file access; a screenshot needs the tab to render, which a background tab in a fully hidden window may not (the error says how to make it visible, and `snapshot` needs no pixels); `eval` cannot reach a cross-origin frame's script context, though clicking and typing inside one works; and a click on a covered element is refused with the cover named, because a click that lands on a cookie banner is exactly the kind of "success" this tool refuses to report. `--force` falls back to a JavaScript click when you know better.
+
+`amcu browser guide` carries the operating conventions for an agent, and `amcu browser doctor` diagnoses the setup end to end.
 
 ### Driving it from an agent
 
@@ -136,8 +204,8 @@ quarter's usage to a model with no way to know it is wrong.
 For Claude Code, that makes the whole integration one line in `CLAUDE.md`:
 
 ```markdown
-To read or operate a macOS desktop application, use `amcu`. Run `amcu guide`
-before the first use in a session.
+To read or operate a macOS desktop application, use `amcu`; for web pages,
+`amcu browser`. Run `amcu guide` before the first use in a session.
 ```
 
 No wrapper, no MCP server, nothing to keep in sync. An MCP server is only worth
@@ -312,6 +380,7 @@ Stated plainly, because finding these out at runtime is worse:
 - **Window management is opt-in.** `amcu window` moves, resizes, raises and un-minimizes — but no other command will do any of that on your behalf to make its own job easier.
 - **Lazily built menus read as empty.** Applications that populate a submenu only when it opens show that submenu with no items. `menu-item --press` can still reach them by opening the menu.
 - **Private API dependency.** Background *coordinate* clicks rely on `CGEventSetWindowLocation`. Semantic actions and `--mode foreground` do not. The self-check exists so you find out immediately rather than eventually.
+- **The browser extension is loaded unpacked.** Chrome requires Developer mode for that, and shows an infobar while amcu holds a tab's debugger. Publishing to the Web Store would remove the first; the second is how Chrome tells the user an extension is driving the page, and it stays.
 - **macOS only**, 14.0+.
 
 ## Prior art
@@ -337,10 +406,13 @@ verified with `amcu doctor` on a machine with permissions granted.
 
 Tests are a plain executable rather than an XCTest or swift-testing target: both of those need a full Xcode install to *run*, and this tool is meant to stay verifiable on a machine with only the Command Line Tools. Tests that only some contributors can execute are tests that rot.
 
+The browser extension lives in `extension/` and is embedded into the binary by `Scripts/embed-extension.py` (which regenerates `Sources/AmcuCore/ExtensionBundle.swift`); the test suite fails if the two drift apart, so run the script after touching anything under `extension/`.
+
 ### End-to-end tests
 
 ```bash
 AMCU_E2E=1 Tests/e2e/run.sh
+AMCU_E2E=1 AMCU_E2E_CHROME="/path/to/Chromium" Tests/e2e/browser/run.sh
 ```
 
 This compiles a handful of tiny AppKit probe windows (a scrolled 200-row
@@ -357,6 +429,13 @@ for System Events. These scenarios earn their keep by catching bugs the unit
 suite structurally cannot (culling against the wrong reference frame,
 ScreenCaptureKit aborting the process outside a UI session), and faking those
 conditions in CI would test the fake.
+
+The browser script starts a Chromium (Chrome for Testing or a Chromium build —
+branded Chrome no longer honours `--load-extension`) on a throwaway profile with
+the extension loaded and the native messaging manifest placed where that profile
+reads it, serves a small test site, and drives it: trusted clicks, verified
+fills, selects, dialogs, iframes, covered and off-screen elements, stale refs,
+upload, screenshot, console. It never touches your own browsers.
 
 ## License
 

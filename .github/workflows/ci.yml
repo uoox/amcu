@@ -21,3 +21,9 @@ jobs:
       # with permissions granted.
       - name: Test
         run: swift run -c release amcu-tests
+      # The extension is plain JavaScript with no build step; a syntax check
+      # catches the mistakes the Swift suite cannot see.
+      - name: Check extension
+        run: |
+          for f in extension/*.js; do node --check "$f"; done
+          python3 Scripts/embed-extension.py && git diff --exit-code -- Sources/AmcuCore/ExtensionBundle.swift

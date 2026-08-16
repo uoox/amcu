@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "amcu bridge",
+  "version": "0.5.0",
+  "description": "Lets the amcu command-line tool read and drive this browser's tabs through Chrome's native messaging — no tokens, no ports, no remote debugging flags.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArmpx4zHfPTZaX0C1oQHsEwRhOJ1PEm8uvGNFqhBJusjvVOX0qrpGG238e6vRfynnw6Ts84Y6HBBf+DIy7ZHtcPal+i47er2WWntRVqDq9tVH+nc+YaASsp8TGhCH3CwOmSjGvdKv5s8VbKeYCJai9y+exmK+2xcmLq8rMLtpb0vfOyta36JH9fZKydCR6fN2oawIY3+swNfPKO5fTogKJotNJgCoo3igslliULHUNTu4mLUwz4gBy39O0h40HJc3o6CNDjmQKU8AWv3W0cupXt8OKSfwx0pVl6e189TGbhyC0nu6G3QgkM4QpYZgGCexar2GvYcR16tJrSdATb3slQIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "nativeMessaging",
+    "tabs",
+    "scripting",
+    "debugger",
+    "webNavigation",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "amcu bridge",
+    "default_popup": "popup.html"
+  },
+  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+}

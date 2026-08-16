@@ -1,7 +1,7 @@
 import Foundation
 import AmcuCore
 
-let version = "0.4.0"
+let version = AmcuVersion.string
 
 let helpText = """
 amcu \(version) — read and drive macOS applications without taking the user's screen
@@ -33,6 +33,11 @@ ACT
   menu-item    --app S --path "A > B"   invoke a menu command, by shortcut where possible
   screenshot   --app S [--out FILE]     capture one window, occluded or not
   window       --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
+
+WEB PAGES
+  browser      <verb> …                 read and drive tabs in the user's own browser through
+                                        the amcu bridge extension — `amcu browser help`
+                                        lists the verbs, `amcu browser install` sets it up
 
 SELECTORS
   --app accepts a bundle id (com.apple.finder), pid:1234, or an application name.
@@ -90,6 +95,13 @@ NOTES
 """
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+
+// The browser launches this binary as the extension's native messaging host
+// with the extension origin as the only argument. Nothing else looks like that.
+if let first = arguments.first, first.hasPrefix("chrome-extension://") || first == "browser-host" {
+    NativeHost.run()
+}
+
 guard let command = arguments.first, !command.hasPrefix("--") else {
     if arguments.contains("--version") {
         print(version)
@@ -128,6 +140,7 @@ do {
     case "drag": try Commands.drag(flags)
     case "screenshot": try Commands.screenshot(flags)
     case "doctor": try Commands.doctor(flags)
+    case "browser": try BrowserCommands.run(flags)
     case "guide": print(guideText)
     case "help": print(helpText)
     case "version": print(version)

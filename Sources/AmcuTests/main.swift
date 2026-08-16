@@ -422,5 +422,6 @@ do {
 runTreeShapingTests(t)
 runChromiumAccessibilityTests(t)
 runTextInputTests(t)
+runBrowserBridgeTests(t)
 
 t.finish()

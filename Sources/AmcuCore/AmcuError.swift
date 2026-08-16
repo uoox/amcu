@@ -15,6 +15,14 @@ public struct AmcuError: Error, CustomStringConvertible {
         case accessibilityFailure = "accessibility_failure"
         case captureFailure = "capture_failure"
         case timeout = "timeout"
+        // Browser bridge codes, shared with the extension (which sends them as
+        // strings; `AmcuError.bridge` maps anything unrecognised to page_error).
+        case bridgeUnavailable = "bridge_unavailable"
+        case tabNotFound = "tab_not_found"
+        case pageError = "page_error"
+        case dialogOpen = "dialog_open"
+        case elementObscured = "element_obscured"
+        case valueMismatch = "value_mismatch"
     }
 
     public let code: Code

@@ -718,19 +718,23 @@ enum Commands {
         let check = flags.has("force") ? SelfCheck.probe() : SelfCheck.ensure()
         if flags.has("force") { SelfCheck.store(check) }
 
+        let browsers = BrowserClient.discover()
+
         struct Payload: Encodable {
             let ok: Bool
             let permissions: [PermissionState]
             let windowRouting: SelfCheckResult
             let axWindowIDs: Bool
             let osBuild: String
+            let browsers: [BrowserEndpoint]
         }
         let payload = Payload(
             ok: permissions.allSatisfy(\.granted) && check.usable,
             permissions: permissions,
             windowRouting: check,
             axWindowIDs: AX.canResolveWindowID,
-            osBuild: SelfCheck.osBuild
+            osBuild: SelfCheck.osBuild,
+            browsers: browsers
         )
         Output.emit(payload) {
             var lines = ["amcu doctor — \(SelfCheck.osBuild)"]
@@ -741,6 +745,11 @@ enum Commands {
             lines.append("  [\(check.usable ? "ok" : "  ")] background pointer delivery: \(check.summary)")
             if !check.usable {
                 lines.append("  next: use --mode foreground, or drive elements semantically via `amcu snapshot` + `amcu click --element N`.")
+            }
+            if browsers.isEmpty {
+                lines.append("  [  ] browser bridge: no browser connected — optional; `amcu browser doctor` explains the one-time setup")
+            } else {
+                lines.append("  [ok] browser bridge: \(browsers.map(\.label).joined(separator: ", ")) connected — `amcu browser` drives web pages")
             }
             return lines.joined(separator: "\n")
         }

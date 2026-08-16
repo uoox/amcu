@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>amcu test page</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  .hidden { display: none; }
+  .clickable { cursor: pointer; padding: 6px; border: 1px solid #ccc; display: inline-block; }
+  #overlay { position: fixed; top: 0; left: 0; right: 0; height: 60px; background: rgba(200,200,255,.9); display: none; }
+  .tall { height: 1400px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">amcu test page</h1>
+  <nav aria-label="Main">
+    <ul>
+      <li><a href="/second.html" id="second-link">Second page</a></li>
+      <li><a href="#section" title="jump">Jump to section</a></li>
+    </ul>
+  </nav>
+</header>
+<main>
+  <section id="section" aria-labelledby="sec-h">
+    <h2 id="sec-h">A form</h2>
+    <form id="form" onsubmit="event.preventDefault(); log('submitted ' + document.getElementById('name').value); return false;">
+      <label for="name">Name</label> <input id="name" placeholder="your name">
+      <label>Email <input type="email" id="email" required></label>
+      <label for="pw">Password</label> <input id="pw" type="password" value="hunter2">
+      <label for="notes">Notes</label> <textarea id="notes"></textarea>
+      <label for="country">Country</label>
+      <select id="country"><option value="">--</option><option value="cn">China</option><option value="us">United States</option><option value="jp">Japan</option></select>
+      <label><input type="checkbox" id="agree"> I agree</label>
+      <input type="radio" name="r" id="r1" value="a"><label for="r1">Option A</label>
+      <input type="radio" name="r" id="r2" value="b"><label for="r2">Option B</label>
+      <button type="submit" id="submit">Submit</button>
+      <button type="button" id="disabled-btn" disabled>Disabled</button>
+      <input type="file" id="file" onchange="log('files: ' + Array.from(this.files).map(f=>f.name).join(','))">
+      <input type="date" id="date">
+      <input type="number" id="num" value="3">
+    </form>
+    <div id="editor" contenteditable="true" style="border:1px solid #888; min-height: 30px;">edit me</div>
+    <div id="rich-editor" contenteditable="true" style="border:1px solid #08f; min-height: 30px;"><p>first para</p><p>second <b>bold</b></p></div>
+    <div class="clickable" id="div-btn" onclick="log('div clicked'); this.textContent='clicked!'">Click me (div)</div>
+    <span id="counter" role="button" tabindex="0" aria-label="Increment" onclick="this.dataset.n=(+this.dataset.n||0)+1; log('count ' + this.dataset.n)">+</span>
+    <button id="alert-btn" onclick="alert('hello alert'); log('alert closed')">Alert</button>
+    <button id="confirm-btn" onclick="log('confirm=' + confirm('sure?'))">Confirm</button>
+    <button id="prompt-btn" onclick="log('prompt=' + prompt('name?', 'dflt'))">Prompt</button>
+    <button id="cover-btn" onclick="document.getElementById('overlay').style.display='block'">Show overlay</button>
+    <button id="hover-btn" onmouseover="log('hovered')">Hover me</button>
+    <button id="new-tab" onclick="window.open('/second.html', '_blank')">Open new tab</button>
+    <button id="hidden-toggle" onclick="document.getElementById('secret').classList.toggle('hidden')">Toggle hidden</button>
+    <p id="secret" class="hidden">Now you see me</p>
+    <p aria-hidden="true">aria hidden text</p>
+    <div id="log" aria-live="polite"></div>
+  </section>
+  <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="tiny pixel" width="20" height="20">
+  <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="" width="20" height="20">
+  <table>
+    <caption>People</caption>
+    <thead><tr><th>Name</th><th>Age</th></tr></thead>
+    <tbody><tr><td>Alice</td><td>30</td></tr><tr><td>Bob</td><td>41</td></tr></tbody>
+  </table>
+  <iframe id="frame1" src="/frame.html" title="Inner frame" width="400" height="150" style="border: 3px solid red; padding: 10px;"></iframe>
+  <div class="tall">tall spacer</div>
+  <button id="bottom-btn" onclick="log('bottom clicked')">Bottom button</button>
+  <div id="overlay">overlay covers the top</div>
+  <details><summary>More</summary><p>Details content</p></details>
+  <a href="https://example.com/x" id="ext-link">External</a>
+</main>
+<footer><p>Footer text</p></footer>
+<script>
+  function log(m) { const d = document.createElement('div'); d.textContent = m; document.getElementById('log').appendChild(d); console.log('LOG: ' + m); }
+  console.warn('early warning');
+  console.log('page loaded');
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') log('escape pressed'); });
+  document.getElementById('name').addEventListener('input', e => { if (!e.isTrusted) log('UNTRUSTED input'); });
+  document.getElementById('div-btn').addEventListener('click', e => { if (!e.isTrusted) log('UNTRUSTED click'); });
+  window.addEventListener('keydown', e => { if (e.metaKey && e.key === 'k') log('cmd+k'); });
+</script>
+</body>
+</html>
