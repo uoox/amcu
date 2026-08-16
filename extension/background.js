@@ -827,6 +827,54 @@ async function waitForLoad(tabId, timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
+// Action-effect observation. Armed in the top frame (portals/menus land in the
+// top document's <body>) and, for a frame-targeted action, in that frame too.
+// Everything is best-effort: an unarmable page just yields no effect report.
+
+async function armObserver(tabId, frameId) {
+  const targets = frameId && frameId !== 0 ? [0, frameId] : [0];
+  const armed = [];
+  for (const target of targets) {
+    try {
+      await callFrame(tabId, target, 'observe-start', {}, 3000);
+      armed.push(target);
+    } catch (_) { /* frame not scriptable */ }
+  }
+  return armed;
+}
+
+async function reportObserver(tabId, armed, after) {
+  if (!armed.length) return null;
+  // A navigation replaced the document (observer gone with it), and an open
+  // dialog blocks the page's event loop — the report would hang. Still tell a
+  // surviving content script (same-document navigation) to stand down, so the
+  // observer does not keep counting until the next action.
+  if (!after || after.closed || after.navigated || after.dialog) {
+    for (const frameId of armed) callFrame(tabId, frameId, 'observe-stop', {}, 1500).catch(() => {});
+    return null;
+  }
+  const out = { changes: { added: 0, removed: 0, attributes: 0, text: 0 }, appeared: [], appearedMore: 0, focus: null, settled: true };
+  let any = false;
+  for (const frameId of armed) {
+    try {
+      const report = await callFrame(tabId, frameId, 'observe-report', {}, 5000);
+      if (!report || !report.armed) continue;
+      any = true;
+      for (const key of Object.keys(out.changes)) out.changes[key] += (report.changes && report.changes[key]) || 0;
+      for (const item of report.appeared || []) {
+        if (out.appeared.includes(item)) continue;
+        if (out.appeared.length >= 5) { out.appearedMore += 1; continue; }
+        out.appeared.push(item);
+      }
+      out.appearedMore += report.appearedMore || 0;
+      if (report.focus && !out.focus) out.focus = report.focus;
+      if (report.settled === false) out.settled = false;
+    } catch (_) { /* the page may have navigated after all */ }
+  }
+  return any ? out : null;
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 
 async function handleRequest(method, params) {
@@ -948,10 +996,19 @@ const handlers = {
     requireNoDialog(tab.id);
     await inject(tab.id);
     const frames = await listFrames(tab.id);
-    const options = { selector: params.selector, maxNodes: params.maxNodes, allRefs: params.allRefs, interactiveOnly: params.interactiveOnly };
+    const options = { selector: params.selector, maxNodes: params.maxNodes, allRefs: params.allRefs, interactiveOnly: params.interactiveOnly, diff: params.diff };
+    let within = null;
+    if (params.within) within = parseRef(params.within);
     let wanted = params.frame !== undefined && params.frame !== null ? frames.filter(f => f.frameId === params.frame) : frames;
     // A CSS selector addresses one document; without --frame that is the main one.
     if (params.selector && (params.frame === undefined || params.frame === null)) wanted = frames.filter(f => f.frameId === 0);
+    // --within names one element in one frame; snapshot only that frame.
+    if (within) {
+      wanted = frames.filter(f => f.frameId === within.frameId);
+      if (!wanted.length) {
+        throw new BridgeError('stale_snapshot', `frame ${within.frameId} no longer exists in this tab`, ['Re-run `amcu browser snapshot`.']);
+      }
+    }
     if (params.frame !== undefined && params.frame !== null && !wanted.length) {
       throw new BridgeError('element_not_found', `no frame ${params.frame} in this tab`, ['Frame ids appear in the snapshot as f<id>; re-run `amcu browser snapshot`.']);
     }
@@ -963,6 +1020,7 @@ const handlers = {
       const isMain = frame.frameId === 0;
       const frameOptions = Object.assign({}, options, { maxNodes: budget });
       if (!isMain && params.selector) frameOptions.selector = undefined;
+      if (within && frame.frameId === within.frameId) frameOptions.within = within.local;
       let result;
       try {
         result = await callFrame(tab.id, frame.frameId, 'snapshot', frameOptions, 15000);
@@ -990,7 +1048,13 @@ const handlers = {
         truncated: result.truncated,
         hiddenGenerics: result.hiddenGenerics,
         focusedRef: result.focusedRef ? (isMain ? result.focusedRef : `f${frame.frameId}${result.focusedRef}`) : null,
-        iframes: localIframes
+        iframes: localIframes,
+        gen: result.gen,
+        scroll: result.scroll || null,
+        diff: result.diff === true,
+        added: result.added,
+        removed: result.removed,
+        diffBase: result.diffBase
       });
     }
     // Best-effort: name the iframe each child frame lives in, by matching the
@@ -1005,6 +1069,32 @@ const handlers = {
       if (match) r.parentRef = match.ref;
     }
     return { tab: tabSummary(tab), frames: results };
+  },
+
+  async find(params) {
+    const tab = await resolveTab(params);
+    requireNoDialog(tab.id);
+    await inject(tab.id);
+    const frames = await listFrames(tab.id);
+    const matches = [];
+    let total = 0;
+    let gen = null;
+    for (const frame of frames.slice().sort((a, b) => a.frameId - b.frameId)) {
+      let result;
+      try {
+        result = await callFrame(tab.id, frame.frameId, 'find', { query: params.query, role: params.role, limit: params.limit }, 15000);
+      } catch (error) {
+        if (frame.frameId === 0) throw asBridgeError(error);
+        continue;
+      }
+      const lines = frame.frameId === 0
+        ? result.matches
+        : result.matches.map(line => line.replace(/\[ref=e(\d+)\]/g, `[ref=f${frame.frameId}e$1]`));
+      for (const line of lines) matches.push(line);
+      total += result.total;
+      if (frame.frameId === 0) gen = result.gen;
+    }
+    return { tab: tabSummary(tab), matches, total, gen };
   },
 
   async click(params) {
@@ -1026,6 +1116,7 @@ const handlers = {
     }
     let mode = 'cdp';
     let dialog = null;
+    const armed = await armObserver(tab.id, target.frameId);
     if (params.force && target.hit !== 'ok' && target.hit !== 'ancestor') {
       await callFrame(tab.id, target.frameId, 'js-click', { ref: target.local });
       mode = 'js:click';
@@ -1034,6 +1125,8 @@ const handlers = {
       dialog = (await mouseAt(tab.id, target.x, target.y, { button, clickCount: params.count || 1, modifiers: modifierMask(params.modifiers) })).dialog;
     }
     const after = await settle(tab.id, before, 5000, dialog);
+    const effect = await reportObserver(tab.id, armed, after);
+    if (effect) after.effect = effect;
     return {
       tab: tabSummary(tab),
       ref: params.ref,
@@ -1041,6 +1134,7 @@ const handlers = {
       point: { x: Math.round(target.x), y: Math.round(target.y) },
       mode,
       fromEarlierSnapshot: target.fromEarlierSnapshot,
+      unstable: target.stable === false,
       obscuredNote: target.hit === 'ancestor' ? `pointer lands on ${target.obscuredBy}` : null,
       after
     };
@@ -1080,6 +1174,7 @@ const handlers = {
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
     const focus = await callFrame(tab.id, frameId, 'focus-for-input', { ref: local, mode: params.replace ? 'replace' : 'append' });
+    const armed = await armObserver(tab.id, frameId);
     const text = String(params.text === undefined ? '' : params.text);
     let dialog = null;
     if (params.slowly) dialog = (await typeSlowly(tab.id, text)).dialog;
@@ -1090,7 +1185,9 @@ const handlers = {
       submitted = true;
     }
     const before = { url: tab.url };
-    const after = params.submit || dialog ? await settle(tab.id, before, 5000, dialog) : null;
+    const after = params.submit || dialog ? await settle(tab.id, before, 5000, dialog) : { navigated: false, url: tab.url };
+    const effect = await reportObserver(tab.id, armed, after);
+    if (effect) after.effect = effect;
     let value = null;
     try {
       value = (await callFrame(tab.id, frameId, 'value', { ref: local }, 3000)).value;
@@ -1174,12 +1271,15 @@ const handlers = {
     }
     const before = { url: tab.url };
     const count = Math.max(1, params.count || 1);
+    const armed = await armObserver(tab.id, params.ref ? parseRef(params.ref).frameId : 0);
     let pressed;
     for (let i = 0; i < count; i++) {
       pressed = await pressKey(tab.id, params.key, params.modifiers || []);
       if (pressed.dialog) break;
     }
     const after = await settle(tab.id, before, 3000, pressed.dialog);
+    const effect = await reportObserver(tab.id, armed, after);
+    if (effect) after.effect = effect;
     return { tab: tabSummary(tab), key: pressed.key, modifiers: params.modifiers || [], count, after };
   },
 
@@ -1302,6 +1402,15 @@ const handlers = {
       const live = await getTab(tab.id);
       if (!live) throw new BridgeError('tab_not_found', 'the tab closed while waiting');
       if (params.load) return live.status === 'complete' ? { waited: 'load' } : null;
+      if (params.urlPattern) {
+        let re;
+        try {
+          re = new RegExp(params.urlPattern);
+        } catch (error) {
+          throw new BridgeError('invalid_argument', `--url-matches is not a valid regex: ${error.message}`);
+        }
+        return re.test(live.url || '') ? { waited: 'url-matches', url: live.url } : null;
+      }
       if (params.url) return (live.url || '').includes(params.url) ? { waited: 'url', url: live.url } : null;
       if (params.text || params.textGone) {
         const frames = await listFrames(tab.id);
@@ -1315,8 +1424,11 @@ const handlers = {
         if (params.text) return found ? { waited: 'text' } : null;
         return found ? null : { waited: 'text-gone' };
       }
-      throw new BridgeError('invalid_argument', 'wait needs --text, --text-gone, --url, --load or --time');
+      throw new BridgeError('invalid_argument', 'wait needs --text, --text-gone, --url, --url-matches, --load or --time');
     };
+    // Backing-off poll (Playwright's cadence): fast first checks, calm later.
+    const delays = [100, 250, 500];
+    let attempt = 0;
     while (true) {
       const done = await check();
       if (done) return Object.assign({ tab: tabSummary(await getTab(tab.id) || tab), elapsedMs: Date.now() - started }, done);
@@ -1326,7 +1438,8 @@ const handlers = {
           'Raise the limit with --timeout SECONDS if the page is legitimately slow.'
         ]);
       }
-      await sleep(250);
+      await sleep(attempt < delays.length ? delays[attempt] : 1000);
+      attempt += 1;
     }
   },
 

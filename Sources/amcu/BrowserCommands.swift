@@ -31,19 +31,23 @@ enum BrowserCommands {
       back | forward | reload [--hard]
 
     READ
-      snapshot    [--selector CSS] [--interactive] [--all-refs] [--max-nodes N] [--frame ID]
-                                            the page as an accessibility outline with refs
+      snapshot    [--selector CSS] [--within R] [--interactive] [--all-refs] [--max-nodes N] [--frame ID]
+                                            the page as an accessibility outline with refs;
+                  [--diff]                  only the lines added/removed since the last snapshot
+      find        --text T [--role R] [--limit N]
+                                            search the last snapshot (substring or /regex/)
       screenshot  [--out F] [--ref R] [--full] [--format png|jpeg]
       eval        --js EXPR [--ref R]       evaluate in the page (a function receives the element)
       console     [--level error] [--clear] console messages, including ones logged before attach
       network     [--clear]                 requests seen since the debugger attached
-      wait        --text T | --text-gone T | --url U | --load | --time S
+      wait        --text T | --text-gone T | --url U | --url-matches REGEX | --load | --time S
 
     ACT (by ref from the last snapshot)
       click       --ref R [--button right] [--count 2] [--mod cmd] [--force]
       hover       --ref R
       type        --ref R --text T [--submit] [--slowly] [--replace]
       fill        --ref R --value V         replace the value and read it back (verified)
+                  --ref R --secret KEY      value from the --secrets file, masked in output
       select-option --ref R --value V | --values A,B
       key         --key K [--mod cmd,shift] [--ref R] [--count N]
       scroll      [--dy N] [--dx N] [--ref R]
@@ -58,17 +62,26 @@ enum BrowserCommands {
       --session NAME    keep a separate current tab per agent (default: "default")
       --browser NAME    chrome, edge, brave, … or NAME:PID when several are connected
       --timeout S       per-command limit in seconds (default 30; navigation and wait honour it)
+      --secrets FILE    dotenv KEY=VALUE file (or $AMCU_SECRETS): enables --secret KEY and masks
+                        the values in all output (snapshots/echoes reliably; network/console
+                        best-effort — re-encoded copies are not caught)
       --json            machine-readable output
 
     Refs look like e12 (main frame) or f42e12 (frame 42). They are re-verified
     against the element's role and name before use; a changed page yields a
     stale_snapshot error, not a click on whatever moved there.
+    After click/type/key the result reports what the action visibly did:
+    navigation, a dialog, N DOM changes, what appeared, where focus went —
+    or "no DOM change observed" when nothing did.
     """
 
     static func run(_ flags: Flags) throws {
         guard let verb = flags.positional.first else {
             print(helpText)
             return
+        }
+        if let path = flags.string("secrets") ?? ProcessInfo.processInfo.environment["AMCU_SECRETS"] {
+            try SecretStore.load(path: path)
         }
         switch verb {
         case "install": try install(flags)
@@ -84,6 +97,7 @@ enum BrowserCommands {
         case "forward": try simple(flags, "forward", action: "forward")
         case "reload": try simple(flags, "reload", action: "reload", extra: ["hard": flags.has("hard")])
         case "snapshot": try snapshot(flags)
+        case "find": try find(flags)
         case "screenshot": try screenshot(flags)
         case "eval", "evaluate": try evaluate(flags)
         case "console": try console(flags)
@@ -153,7 +167,33 @@ enum BrowserCommands {
             let loading = after["loading"].bool == true ? " (still loading)" : ""
             return "→ navigated to \(after["url"].string ?? "?")\(loading)"
         }
-        return nil
+        return effectLine(after["effect"])
+    }
+
+    /// What the action visibly did, from the change observer: DOM mutation
+    /// counts, elements that appeared, focus movement. Temporal association,
+    /// not causation — concurrent page activity is counted too.
+    static func effectLine(_ effect: JSONValue) -> String? {
+        guard !effect.isNull else { return nil }
+        let changes = effect["changes"]
+        let total = (changes["added"].int ?? 0) + (changes["removed"].int ?? 0)
+            + (changes["attributes"].int ?? 0) + (changes["text"].int ?? 0)
+        var bits: [String] = []
+        if total == 0 {
+            bits.append("no DOM change observed")
+        } else {
+            bits.append("\(total) DOM change\(total == 1 ? "" : "s")")
+        }
+        let appeared = effect["appeared"].array.compactMap { $0.string }
+        if !appeared.isEmpty {
+            var list = appeared.joined(separator: ", ")
+            if let more = effect["appearedMore"].int, more > 0 { list += " (+\(more) more)" }
+            bits.append("appeared: \(list)")
+        }
+        if let focus = effect["focus"].string { bits.append("focus → \(focus)") }
+        var line = "→ " + bits.joined(separator: "; ")
+        if effect["settled"].bool == false { line += " (page still updating)" }
+        return line
     }
 
     struct BrowserResult: Encodable {
@@ -398,10 +438,15 @@ enum BrowserCommands {
     static func snapshot(_ flags: Flags) throws {
         var params = try baseParams(flags)
         if let selector = flags.string("selector") { params["selector"] = selector }
+        if flags.string("within") != nil { params["within"] = try requiredRef(flags, "within") }
         if let frame = try flags.int("frame") { params["frame"] = frame }
         if let maxNodes = try flags.boundedInt("max-nodes", min: 1, max: 50_000) { params["maxNodes"] = maxNodes }
         params["allRefs"] = flags.has("all-refs")
         params["interactiveOnly"] = flags.has("interactive")
+        params["diff"] = flags.has("diff")
+        if flags.has("diff") && (params["selector"] != nil || params["within"] != nil || flags.has("interactive")) {
+            throw AmcuError(.invalidArgument, "--diff compares plain full snapshots; it cannot combine with --selector, --within or --interactive")
+        }
         let client = try client(flags)
         let result = try client.request("snapshot", params: params, timeout: try timeout(flags, default: 40))
         emit(client, action: "snapshot", result: result) {
@@ -411,6 +456,16 @@ enum BrowserCommands {
             var hidden = 0
             var truncated = false
             var focused: String?
+            var mainGen: Int?
+            var scrollAbove = 0
+            var scrollBelow = 0
+            var diffAdded: Int?
+            var diffRemoved: Int?
+            var diffBase: Int?
+            var diffWithoutBase = false
+            let mainOrigin = result["frames"].array.first { $0["frameId"].int == 0 }
+                .flatMap { $0["url"].string }.flatMap { URL(string: $0) }
+                .map { "\($0.scheme ?? "")://\($0.host ?? "")" }
             for frame in result["frames"].array {
                 let isMain = frame["frameId"].int == 0
                 if !isMain {
@@ -419,11 +474,33 @@ enum BrowserCommands {
                         continue
                     }
                     let parent = frame["parentRef"].string.map { " (iframe [ref=\($0)])" } ?? ""
+                    let origin = frame["url"].string.flatMap { URL(string: $0) }.map { "\($0.scheme ?? "")://\($0.host ?? "")" }
+                    let crossOrigin = (mainOrigin != nil && origin != nil && origin != mainOrigin) ? " [cross-origin]" : ""
                     lines.append("")
-                    lines.append("frame f\(frame["frameId"].int ?? 0) \(frame["url"].string ?? "")\(parent):")
+                    lines.append("frame f\(frame["frameId"].int ?? 0) \(frame["url"].string ?? "")\(crossOrigin)\(parent):")
+                }
+                if isMain {
+                    mainGen = frame["gen"].int
+                    scrollAbove = frame["scroll"]["above"].int ?? 0
+                    scrollBelow = frame["scroll"]["below"].int ?? 0
+                    if frame["diff"].bool == true {
+                        diffAdded = frame["added"].int
+                        diffRemoved = frame["removed"].int
+                        diffBase = frame["diffBase"].int
+                    } else if flags.has("diff") {
+                        diffWithoutBase = true
+                    }
                 }
                 let text = frame["text"].string ?? ""
-                if !text.isEmpty { lines.append(text) } else if isMain { lines.append("(nothing visible in this document)") }
+                if !text.isEmpty {
+                    lines.append(text)
+                } else if isMain {
+                    if frame["diff"].bool == true {
+                        lines.append("(no changes since snapshot #\(frame["diffBase"].int ?? 0))")
+                    } else {
+                        lines.append("(nothing visible in this document)")
+                    }
+                }
                 totalNodes += frame["nodes"].int ?? 0
                 rendered += frame["rendered"].int ?? 0
                 hidden += frame["hiddenGenerics"].int ?? 0
@@ -431,10 +508,47 @@ enum BrowserCommands {
                 if let ref = frame["focusedRef"].string { focused = ref }
             }
             var notes: [String] = []
+            if let gen = mainGen { notes.append("snapshot #\(gen)") }
+            if let added = diffAdded, let removed = diffRemoved {
+                notes.append("+\(added)/−\(removed) lines since snapshot #\(diffBase ?? 0)")
+            }
+            if diffWithoutBase { notes.append("no earlier snapshot to diff against — full snapshot shown") }
+            if scrollAbove > 0 || scrollBelow > 0 {
+                var parts: [String] = []
+                if scrollAbove > 0 { parts.append("~\(scrollAbove)px above") }
+                if scrollBelow > 0 { parts.append("~\(scrollBelow)px below") }
+                notes.append("scroll: \(parts.joined(separator: ", ")) the viewport")
+            }
             if hidden > 0 { notes.append("\(hidden) plain containers folded into their parents") }
-            if truncated { notes.append("truncated at \(rendered) of \(totalNodes) nodes — narrow with --selector CSS or --interactive, or raise --max-nodes") }
+            if truncated { notes.append("truncated at \(rendered) of \(totalNodes) nodes — narrow with --selector CSS, --within R or --interactive, or raise --max-nodes") }
             if let focused { notes.append("focus: \(focused)") }
             if !notes.isEmpty { lines.append("(\(notes.joined(separator: "; ")))") }
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    static func find(_ flags: Flags) throws {
+        var params = try baseParams(flags)
+        params["query"] = flags.string("text") ?? flags.positional.dropFirst().first
+        guard params["query"] != nil else {
+            throw AmcuError(.invalidArgument, "find needs --text T", nextSteps: [
+                "T is a case-insensitive substring, or /pattern/ (optionally /pattern/i) for a regex.",
+                "find searches the last snapshot's lines, so refs it prints are ready to act on."
+            ])
+        }
+        if let role = flags.string("role") { params["role"] = role }
+        if let limit = try flags.boundedInt("limit", min: 1, max: 200) { params["limit"] = limit }
+        let client = try client(flags)
+        let result = try client.request("find", params: params, timeout: try timeout(flags, default: 40))
+        emit(client, action: "find", result: result) {
+            let matches = result["matches"].array.compactMap { $0.string }
+            var lines = matches
+            if lines.isEmpty { lines.append("(no matches)") }
+            let total = result["total"].int ?? matches.count
+            var note = "\(total) match\(total == 1 ? "" : "es")"
+            if matches.count < total { note += ", showing \(matches.count) — raise --limit" }
+            if let gen = result["gen"].int { note += " in snapshot #\(gen)" }
+            lines.append("(\(note))")
             return lines.joined(separator: "\n")
         }
     }
@@ -542,6 +656,7 @@ enum BrowserCommands {
         if let text = flags.string("text") { params["text"] = text }
         if let text = flags.string("text-gone") { params["textGone"] = text }
         if let url = flags.string("url") { params["url"] = url }
+        if let pattern = flags.string("url-matches") { params["urlPattern"] = pattern }
         if flags.has("load") { params["load"] = true }
         if let time = try flags.double("time") { params["time"] = time }
         let seconds = try timeout(flags, default: 30)
@@ -576,6 +691,7 @@ enum BrowserCommands {
             parts.append("via \(result["mode"].string ?? "cdp")")
             var line = parts.joined(separator: " ")
             if let note = result["obscuredNote"].string { line += " (\(note))" }
+            if result["unstable"].bool == true { line += " (target was still moving when clicked)" }
             if result["fromEarlierSnapshot"].bool == true { line += " (ref from an earlier snapshot)" }
             var lines = [line]
             if let after = afterLine(result["after"]) { lines.append(after) }
@@ -596,7 +712,11 @@ enum BrowserCommands {
     static func type(_ flags: Flags) throws {
         var params = try baseParams(flags)
         params["ref"] = try requiredRef(flags)
-        params["text"] = try flags.required("text")
+        if let key = flags.string("secret") {
+            params["text"] = try SecretStore.value(forKey: key)
+        } else {
+            params["text"] = try flags.required("text", hint: "Pass --text T, or --secret KEY with --secrets FILE to type from a dotenv file.")
+        }
         params["submit"] = flags.has("submit")
         params["slowly"] = flags.has("slowly")
         params["replace"] = flags.has("replace")
@@ -615,7 +735,11 @@ enum BrowserCommands {
     static func fill(_ flags: Flags) throws {
         var params = try baseParams(flags)
         params["ref"] = try requiredRef(flags)
-        params["value"] = try flags.required("value")
+        if let key = flags.string("secret") {
+            params["value"] = try SecretStore.value(forKey: key)
+        } else {
+            params["value"] = try flags.required("value", hint: "Pass --value V, or --secret KEY with --secrets FILE to fill from a dotenv file.")
+        }
         let client = try client(flags)
         let result = try client.request("fill", params: params, timeout: try timeout(flags))
         guard result["verified"].bool == true else {

@@ -50,6 +50,13 @@
     <button id="new-tab" onclick="window.open('/second.html', '_blank')">Open new tab</button>
     <button id="hidden-toggle" onclick="document.getElementById('secret').classList.toggle('hidden')">Toggle hidden</button>
     <p id="secret" class="hidden">Now you see me</p>
+    <div id="js-action" jsaction="click:app.go">JsAction target</div>
+    <button id="appear-btn">Appear</button>
+    <button id="noop-btn">Noop</button>
+    <input id="zip" aria-label="Zip" maxlength="5" pattern="[0-9]{5}" inputmode="numeric">
+    <p id="ghost" style="opacity:0">ghost opacity text</p>
+    <p id="tiny" style="font-size:1px">tiny font text</p>
+    <p id="camo" style="color:#fdfdfd">camouflage text</p>
     <p aria-hidden="true">aria hidden text</p>
     <div id="log" aria-live="polite"></div>
   </section>
@@ -76,6 +83,13 @@
   document.getElementById('name').addEventListener('input', e => { if (!e.isTrusted) log('UNTRUSTED input'); });
   document.getElementById('div-btn').addEventListener('click', e => { if (!e.isTrusted) log('UNTRUSTED click'); });
   window.addEventListener('keydown', e => { if (e.metaKey && e.key === 'k') log('cmd+k'); });
+  document.getElementById('js-action').addEventListener('click', () => log('jsaction clicked'));
+  document.getElementById('appear-btn').addEventListener('click', () => {
+    const d = document.createElement('div');
+    d.setAttribute('role', 'dialog'); d.setAttribute('aria-label', 'Popup dialog');
+    d.textContent = 'I appeared';
+    document.body.appendChild(d);
+  });
 </script>
 </body>
 </html>

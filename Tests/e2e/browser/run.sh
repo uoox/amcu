@@ -170,6 +170,48 @@ H1=$(ref_of "$SNAP" 'heading "amcu test page"')
 check "refuses a covered element" "$("$AMCU" browser click --ref "$H1" 2>&1)" 'element_obscured'
 check "--force falls back to a JS click" "$("$AMCU" browser click --ref "$H1" --force)" 'js:click'
 
+echo "markers and constraints"
+SNAP2="$("$AMCU" browser snapshot)"
+check "handler-only div gets a ref and [clickable]" "$(echo "$SNAP2" | grep 'JsAction target')" '[clickable]'
+JSA=$(ref_of "$SNAP2" 'JsAction target')
+"$AMCU" browser click --ref "$JSA" >/dev/null
+check "the jsaction div's listener fired" "$("$AMCU" browser snapshot --selector '#log')" 'jsaction clicked'
+check "live validation constraints are shown" "$(echo "$SNAP2" | grep 'textbox "Zip"')" 'maxlength=5'
+check "opacity-hidden text is flagged" "$(echo "$SNAP2" | grep 'ghost opacity text')" '[unseen=opacity]'
+check "near-zero fonts are flagged" "$(echo "$SNAP2" | grep 'tiny font text')" '[unseen=font-size]'
+check "colour-on-colour text is flagged" "$(echo "$SNAP2" | grep 'camouflage text')" '[unseen=contrast]'
+check "the footer names the snapshot number" "$SNAP2" '(snapshot #'
+check "the footer reports scroll context" "$SNAP2" 'the viewport'
+
+echo "action effects and diff"
+APPEAR=$(ref_of "$SNAP2" 'button "Appear"')
+NOOP=$(ref_of "$SNAP2" 'button "Noop"')
+"$AMCU" browser snapshot >/dev/null   # diff base
+OUT="$("$AMCU" browser click --ref "$APPEAR")"
+check "a click reports what appeared" "$OUT" 'appeared: dialog "Popup dialog"'
+DIFFOUT="$("$AMCU" browser snapshot --diff)"
+check "snapshot --diff shows only the new lines" "$DIFFOUT" '+ - dialog "Popup dialog"'
+check "the diff names its base" "$DIFFOUT" 'since snapshot #'
+"$AMCU" browser click --ref "$APPEAR" >/dev/null
+check "new-since-last refs carry [new]" "$("$AMCU" browser snapshot | grep 'dialog "Popup dialog"' | tail -1)" '[new]'
+check "a no-op click says so" "$("$AMCU" browser click --ref "$NOOP")" 'no DOM change observed'
+
+echo "find, --within, wait, secrets"
+FOUND="$("$AMCU" browser find --text 'Popup dialog')"
+check "find matches the stored snapshot" "$FOUND" 'dialog "Popup dialog"'
+check "find reports its generation" "$FOUND" 'in snapshot #'
+check "find --role filters" "$("$AMCU" browser find --text 'Submit' --role button)" 'button "Submit"'
+check "find takes /regex/" "$("$AMCU" browser find --text '/popup DIALOG/i')" 'dialog "Popup dialog"'
+WSNAP="$("$AMCU" browser snapshot --within "$COUNTRY")"
+check "--within scopes to the subtree" "$WSNAP" 'option "United States"'
+[[ "$WSNAP" != *"Footer text"* ]] && ok "--within excludes the rest of the page" || fail "--within leaked the whole page"
+check "wait --url-matches takes a regex" "$("$AMCU" browser wait --url-matches 'index\.html$' --timeout 5)" 'wait ok (url-matches'
+SEC="$WORK/sec.env"
+printf 'TESTKEY=supersecretvalue99\n' > "$SEC"
+check "fill --secret fills from the file" "$("$AMCU" browser fill --ref "$NAME" --secrets "$SEC" --secret TESTKEY)" '(verified)'
+check "the page really holds the secret" "$("$AMCU" browser eval --js "document.getElementById('name').value")" 'supersecretvalue99'
+check "loaded secrets are masked in output" "$("$AMCU" browser eval --secrets "$SEC" --js "document.getElementById('name').value")" '[secret:TESTKEY]'
+
 echo "stale refs"
 "$AMCU" browser eval --js "document.getElementById('confirm-btn').textContent = 'Changed'; return 1" >/dev/null
 CONFIRM=$(ref_of "$SNAP" 'button "Confirm"')

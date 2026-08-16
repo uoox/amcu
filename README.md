@@ -128,9 +128,12 @@ WEB PAGES
   amcu browser install                       one-time: register the native host, write the extension
   amcu browser tabs | tab --new --url U | tab --select ID | navigate --url U
   amcu browser snapshot                      the page as an outline with [ref=e12] on every control
+  amcu browser snapshot --diff               only the lines added/removed since the last snapshot
+  amcu browser find --text T                 search the last snapshot (substring or /regex/)
   amcu browser click --ref e12 | fill --ref e7 --value V | type --ref e7 --text T --submit
   amcu browser select-option | key | scroll | drag | hover | upload | dialog
-  amcu browser screenshot | eval --js EXPR | console | network | wait --text T
+  amcu browser screenshot | eval --js EXPR | console | network | wait --text T | --url-matches RE
+  amcu browser fill --ref e7 --secrets .env --secret DB_PASSWORD   type by key, masked in output
 ```
 
 ### Web pages: `amcu browser`
@@ -140,6 +143,9 @@ The desktop path can already read a browser window's accessibility tree, but a w
 - **The extension talks to amcu through Chrome's native messaging.** `amcu browser install` writes a manifest that names this binary as the host for the `amcu bridge` extension. The browser starts the host itself when the extension loads and enforces which extension id may connect. There is no listening port for a web page to probe, and no token, because the operating system already knows who is talking to whom.
 - **`amcu browser …` reaches that host over a Unix socket** in `~/Library/Caches/amcu/browser/`, one per running browser. If the extension is reloaded, the browser starts a new host and the next command finds it. If the browser quits, the socket goes away and the CLI says so instead of hanging.
 - **Reading is a content script; acting is the debugger protocol.** The snapshot is computed in the page (roles, accessible names, states, visibility, refs) and needs no debugger. Clicks, keys, drags, screenshots, evaluation, console and network go through `chrome.debugger`, so input events are indistinguishable from a user's — including for tabs that are not visible. The one visible side effect is the browser's "amcu bridge started debugging this browser" infobar while a tab stays attached; `amcu browser detach` removes it.
+- **Every action reports what it did.** `click`, `type` and `key` come back with what visibly followed: navigation, an opened dialog, how many DOM changes were observed, what appeared (a menu, a dialog), where focus went — or `no DOM change observed` when nothing did. `snapshot --diff` prints only the lines added and removed since the last snapshot, and refs new since then carry `[new]`; often the report alone answers "did it work?" without re-reading the page. The association is temporal, not causal — a busy page's own updates are counted too, and the report says when the page had not yet gone quiet.
+- **The outline states facts a screenshot would hide.** Inputs carry their live validation constraints (`[maxlength=5] [pattern=…] [accept=…]`), elements whose only interactivity is a framework click handler (`jsaction`, `ng-click`, inline mouse handlers) are included and marked `[clickable]`, text a human cannot see is marked `[unseen=opacity|font-size|contrast]` (a classic prompt-injection channel — the flag is a fact, the judgment stays with the caller), frames from another origin are marked `[cross-origin]`, and the footer says how much page sits above and below the viewport. Before any pointer event the target must hold still for two animation frames, so a click never lands where an animating element used to be.
+- **Secrets stay out of transcripts.** `--secrets .env` (or `$AMCU_SECRETS`) loads dotenv keys: `fill --ref e7 --secret DB_PASSWORD` types by reference, and the loaded values are masked as `[secret:KEY]` in all output — snapshots and echoes reliably; console and network only until a page re-encodes the value, and the docs say so rather than promising a boundary.
 
 Setup, once:
 

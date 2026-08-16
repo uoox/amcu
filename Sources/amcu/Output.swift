@@ -14,10 +14,10 @@ enum Output {
     static func emit<T: Encodable>(_ value: T, text: () -> String) {
         if json {
             if let data = try? encoder().encode(value), let string = String(data: data, encoding: .utf8) {
-                print(string)
+                print(SecretStore.maskJSON(string))
             }
         } else {
-            print(text())
+            print(SecretStore.mask(text()))
         }
     }
 
@@ -33,12 +33,12 @@ enum Output {
             }
             let payload = Payload(code: amcuError.code.rawValue, message: amcuError.message, nextSteps: amcuError.nextSteps)
             if let data = try? encoder().encode(payload), let string = String(data: data, encoding: .utf8) {
-                FileHandle.standardError.write(Data((string + "\n").utf8))
+                FileHandle.standardError.write(Data((SecretStore.maskJSON(string) + "\n").utf8))
             }
         } else {
             var lines = ["error [\(amcuError.code.rawValue)]: \(amcuError.message)"]
             lines.append(contentsOf: amcuError.nextSteps.map { "  next: \($0)" })
-            FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+            FileHandle.standardError.write(Data((SecretStore.mask(lines.joined(separator: "\n")) + "\n").utf8))
         }
         exit(1)
     }

@@ -6,7 +6,7 @@
 import Foundation
 
 public enum ExtensionBundle {
-    public static let version = "0.5.0"
+    public static let version = "0.6.0"
     public static let id = "cgpbockoghamineoofoonidkickapbok"
     public static let name = "amcu bridge"
 
@@ -850,6 +850,54 @@ async function waitForLoad(tabId, timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
+// Action-effect observation. Armed in the top frame (portals/menus land in the
+// top document's <body>) and, for a frame-targeted action, in that frame too.
+// Everything is best-effort: an unarmable page just yields no effect report.
+
+async function armObserver(tabId, frameId) {
+  const targets = frameId && frameId !== 0 ? [0, frameId] : [0];
+  const armed = [];
+  for (const target of targets) {
+    try {
+      await callFrame(tabId, target, 'observe-start', {}, 3000);
+      armed.push(target);
+    } catch (_) { /* frame not scriptable */ }
+  }
+  return armed;
+}
+
+async function reportObserver(tabId, armed, after) {
+  if (!armed.length) return null;
+  // A navigation replaced the document (observer gone with it), and an open
+  // dialog blocks the page's event loop — the report would hang. Still tell a
+  // surviving content script (same-document navigation) to stand down, so the
+  // observer does not keep counting until the next action.
+  if (!after || after.closed || after.navigated || after.dialog) {
+    for (const frameId of armed) callFrame(tabId, frameId, 'observe-stop', {}, 1500).catch(() => {});
+    return null;
+  }
+  const out = { changes: { added: 0, removed: 0, attributes: 0, text: 0 }, appeared: [], appearedMore: 0, focus: null, settled: true };
+  let any = false;
+  for (const frameId of armed) {
+    try {
+      const report = await callFrame(tabId, frameId, 'observe-report', {}, 5000);
+      if (!report || !report.armed) continue;
+      any = true;
+      for (const key of Object.keys(out.changes)) out.changes[key] += (report.changes && report.changes[key]) || 0;
+      for (const item of report.appeared || []) {
+        if (out.appeared.includes(item)) continue;
+        if (out.appeared.length >= 5) { out.appearedMore += 1; continue; }
+        out.appeared.push(item);
+      }
+      out.appearedMore += report.appearedMore || 0;
+      if (report.focus && !out.focus) out.focus = report.focus;
+      if (report.settled === false) out.settled = false;
+    } catch (_) { /* the page may have navigated after all */ }
+  }
+  return any ? out : null;
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 
 async function handleRequest(method, params) {
@@ -971,10 +1019,19 @@ const handlers = {
     requireNoDialog(tab.id);
     await inject(tab.id);
     const frames = await listFrames(tab.id);
-    const options = { selector: params.selector, maxNodes: params.maxNodes, allRefs: params.allRefs, interactiveOnly: params.interactiveOnly };
+    const options = { selector: params.selector, maxNodes: params.maxNodes, allRefs: params.allRefs, interactiveOnly: params.interactiveOnly, diff: params.diff };
+    let within = null;
+    if (params.within) within = parseRef(params.within);
     let wanted = params.frame !== undefined && params.frame !== null ? frames.filter(f => f.frameId === params.frame) : frames;
     // A CSS selector addresses one document; without --frame that is the main one.
     if (params.selector && (params.frame === undefined || params.frame === null)) wanted = frames.filter(f => f.frameId === 0);
+    // --within names one element in one frame; snapshot only that frame.
+    if (within) {
+      wanted = frames.filter(f => f.frameId === within.frameId);
+      if (!wanted.length) {
+        throw new BridgeError('stale_snapshot', `frame ${within.frameId} no longer exists in this tab`, ['Re-run `amcu browser snapshot`.']);
+      }
+    }
     if (params.frame !== undefined && params.frame !== null && !wanted.length) {
       throw new BridgeError('element_not_found', `no frame ${params.frame} in this tab`, ['Frame ids appear in the snapshot as f<id>; re-run `amcu browser snapshot`.']);
     }
@@ -986,6 +1043,7 @@ const handlers = {
       const isMain = frame.frameId === 0;
       const frameOptions = Object.assign({}, options, { maxNodes: budget });
       if (!isMain && params.selector) frameOptions.selector = undefined;
+      if (within && frame.frameId === within.frameId) frameOptions.within = within.local;
       let result;
       try {
         result = await callFrame(tab.id, frame.frameId, 'snapshot', frameOptions, 15000);
@@ -1013,7 +1071,13 @@ const handlers = {
         truncated: result.truncated,
         hiddenGenerics: result.hiddenGenerics,
         focusedRef: result.focusedRef ? (isMain ? result.focusedRef : `f${frame.frameId}${result.focusedRef}`) : null,
-        iframes: localIframes
+        iframes: localIframes,
+        gen: result.gen,
+        scroll: result.scroll || null,
+        diff: result.diff === true,
+        added: result.added,
+        removed: result.removed,
+        diffBase: result.diffBase
       });
     }
     // Best-effort: name the iframe each child frame lives in, by matching the
@@ -1028,6 +1092,32 @@ const handlers = {
       if (match) r.parentRef = match.ref;
     }
     return { tab: tabSummary(tab), frames: results };
+  },
+
+  async find(params) {
+    const tab = await resolveTab(params);
+    requireNoDialog(tab.id);
+    await inject(tab.id);
+    const frames = await listFrames(tab.id);
+    const matches = [];
+    let total = 0;
+    let gen = null;
+    for (const frame of frames.slice().sort((a, b) => a.frameId - b.frameId)) {
+      let result;
+      try {
+        result = await callFrame(tab.id, frame.frameId, 'find', { query: params.query, role: params.role, limit: params.limit }, 15000);
+      } catch (error) {
+        if (frame.frameId === 0) throw asBridgeError(error);
+        continue;
+      }
+      const lines = frame.frameId === 0
+        ? result.matches
+        : result.matches.map(line => line.replace(/\[ref=e(\d+)\]/g, `[ref=f${frame.frameId}e$1]`));
+      for (const line of lines) matches.push(line);
+      total += result.total;
+      if (frame.frameId === 0) gen = result.gen;
+    }
+    return { tab: tabSummary(tab), matches, total, gen };
   },
 
   async click(params) {
@@ -1049,6 +1139,7 @@ const handlers = {
     }
     let mode = 'cdp';
     let dialog = null;
+    const armed = await armObserver(tab.id, target.frameId);
     if (params.force && target.hit !== 'ok' && target.hit !== 'ancestor') {
       await callFrame(tab.id, target.frameId, 'js-click', { ref: target.local });
       mode = 'js:click';
@@ -1057,6 +1148,8 @@ const handlers = {
       dialog = (await mouseAt(tab.id, target.x, target.y, { button, clickCount: params.count || 1, modifiers: modifierMask(params.modifiers) })).dialog;
     }
     const after = await settle(tab.id, before, 5000, dialog);
+    const effect = await reportObserver(tab.id, armed, after);
+    if (effect) after.effect = effect;
     return {
       tab: tabSummary(tab),
       ref: params.ref,
@@ -1064,6 +1157,7 @@ const handlers = {
       point: { x: Math.round(target.x), y: Math.round(target.y) },
       mode,
       fromEarlierSnapshot: target.fromEarlierSnapshot,
+      unstable: target.stable === false,
       obscuredNote: target.hit === 'ancestor' ? `pointer lands on ${target.obscuredBy}` : null,
       after
     };
@@ -1103,6 +1197,7 @@ const handlers = {
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
     const focus = await callFrame(tab.id, frameId, 'focus-for-input', { ref: local, mode: params.replace ? 'replace' : 'append' });
+    const armed = await armObserver(tab.id, frameId);
     const text = String(params.text === undefined ? '' : params.text);
     let dialog = null;
     if (params.slowly) dialog = (await typeSlowly(tab.id, text)).dialog;
@@ -1113,7 +1208,9 @@ const handlers = {
       submitted = true;
     }
     const before = { url: tab.url };
-    const after = params.submit || dialog ? await settle(tab.id, before, 5000, dialog) : null;
+    const after = params.submit || dialog ? await settle(tab.id, before, 5000, dialog) : { navigated: false, url: tab.url };
+    const effect = await reportObserver(tab.id, armed, after);
+    if (effect) after.effect = effect;
     let value = null;
     try {
       value = (await callFrame(tab.id, frameId, 'value', { ref: local }, 3000)).value;
@@ -1197,12 +1294,15 @@ const handlers = {
     }
     const before = { url: tab.url };
     const count = Math.max(1, params.count || 1);
+    const armed = await armObserver(tab.id, params.ref ? parseRef(params.ref).frameId : 0);
     let pressed;
     for (let i = 0; i < count; i++) {
       pressed = await pressKey(tab.id, params.key, params.modifiers || []);
       if (pressed.dialog) break;
     }
     const after = await settle(tab.id, before, 3000, pressed.dialog);
+    const effect = await reportObserver(tab.id, armed, after);
+    if (effect) after.effect = effect;
     return { tab: tabSummary(tab), key: pressed.key, modifiers: params.modifiers || [], count, after };
   },
 
@@ -1325,6 +1425,15 @@ const handlers = {
       const live = await getTab(tab.id);
       if (!live) throw new BridgeError('tab_not_found', 'the tab closed while waiting');
       if (params.load) return live.status === 'complete' ? { waited: 'load' } : null;
+      if (params.urlPattern) {
+        let re;
+        try {
+          re = new RegExp(params.urlPattern);
+        } catch (error) {
+          throw new BridgeError('invalid_argument', `--url-matches is not a valid regex: ${error.message}`);
+        }
+        return re.test(live.url || '') ? { waited: 'url-matches', url: live.url } : null;
+      }
       if (params.url) return (live.url || '').includes(params.url) ? { waited: 'url', url: live.url } : null;
       if (params.text || params.textGone) {
         const frames = await listFrames(tab.id);
@@ -1338,8 +1447,11 @@ const handlers = {
         if (params.text) return found ? { waited: 'text' } : null;
         return found ? null : { waited: 'text-gone' };
       }
-      throw new BridgeError('invalid_argument', 'wait needs --text, --text-gone, --url, --load or --time');
+      throw new BridgeError('invalid_argument', 'wait needs --text, --text-gone, --url, --url-matches, --load or --time');
     };
+    // Backing-off poll (Playwright's cadence): fast first checks, calm later.
+    const delays = [100, 250, 500];
+    let attempt = 0;
     while (true) {
       const done = await check();
       if (done) return Object.assign({ tab: tabSummary(await getTab(tab.id) || tab), elapsedMs: Date.now() - started }, done);
@@ -1349,7 +1461,8 @@ const handlers = {
           'Raise the limit with --timeout SECONDS if the page is legitimately slow.'
         ]);
       }
-      await sleep(250);
+      await sleep(attempt < delays.length ? delays[attempt] : 1000);
+      attempt += 1;
     }
   },
 
@@ -1725,6 +1838,118 @@ async function executionContextFor(tabId, frameId) {
     return !(parent && parent.isContentEditable);
   }
 
+  // ---------------------------------------------------------------------------
+  // Framework-dispatched click handlers the DOM alone does not reveal: inline
+  // onmousedown/up, Google's jsaction, AngularJS ng-click. onmouseover is NOT a
+  // click signal (hover is not activation).
+
+  const HANDLER_ATTRS = ['onclick', 'onmousedown', 'onmouseup'];
+  const NG_CLICK_ATTRS = (() => {
+    const names = [];
+    for (const prefix of ['ng', 'data-ng', 'x-ng']) {
+      for (const sep of ['-', ':', '_']) names.push(prefix + sep + 'click');
+    }
+    return names;
+  })();
+
+  function jsactionClick(el) {
+    const raw = attr(el, 'jsaction');
+    if (!raw) return false;
+    for (const part of raw.split(';')) {
+      const entry = part.trim();
+      if (!entry) continue;
+      const colon = entry.indexOf(':');
+      const eventType = colon < 0 ? 'click' : entry.slice(0, colon).trim();
+      const action = colon < 0 ? entry : entry.slice(colon + 1).trim();
+      if (eventType !== 'click' || !action || action === '_') continue;
+      const namespace = action.includes('.') ? action.slice(0, action.indexOf('.')) : '';
+      if (namespace !== 'none') return true;
+    }
+    return false;
+  }
+
+  function hasClickHandler(el, angularPage) {
+    if (!el.hasAttribute) return false;
+    for (const name of HANDLER_ATTRS) if (el.hasAttribute(name)) return true;
+    if (jsactionClick(el)) return true;
+    if (angularPage) {
+      for (const name of NG_CLICK_ATTRS) if (el.hasAttribute(name)) return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Validation constraints, read from live IDL properties (frameworks mutate
+  // them without touching the serialised attributes).
+
+  function shortValue(value) {
+    value = String(value);
+    return value.length > 40 ? value.slice(0, 40) + '…' : value;
+  }
+
+  function constraintAttrs(el, attrs) {
+    const tag = tagOf(el);
+    if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') return;
+    if (typeof el.maxLength === 'number' && el.maxLength > 0) attrs.push('maxlength=' + el.maxLength);
+    if (typeof el.minLength === 'number' && el.minLength > 0) attrs.push('minlength=' + el.minLength);
+    if (typeof el.pattern === 'string' && el.pattern) attrs.push('pattern=' + shortValue(el.pattern));
+    if (typeof el.min === 'string' && el.min !== '') attrs.push('min=' + el.min);
+    if (typeof el.max === 'string' && el.max !== '') attrs.push('max=' + el.max);
+    if (typeof el.step === 'string' && el.step !== '' && el.step !== 'any') attrs.push('step=' + el.step);
+    if (typeof el.accept === 'string' && el.accept) attrs.push('accept=' + shortValue(el.accept));
+    if (el.multiple === true) attrs.push('multiple');
+    const inputMode = el.inputMode || attr(el, 'inputmode');
+    if (inputMode) attrs.push('inputmode=' + inputMode);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Visibility anomalies: facts a human's eyes would miss but the outline still
+  // carries (opacity 0, near-zero font, text drawn in its background colour).
+  // Facts only — no judgment; the caller decides what they mean.
+
+  function parseColor(raw) {
+    const match = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?\s*\)/.exec(raw || '');
+    if (!match) return null;
+    return { r: +match[1], g: +match[2], b: +match[3], a: match[4] === undefined ? 1 : +match[4] };
+  }
+
+  function hasDirectText(el) {
+    for (const child of el.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE && normalize(child.data)) return true;
+    }
+    return false;
+  }
+
+  function textUnseeable(el, style) {
+    const color = parseColor(style.color);
+    if (!color) return false;
+    if (color.a === 0) return true;
+    let node = el;
+    for (let depth = 0; node && depth < 8; depth++) {
+      let bg;
+      try {
+        bg = parseColor((node === el ? style : getComputedStyle(node)).backgroundColor);
+      } catch (_) {
+        return false;
+      }
+      if (bg && bg.a > 0.9) {
+        return Math.abs(color.r - bg.r) + Math.abs(color.g - bg.g) + Math.abs(color.b - bg.b) < 30;
+      }
+      node = node.parentElement;
+    }
+    // No opaque background found: assume white.
+    return color.r + color.g + color.b > 720;
+  }
+
+  function unseenFacts(el, style, parentUnseen) {
+    const facts = [];
+    if (!parentUnseen.includes('opacity') && style.opacity !== '' && parseFloat(style.opacity) === 0) facts.push('opacity');
+    const fontSize = parseFloat(style.fontSize);
+    if (!parentUnseen.includes('font-size') && fontSize >= 0 && fontSize < 2) facts.push('font-size');
+    if (!parentUnseen.includes('contrast') && hasDirectText(el) && textUnseeable(el, style)) facts.push('contrast');
+    return facts;
+  }
+
   /// The role a snapshot line reports. `null` means "generic": no line of its
   /// own, children promoted to the parent.
   function roleOf(el) {
@@ -1989,7 +2214,10 @@ async function executionContextFor(tabId, frameId) {
     counter: 0,
     byRef: new Map(),        // ref -> { el, role, name, generation }
     byElement: new WeakMap(), // el -> ref
-    lastSnapshotAt: 0
+    lastSnapshotAt: 0,
+    prevSeen: null,          // Set of refs the previous base snapshot rendered
+    lastLines: null,         // [{line, ref}] of the last base snapshot (diff/find base)
+    lastGen: 0               // the generation lastLines belongs to
   };
 
   function refFor(el, role, name) {
@@ -2055,11 +2283,18 @@ async function executionContextFor(tabId, frameId) {
   function snapshot(options) {
     // Only a whole-document snapshot starts a new generation; a scoped one
     // must not make every other ref look old.
-    if (!options.selector) state.generation += 1;
+    const scoped = !!(options.selector || options.within);
+    if (!scoped) state.generation += 1;
     state.lastSnapshotAt = Date.now();
     const maxNodes = Math.max(1, options.maxNodes || 1500);
     const allRefs = !!options.allRefs;
     const interactiveOnly = !!options.interactiveOnly;
+    // Only a plain full snapshot may serve as the diff/find base and as the
+    // "seen" set behind [new] markers — a scoped or filtered one would make
+    // everything look new next time.
+    const isBase = !scoped && !interactiveOnly;
+    const prevSeen = state.prevSeen;
+    const angularPage = !!(document.querySelector && document.querySelector('.ng-scope'));
 
     let root = document.body || document.documentElement;
     if (options.selector) {
@@ -2075,9 +2310,11 @@ async function executionContextFor(tabId, frameId) {
         ]);
       }
       root = found;
+    } else if (options.within) {
+      root = resolveRef(options.within).el;
     }
     if (!root) {
-      return { text: '', nodes: 0, rendered: 0, truncated: false, hiddenGenerics: 0, url: location.href, title: document.title, iframes: [] };
+      return { text: '', nodes: 0, rendered: 0, truncated: false, hiddenGenerics: 0, url: location.href, title: document.title, iframes: [], gen: state.generation };
     }
 
     const stats = { nodes: 0, hiddenGenerics: 0 };
@@ -2085,7 +2322,7 @@ async function executionContextFor(tabId, frameId) {
     const iframes = [];
 
     // Build an intermediate tree first, then render within the budget.
-    function build(el, parentCursorPointer, depth) {
+    function build(el, parentCursorPointer, depth, parentUnseen = []) {
       if (SKIP_TAGS.has(el.tagName)) return [];
       if (attr(el, 'aria-hidden') === 'true') return [];
       let style;
@@ -2102,21 +2339,24 @@ async function executionContextFor(tabId, frameId) {
       const pointerHere = cursorPointer && !parentCursorPointer;
       const role = roleOf(el);
       const boxed = tag === 'slot' || style.display === 'contents' || hasBox(el);
+      const unseenHere = unseenFacts(el, style, parentUnseen);
+      const unseenAll = unseenHere.length ? parentUnseen.concat(unseenHere) : parentUnseen;
 
       const children = [];
       const collectChildren = () => {
         for (const child of childNodesOf(el)) {
           if (child.nodeType === Node.TEXT_NODE) {
             const text = normalize(child.data);
-            if (text) children.push({ text });
+            if (text) children.push(unseenAll.length ? { text, unseen: unseenAll } : { text });
           } else if (child.nodeType === Node.ELEMENT_NODE) {
-            for (const built of build(child, cursorPointer, depth + 1)) children.push(built);
+            for (const built of build(child, cursorPointer, depth + 1, unseenAll)) children.push(built);
           }
         }
       };
 
       const focusable = isFocusable(el);
-      const interactive = (role && INTERACTIVE_ROLES.has(role)) || focusable || pointerHere || el.hasAttribute('onclick') || isEditableHost(el);
+      const handler = hasClickHandler(el, angularPage);
+      const interactive = (role && INTERACTIVE_ROLES.has(role)) || focusable || pointerHere || handler || isEditableHost(el);
 
       // Generic containers get no line of their own unless they behave like a control.
       if (!role) {
@@ -2148,6 +2388,8 @@ async function executionContextFor(tabId, frameId) {
         node.ref = refFor(el, effectiveRole, name);
       }
       if (pointerHere && !(role && INTERACTIVE_ROLES.has(role))) node.attrs.push('cursor=pointer');
+      if (handler && !(role && INTERACTIVE_ROLES.has(role)) && !focusable) node.attrs.push('clickable');
+      if (unseenHere.length) node.attrs.push('unseen=' + unseenHere.join(','));
       if (el === active && el !== document.body) node.attrs.push('active');
       const checked = checkedState(el, effectiveRole);
       if (checked === 'true') node.attrs.push('checked');
@@ -2167,6 +2409,7 @@ async function executionContextFor(tabId, frameId) {
         const type = (el.getAttribute('type') || 'text').toLowerCase();
         if (['file', 'date', 'time', 'datetime-local', 'month', 'week', 'color', 'password', 'email', 'tel', 'url'].includes(type)) node.attrs.push('type=' + type);
       }
+      constraintAttrs(el, node.attrs);
 
       if (effectiveRole === 'iframe') {
         node.ref = node.ref || refFor(el, effectiveRole, name);
@@ -2238,12 +2481,17 @@ async function executionContextFor(tabId, frameId) {
           return [node];
         }
       }
-      // Merge runs of text.
+      // Merge runs of text (never across differing visibility facts).
       const merged = [];
       for (const child of children) {
         const last = merged[merged.length - 1];
-        if (child.text !== undefined && last && last.text !== undefined) last.text = normalize(last.text + ' ' + child.text);
-        else merged.push(child.text !== undefined ? { text: child.text } : child);
+        if (child.text !== undefined && last && last.text !== undefined && String(last.unseen || '') === String(child.unseen || '')) {
+          last.text = normalize(last.text + ' ' + child.text);
+        } else if (child.text !== undefined) {
+          merged.push(child.unseen ? { text: child.text, unseen: child.unseen } : { text: child.text });
+        } else {
+          merged.push(child);
+        }
       }
       node.children = merged;
       return [node];
@@ -2256,17 +2504,25 @@ async function executionContextFor(tabId, frameId) {
     }
     if (interactiveOnly) tree = pruneToInteractive(tree);
 
-    // Render within the budget.
-    const lines = [];
+    // Render within the budget. `entries` carries the unmarked line (the
+    // diff/find base); `display` additionally carries the [new] markers.
+    const entries = [];
+    const display = [];
+    const seenNow = new Set();
     let rendered = 0;
     let truncated = false;
     let focusedRef = null;
+    function emitLine(line, ref, markNew) {
+      entries.push(ref ? { line, ref } : { line });
+      display.push(markNew ? line + ' [new]' : line);
+      rendered += 1;
+    }
     function render(nodes, indent) {
       for (const node of nodes) {
         if (rendered >= maxNodes) { truncated = true; return; }
         if (node.text !== undefined) {
-          lines.push(`${indent}- text: ${cap(node.text)}`);
-          rendered += 1;
+          const facts = node.unseen && node.unseen.length ? ` [unseen=${node.unseen.join(',')}]` : '';
+          emitLine(`${indent}- text${facts}: ${cap(node.text)}`, null, false);
           continue;
         }
         let line = `${indent}- ${node.role}`;
@@ -2274,26 +2530,42 @@ async function executionContextFor(tabId, frameId) {
         if (node.ref) line += ` [ref=${node.ref}]`;
         for (const a of node.attrs) line += ` [${a}]`;
         if (node.attrs.includes('active') && node.ref) focusedRef = node.ref;
+        const markNew = !!(node.ref && prevSeen && !prevSeen.has(node.ref));
+        if (node.ref) seenNow.add(node.ref);
         const kids = node.children;
         const single = kids.length === 1 && kids[0].text !== undefined && !node.url;
         if (single) {
+          if (kids[0].unseen && kids[0].unseen.length) {
+            const facts = `[unseen=${kids[0].unseen.join(',')}]`;
+            if (!line.includes(facts)) line += ' ' + facts;
+          }
           line += ': ' + cap(kids[0].text);
-          lines.push(line);
-          rendered += 1;
+          emitLine(line, node.ref || null, markNew);
           continue;
         }
         if (kids.length || node.url) line += ':';
-        lines.push(line);
-        rendered += 1;
-        if (node.url) lines.push(`${indent}  - /url: ${cap(node.url)}`);
+        emitLine(line, node.ref || null, markNew);
+        if (node.url) emitLine(`${indent}  - /url: ${cap(node.url)}`, null, false);
         if (kids.length) render(kids, indent + '  ');
         if (truncated) return;
       }
     }
     render(tree, '');
 
-    return {
-      text: lines.join('\n'),
+    const doc = document.documentElement;
+    const scrollAbove = Math.max(0, Math.round(window.scrollY || 0));
+    const scrollBelow = Math.max(0, Math.round((doc ? doc.scrollHeight : 0) - window.innerHeight - (window.scrollY || 0)));
+
+    const prevEntries = state.lastLines;
+    const prevGen = state.lastGen;
+    if (isBase) {
+      state.prevSeen = seenNow;
+      state.lastLines = entries;
+      state.lastGen = state.generation;
+    }
+
+    const result = {
+      text: display.join('\n'),
       nodes: stats.nodes,
       rendered,
       truncated,
@@ -2301,8 +2573,35 @@ async function executionContextFor(tabId, frameId) {
       url: location.href,
       title: document.title,
       focusedRef,
-      iframes
+      iframes,
+      gen: state.generation,
+      scroll: { above: scrollAbove, below: scrollBelow }
     };
+
+    if (options.diff && isBase) {
+      if (!prevEntries) {
+        result.diffBase = null; // nothing to diff against; the full snapshot stands
+      } else {
+        const oldCounts = new Map();
+        for (const entry of prevEntries) oldCounts.set(entry.line, (oldCounts.get(entry.line) || 0) + 1);
+        const added = [];
+        for (const entry of entries) {
+          const count = oldCounts.get(entry.line) || 0;
+          if (count > 0) oldCounts.set(entry.line, count - 1);
+          else added.push(entry.line);
+        }
+        const removed = [];
+        for (const [line, count] of oldCounts) {
+          for (let i = 0; i < count; i++) removed.push(line);
+        }
+        result.text = added.map(l => '+ ' + l).concat(removed.map(l => '- ' + l)).join('\n');
+        result.diff = true;
+        result.added = added.length;
+        result.removed = removed.length;
+        result.diffBase = prevGen;
+      }
+    }
+    return result;
   }
 
   function pruneToInteractive(nodes) {
@@ -2384,12 +2683,41 @@ async function executionContextFor(tabId, frameId) {
     return { status: 'obscured', by: describeElement(hit) };
   }
 
-  function measure(params) {
+  // Two-frame stability gate (Playwright's _checkElementIsStable): before
+  // dispatching input, the target's rect must be identical across consecutive
+  // animation frames — else the click lands where the element used to be.
+  // Pre-dispatch only; nothing is ever retried after a trusted event went out.
+  function rectKey(el) {
+    const r = el.getBoundingClientRect();
+    return [r.left, r.top, r.width, r.height].map(v => Math.round(v * 10)).join(',');
+  }
+
+  async function waitForStableRect(el, deadlineMs = 350) {
+    const tick = () => new Promise(resolve => {
+      let done = false;
+      requestAnimationFrame(() => { if (!done) { done = true; resolve('raf'); } });
+      // Hidden tabs throttle rAF; no frames also means nothing is animating.
+      setTimeout(() => { if (!done) { done = true; resolve('idle'); } }, 100);
+    });
+    let prev = rectKey(el);
+    const started = Date.now();
+    while (Date.now() - started < deadlineMs) {
+      const how = await tick();
+      if (how === 'idle') return true;
+      const current = rectKey(el);
+      if (current === prev) return true;
+      prev = current;
+    }
+    return false;
+  }
+
+  async function measure(params) {
     const { el, fromEarlierSnapshot } = resolveRef(params.ref);
     // 'force' centres the element even if it looks in-view locally: the caller
     // found its frame scrolled out of the top viewport.
     if (params.scroll === 'force') scrollElementIntoView(el);
     else if (params.scroll !== false) scrollIntoViewIfNeeded(el);
+    const stable = await waitForStableRect(el);
     const rect = bestRect(el);
     if (!(rect.width > 0 && rect.height > 0)) {
       throw new BridgeError('element_not_found', `element ${params.ref} has no size on screen`, [
@@ -2419,6 +2747,7 @@ async function executionContextFor(tabId, frameId) {
       rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
       description: describeElement(el),
       fromEarlierSnapshot,
+      stable,
       viewport: { width: window.innerWidth, height: window.innerHeight },
       devicePixelRatio: window.devicePixelRatio
     };
@@ -2592,6 +2921,128 @@ async function executionContextFor(tabId, frameId) {
   }
 
   // ---------------------------------------------------------------------------
+  // find: search the stored base snapshot (a named generation, never the live
+  // tree — determinism over freshness). Without a base yet, take one now; that
+  // becomes the generation searched.
+
+  function findInSnapshot(params) {
+    if (!state.lastLines) snapshot({});
+    if (!state.lastLines) return { matches: [], total: 0, gen: state.generation, url: location.href };
+    const query = String(params.query || '');
+    if (!query) throw new BridgeError('invalid_argument', 'find needs --text (a substring, or /regex/)');
+    let test;
+    const asRegex = /^\/(.+)\/(i?)$/.exec(query);
+    if (asRegex) {
+      let re;
+      try {
+        re = new RegExp(asRegex[1], asRegex[2]);
+      } catch (error) {
+        throw new BridgeError('invalid_argument', `not a valid regex: ${error.message}`);
+      }
+      test = line => re.test(line);
+    } else {
+      const lower = query.toLowerCase();
+      test = line => line.toLowerCase().includes(lower);
+    }
+    const role = params.role ? String(params.role).toLowerCase() : null;
+    const limit = Math.max(1, Math.min(params.limit || 20, 200));
+    const matches = [];
+    let total = 0;
+    for (const entry of state.lastLines) {
+      const trimmed = entry.line.trimStart();
+      if (role && !(trimmed.startsWith('- ' + role + ' ') || trimmed === '- ' + role || trimmed.startsWith('- ' + role + ':') || trimmed.startsWith('- ' + role + ' ['))) continue;
+      if (!test(entry.line)) continue;
+      total += 1;
+      if (matches.length < limit) matches.push(trimmed);
+    }
+    return { matches, total, gen: state.lastGen, url: location.href };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Change observation for the action-effect report. Armed just before an
+  // action, read just after: what mutated, what appeared, where focus went.
+  // Temporal association only — a concurrent timer's work is indistinguishable
+  // from the action's, and the report never claims otherwise.
+
+  const observing = { observer: null, counts: null, addedRoots: [], lastMutationAt: 0, activeBefore: null };
+
+  function observeStop() {
+    if (observing.observer) {
+      observing.observer.disconnect();
+      observing.observer = null;
+    }
+  }
+
+  function observeStart() {
+    observeStop();
+    observing.counts = { added: 0, removed: 0, attributes: 0, text: 0 };
+    observing.addedRoots = [];
+    observing.lastMutationAt = Date.now();
+    observing.activeBefore = document.activeElement;
+    const observer = new MutationObserver(records => {
+      observing.lastMutationAt = Date.now();
+      for (const record of records) {
+        if (record.type === 'attributes') { observing.counts.attributes += 1; continue; }
+        if (record.type === 'characterData') { observing.counts.text += 1; continue; }
+        observing.counts.added += record.addedNodes.length;
+        observing.counts.removed += record.removedNodes.length;
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (observing.addedRoots.length >= 30) break;
+          if (observing.addedRoots.some(root => root === node || (root.contains && root.contains(node)))) continue;
+          observing.addedRoots.push(node);
+        }
+      }
+    });
+    const target = document.documentElement || document;
+    observer.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
+    observing.observer = observer;
+    return { armed: true };
+  }
+
+  async function observeReport(params) {
+    if (!observing.observer) return { armed: false };
+    const quietMs = Math.max(50, params.quietMs || 200);
+    const deadline = Date.now() + Math.max(quietMs, params.deadlineMs || 800);
+    while (Date.now() < deadline && Date.now() - observing.lastMutationAt < quietMs) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const settled = Date.now() - observing.lastMutationAt >= quietMs;
+    observeStop();
+    const appeared = [];
+    let appearedMore = 0;
+    for (const node of observing.addedRoots) {
+      if (!node.isConnected) continue;
+      let style;
+      try {
+        style = getComputedStyle(node);
+      } catch (_) {
+        continue;
+      }
+      if (isStyleHidden(style)) continue;
+      if (!hasBox(node) && !(node.textContent || '').trim()) continue;
+      const role = roleOf(node) || 'generic';
+      const name = accessibleName(node, role) || normalize(node.textContent || '').slice(0, 80);
+      const described = describe(role, name ? name.slice(0, 80) : '');
+      if (appeared.includes(described)) continue;
+      if (appeared.length >= 5) { appearedMore += 1; continue; }
+      appeared.push(described);
+    }
+    const active = document.activeElement;
+    const focusMoved = active && active !== observing.activeBefore && active !== document.body && active !== document.documentElement;
+    const report = {
+      armed: true,
+      settled,
+      changes: observing.counts,
+      appeared,
+      appearedMore,
+      focus: focusMoved ? describeElement(active) : null
+    };
+    observing.addedRoots = [];
+    return report;
+  }
+
+  // ---------------------------------------------------------------------------
   // Dispatch
 
   async function handle(message) {
@@ -2618,6 +3069,15 @@ async function executionContextFor(tabId, frameId) {
         return tagElement(message.params);
       case 'page-text':
         return pageText();
+      case 'find':
+        return findInSnapshot(message.params || {});
+      case 'observe-start':
+        return observeStart();
+      case 'observe-stop':
+        observeStop();
+        return { ok: true };
+      case 'observe-report':
+        return observeReport(message.params || {});
       case 'describe': {
         const { el, fromEarlierSnapshot } = resolveRef(message.params.ref);
         return { description: describeElement(el), fromEarlierSnapshot };
@@ -2652,7 +3112,7 @@ async function executionContextFor(tabId, frameId) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lets the amcu command-line tool read and drive this browser's tabs through Chrome's native messaging — no tokens, no ports, no remote debugging flags.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArmpx4zHfPTZaX0C1oQHsEwRhOJ1PEm8uvGNFqhBJusjvVOX0qrpGG238e6vRfynnw6Ts84Y6HBBf+DIy7ZHtcPal+i47er2WWntRVqDq9tVH+nc+YaASsp8TGhCH3CwOmSjGvdKv5s8VbKeYCJai9y+exmK+2xcmLq8rMLtpb0vfOyta36JH9fZKydCR6fN2oawIY3+swNfPKO5fTogKJotNJgCoo3igslliULHUNTu4mLUwz4gBy39O0h40HJc3o6CNDjmQKU8AWv3W0cupXt8OKSfwx0pVl6e189TGbhyC0nu6G3QgkM4QpYZgGCexar2GvYcR16tJrSdATb3slQIDAQAB",
   "minimum_chrome_version": "116",

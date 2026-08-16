@@ -423,5 +423,6 @@ runTreeShapingTests(t)
 runChromiumAccessibilityTests(t)
 runTextInputTests(t)
 runBrowserBridgeTests(t)
+runSecretStoreTests(t)
 
 t.finish()
