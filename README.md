@@ -1,5 +1,7 @@
 # amcu — another macOS computer use
 
+**English** · [简体中文](README.zh-CN.md)
+
 Read and drive macOS applications **without taking over the screen** — and, through a small browser extension, web pages inside your own browser without tokens, ports or a separate profile.
 
 amcu is a small, dependency-free command-line tool for computer-use agents on macOS. It reads an application's accessibility tree, and clicks, types, scrolls and drags inside a target window — while you keep using your Mac. The cursor does not move. Focus does not change. The window does not come to the front. `amcu browser` does the same for tabs in Chrome (or any Chromium browser): an accessibility outline of the page with stable refs, and real input events delivered to tabs that need not even be visible.
@@ -73,9 +75,61 @@ amcu doctor — 27.0 (26A5388g)
 
 If the self-check ever fails, background coordinate clicks are refused with an explanation rather than silently misfiring, and you are pointed at the two paths that do not depend on private API: semantic element actions, and explicit `--mode foreground`.
 
-## Install
+## Quick start
 
-Requires macOS 14 or later and a Swift toolchain (the Command Line Tools are enough — no Xcode needed).
+Requires macOS 14 or later. Every [release](https://github.com/uoox/amcu/releases) ships a built universal (Apple silicon + Intel) binary, so nothing needs compiling.
+
+### For a person
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/uoox/amcu/main/Scripts/install.sh | sh
+```
+
+The script downloads the latest release, verifies its SHA-256 against the sum published beside it, installs `~/.local/bin/amcu` (or `AMCU_INSTALL_DIR`), and stops there — the two things it cannot do for you are permission grants:
+
+```console
+$ amcu doctor --request     # macOS shows the prompts; approve them
+$ amcu doctor               # every line should read [ok]
+```
+
+Permissions belong to **whatever runs amcu** — your terminal, or the agent host — not to the binary:
+
+- **Accessibility** — required for everything.
+- **Screen Recording** — only for `amcu screenshot`.
+
+For web pages, one more step: `amcu browser install`, then load the unpacked extension it names (see [`amcu browser`](#web-pages-amcu-browser)).
+
+Pin a version with `--version v0.6.0`, or build from `main` with `--source` (needs a Swift toolchain). `install.sh --help` lists the options.
+
+### For an agent
+
+Give the agent this, verbatim — it is written for a shell-capable agent (Claude Code, Codex, an SSH session, …) that cannot click a macOS permission dialog and should not pretend to:
+
+```text
+Install amcu (https://github.com/uoox/amcu), a CLI for reading and driving macOS apps
+and browser tabs without taking over the screen:
+
+1. curl -fsSL https://raw.githubusercontent.com/uoox/amcu/main/Scripts/install.sh | sh
+   (installs ~/.local/bin/amcu; if ~/.local/bin is not on PATH, use the full path below)
+2. amcu doctor --request --json
+   This triggers macOS permission prompts that only I can approve. If "accessibility"
+   is not granted, stop and tell me to approve Accessibility (and Screen Recording, if
+   screenshots are wanted) for the application that runs you, in
+   System Settings > Privacy & Security. Then re-run `amcu doctor --json` until "ok" is true.
+   Do not try to grant the permission yourself, and do not retry in a loop.
+3. Add this line to the project's CLAUDE.md (or your equivalent instructions file):
+   To read or operate a macOS desktop application, use `amcu`; for web pages,
+   `amcu browser`. Run `amcu guide` before the first use in a session.
+4. Run `amcu guide`, then confirm with `amcu apps` that you can see running applications.
+```
+
+Everything past step 2 is unattended. `amcu doctor --json` reports `"ok": true` only when both permissions are granted and background pointer delivery has been verified on this OS build, so an agent has one field to check instead of prose to interpret. `--json` on any command gives structured output on stdout and structured errors — with a code and next steps — on stderr.
+
+### Other ways to install
+
+**Download by hand.** Grab `amcu-<version>-macos-universal.tar.gz` from the [releases page](https://github.com/uoox/amcu/releases), check it against the `.sha256` beside it, and put `amcu` somewhere on your PATH. A tarball fetched through a browser carries the quarantine attribute, so also run `xattr -d com.apple.quarantine ~/.local/bin/amcu`.
+
+**Build from source.** Needs a Swift toolchain (the Command Line Tools are enough — no Xcode needed):
 
 ```bash
 git clone https://github.com/uoox/amcu
@@ -84,17 +138,7 @@ swift build -c release
 install -m 755 .build/release/amcu ~/.local/bin/amcu   # or anywhere on your PATH
 ```
 
-Do not install it into a package manager's prefix (`/opt/homebrew/bin`,
-`/usr/local/bin` on Intel): those directories belong to the manager, and a
-hand-built binary sitting in one is something `brew doctor` will complain about
-and a future cleanup may remove.
-
-Then grant permissions to whatever runs amcu (your terminal, or the agent host):
-
-- **Accessibility** — required for everything.
-- **Screen Recording** — only for `amcu screenshot`.
-
-`amcu doctor --request` triggers the system prompts.
+Wherever it comes from, do not install it into a package manager's prefix (`/opt/homebrew/bin`, `/usr/local/bin` on Intel): those directories belong to the manager, and a hand-built binary sitting in one is something `brew doctor` will complain about and a future cleanup may remove. `install.sh` refuses those directories for the same reason.
 
 ## Usage
 
@@ -150,7 +194,6 @@ The desktop path can already read a browser window's accessibility tree, but a w
 Setup, once:
 
 ```console
-$ swift build -c release && install -m 755 .build/release/amcu ~/.local/bin/amcu
 $ amcu browser install
 registered native host for chrome: ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/cc.uoox.amcu.json
 wrote extension 0.5.0 (id cgpbockoghamineoofoonidkickapbok) to ~/Library/Application Support/amcu/extension
@@ -413,6 +456,16 @@ verified with `amcu doctor` on a machine with permissions granted.
 Tests are a plain executable rather than an XCTest or swift-testing target: both of those need a full Xcode install to *run*, and this tool is meant to stay verifiable on a machine with only the Command Line Tools. Tests that only some contributors can execute are tests that rot.
 
 The browser extension lives in `extension/` and is embedded into the binary by `Scripts/embed-extension.py` (which regenerates `Sources/AmcuCore/ExtensionBundle.swift`); the test suite fails if the two drift apart, so run the script after touching anything under `extension/`.
+
+### Releasing
+
+Every release carries a built binary; the workflow in `.github/workflows/release.yml` makes it so:
+
+1. Bump `Sources/AmcuCore/Version.swift` and `extension/manifest.json` to the same number, and commit.
+2. Tag and push: `git tag v0.6.0 && git push origin main v0.6.0` — or create the release in the GitHub UI with a new tag.
+3. The workflow checks out the tag, runs the suite, builds a universal arm64+x86_64 binary with `Scripts/package.sh`, and uploads `amcu-<version>-macos-universal.tar.gz` plus its `.sha256` to the release — creating the release with generated notes if it does not exist yet, and leaving hand-written notes alone if it does. Edit the notes afterwards if you prefer them written by hand.
+
+`Scripts/package.sh v0.6.0` reproduces the artifact locally, and refuses if the tag and the version the binary reports disagree — a release never ships a binary that says the wrong number. `Scripts/install.sh` downloads exactly those asset names, so they are part of the contract.
 
 ### End-to-end tests
 

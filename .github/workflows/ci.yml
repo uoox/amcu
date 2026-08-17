@@ -21,6 +21,10 @@ jobs:
       # with permissions granted.
       - name: Test
         run: swift run -c release amcu-tests
+      # The release workflow ships whatever this produces; building it here too
+      # means a packaging break shows up on the pull request, not on tag day.
+      - name: Package
+        run: Scripts/package.sh
       # The extension is plain JavaScript with no build step; a syntax check
       # catches the mistakes the Swift suite cannot see.
       - name: Check extension

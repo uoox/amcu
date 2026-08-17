@@ -1,0 +1,59 @@
+name: Release
+
+# Every release ships a built binary. Push a tag `vX.Y.Z` (or create a release
+# in the GitHub UI with a new tag) and this workflow builds a universal
+# arm64+x86_64 binary, runs the suite, and attaches the tarball and its
+# SHA-256 to the release — creating the release with generated notes if it
+# does not exist yet, leaving hand-written notes alone if it does.
+#
+# `Scripts/install.sh` downloads exactly these assets, so their names are part
+# of the contract: amcu-<version>-macos-universal.tar.gz(.sha256).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and attach assets to, e.g. v0.6.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      - name: Show toolchain
+        run: swift --version
+      - name: Test
+        run: swift run -c release amcu-tests
+      # Fails if the tag and Sources/AmcuCore/Version.swift disagree, so a
+      # binary never ships reporting a version other than the one it is tagged as.
+      - name: Package
+        run: Scripts/package.sh "${{ steps.tag.outputs.tag }}"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "amcu ${TAG#v}" --generate-notes --verify-tag
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "\(.name)\t\(.size) bytes"'
