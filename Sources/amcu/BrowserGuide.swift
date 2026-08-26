@@ -20,9 +20,13 @@ FIRST CONTACT
 
 THE NORMAL SEQUENCE
   1. `amcu browser tabs` — see what is open. Every tab has an id.
-  2. `amcu browser tab --select ID` (or `tab --new --url …`) — pin the tab
-     this session works on. Without a pinned tab, commands use the browser's
-     active tab, which the user may change under you.
+  2. `amcu browser tab --new --url …` — open your own tab. It lives in amcu's
+     background window (created unfocused on first use), out of the user's
+     tab strip, where they cannot close it by accident and you cannot disturb
+     what they are reading. To work on a tab the user already has open, pin it
+     deliberately: `tab --select ID`. Without either, reading commands fall
+     back to the user's active tab, but acting commands refuse — changing the
+     page the user is looking at has to be asked for.
   3. `amcu browser snapshot` — the page as an indented outline: role, name,
      state, and a ref like [ref=e12] on everything you can act on.
   4. Act by ref: `click --ref e12`, `fill --ref e7 --value "…"`,
@@ -72,9 +76,10 @@ READING
   `eval --js EXPR` runs JavaScript in the page and returns JSON. Pass a function
   and `--ref` to receive the element. Use it for data the outline does not
   carry (attribute values, computed text, full innerText).
-  `screenshot` needs the tab to render: a background tab in a hidden window may
-  produce nothing, and the error says how to make it visible. Prefer snapshot;
-  it needs no pixels.
+  `screenshot` needs the tab to render. In amcu's own window that is handled
+  invisibly (the tab is activated there, the window restored from minimised,
+  never focused); a background tab in the *user's* window may produce nothing,
+  and the error says what to do. Prefer snapshot; it needs no pixels.
   `console` and `network` show what the page logged and requested. Both attach
   the debugger; console messages logged before that are replayed when the
   browser still has them, network requests are recorded from then on.
@@ -107,13 +112,23 @@ ACTING
   exact-string: snapshots and echoes reliably, console/network only until the
   page re-encodes the value. It is a redaction aid, not a security boundary.
 
-TABS AND VISIBILITY
-  `tab --new` opens in the background; `--activate` shows it (a visible change
-  in the user's window). `tab --select ID --activate` likewise. `navigate`,
-  `back`, `forward`, `reload` wait for the load to finish; `--no-wait` and
-  `wait --load` split that.
+TABS, WINDOWS AND VISIBILITY
+  `tab --new` opens in amcu's background window: a separate, never-focused
+  Chrome window whose first tab is a pinned page explaining itself. The user's
+  focus, active tab and window order are untouched; tabs there stay rendered,
+  so screenshots work. The window appears on first use and is reused after
+  that; `amcu browser window` reports it, `window --hide` minimises it,
+  `window --close` closes it and its tabs.
+  `tab --new --activate` focuses that window so the user can watch;
+  `window --show` does the same later. `tab --new --user-window` opens in the
+  user's own window instead — only when the user asked to be handed the page.
+  `tab --select ID --activate` makes a tab visible in its window and focuses
+  that window (a visible change).
+  `navigate`, `back`, `forward`, `reload` wait for the load to finish;
+  `--no-wait` and `wait --load` split that.
   Concurrent agents: use `--session NAME`; each session has its own current
-  tab. Several browsers or profiles: `--browser chrome|edge|…`.
+  tab (they share the one amcu window). Several browsers or profiles:
+  `--browser chrome|edge|…`.
 
 WHEN THINGS STOP RESPONDING
   A blocked page usually means an alert/confirm/prompt is open:

@@ -73,7 +73,7 @@ amcu doctor — 27.0 (26A5388g)
   [ok] background pointer delivery: window-routed pointer events land accurately (verified on build 27.0 (26A5388g))
 ```
 
-一旦自检失败，后台坐标点击会被拒绝并给出解释，而不是无声地打偏；同时会指给你两条不依赖私有 API 的路径：语义化元素动作，以及显式的 `--mode foreground`。
+一旦自检失败，坐标点击并不会开始移动你的光标：它退回到在目标点上通过辅助功能树按压找到的元素——仍然没有指针事件，仍然在后台。只有当那个点上没有任何可按压的东西时，才会指给你剩下的选择：语义化元素动作，或显式的 `--mode foreground`。滚动和拖拽没有这样的回退，会直接拒绝。
 
 ## 快速开始
 
@@ -171,6 +171,7 @@ ACT
 WEB PAGES
   amcu browser install                       one-time: register the native host, write the extension
   amcu browser tabs | tab --new --url U | tab --select ID | navigate --url U
+  amcu browser window [--show|--hide|--close]   amcu 自己的后台窗口，tab --new 在这里打开
   amcu browser snapshot                      the page as an outline with [ref=e12] on every control
   amcu browser snapshot --diff               only the lines added/removed since the last snapshot
   amcu browser find --text T                 search the last snapshot (substring or /regex/)
@@ -236,9 +237,11 @@ key ok: Enter to tab 727784600 "GitHub - uoox/amcu: another macOS computer use" 
 → navigated to https://github.com/search?q=background+click&type=repositories
 ```
 
-引用的检查方式与元素索引相同：动作之前，元素会被重新解析，其角色和可访问名称与快照记录的进行比对，所以在你脚下发生变化的页面会产生 `stale_snapshot`，而不是点在移动到那里的任何东西上。frame 是地址的一部分——`f42e12` 是 frame 42 的第 12 个元素，快照把每个 frame 打印成独立的一节，附带它所在的 iframe，坐标在通往点击的路上被换算。每个 `--session` 有自己的当前标签页，所以并发的 agent 不会互相抢夺；`tab --new` 在后台打开，除非 `--activate` 另有指示。
+引用的检查方式与元素索引相同：动作之前，元素会被重新解析，其角色和可访问名称与快照记录的进行比对，所以在你脚下发生变化的页面会产生 `stale_snapshot`，而不是点在移动到那里的任何东西上。frame 是地址的一部分——`f42e12` 是 frame 42 的第 12 个元素，快照把每个 frame 打印成独立的一节，附带它所在的 iframe，坐标在通往点击的路上被换算。每个 `--session` 有自己的当前标签页，所以并发的 agent 不会互相抢夺。
 
-`amcu browser` 不会做的事，坦白说明：它无法脚本化 `chrome://` 页面、Web Store 或 `file://` URL，除非扩展被授予文件访问权限；截图需要标签页渲染，而完全隐藏窗口中的后台标签页可能不会渲染（错误信息会说明如何让它可见，而 `snapshot` 不需要像素）；`eval` 无法到达跨源 frame 的脚本上下文，不过在其中点击和输入是可以的；对被遮挡元素的点击会被拒绝并指出遮挡物，因为一次落在 cookie 横幅上的点击，正是这个工具拒绝报告的那种「成功」。当你更清楚情况时，`--force` 会退回到 JavaScript 点击。
+`tab --new` 在 amcu 自己的窗口里打开：一个独立的、从不获得焦点的浏览器窗口，首次使用时创建，第一个标签页是一个固定（pinned）的说明页。你的焦点、你的活动标签页和窗口顺序都不会被碰；agent 的标签页不在你的标签栏里，你不会误关它们；而且由于标签页可以在这个未聚焦的窗口*内部*被设为活动，它保持渲染，截图在窗口压在所有东西后面时照样工作（截图还会自己把窗口从最小化中恢复，且不聚焦）。`amcu browser window` 报告它的状态，`--show` 把它聚焦到前面供你观看 agent 工作，`--hide` 最小化，`--close` 关闭。`tab --new --user-window` 是显式的例外，会开在你的窗口里。另外，会*修改*页面的命令只有在被明确指定时才作用于你正在看的标签页——没有 pin 标签页也没有 `--tab` 时，写操作会拒绝执行，而不是把你正在读的页面导航走。
+
+`amcu browser` 不会做的事，坦白说明：它无法脚本化 `chrome://` 页面、Web Store 或 `file://` URL，除非扩展被授予文件访问权限；截图需要标签页渲染，amcu 自己的窗口会不可见地保证这一点，但*你的*窗口中的后台标签页可能不会渲染（错误信息会说明该怎么做，而 `snapshot` 不需要像素）；`eval` 无法到达跨源 frame 的脚本上下文，不过在其中点击和输入是可以的；对被遮挡元素的点击会被拒绝并指出遮挡物，因为一次落在 cookie 横幅上的点击，正是这个工具拒绝报告的那种「成功」。当你更清楚情况时，`--force` 会退回到 JavaScript 点击。
 
 `amcu browser guide` 承载了面向 agent 的操作约定，`amcu browser doctor` 端到端地诊断整个设置。
 
@@ -343,7 +346,7 @@ error [stale_snapshot]: element 4 changed label ("Archive" -> "Delete")
 
 ### 投递模式
 
-- `--mode auto`（默认）—— 元素提供语义动作就用语义动作，否则用经过验证的后台投递。**绝不无声地退回前台**：抢占焦点是可见的副作用，所以必须明确要求。
+- `--mode auto`（默认）—— 元素提供语义动作就用语义动作，否则用经过验证的后台投递；如果这个系统的路由投递没通过验证，点击退回到在目标点上做辅助功能按压（光标仍然不动）。**绝不无声地退回前台**：抢占焦点是可见的副作用，所以必须明确要求。
 - `--mode background` —— 窗口路由，光标原地不动。
 - `--mode foreground` —— 全局事件 tap。移动光标、夺取焦点。只有当目标已经在最前时才是正确的。
 
@@ -373,7 +376,7 @@ error [app_not_found]: no running application matched 'Gmail'
 - **光学回退只有文本。** `scan` 找到文本及其位置；它分不清按钮和说明文字，看不见图标或无标签控件，也报告不了状态。它是给什么都不公布的窗口用的回退，不是辅助功能树的替代品。
 - **窗口管理是可选的。** `amcu window` 可以移动、缩放、置前和取消最小化——但没有任何其他命令会为了让自己的活儿好干而替你做这些事。
 - **惰性构建的菜单读出来是空的。** 只在打开时才填充子菜单的应用程序，其子菜单会显示为没有菜单项。`menu-item --press` 仍然可以通过打开菜单来触达它们。
-- **依赖私有 API。** 后台*坐标*点击依赖 `CGEventSetWindowLocation`。语义动作和 `--mode foreground` 不依赖。自检的存在就是为了让你立刻发现，而不是最终才发现。
+- **依赖私有 API。** 后台*坐标*点击依赖 `CGEventSetWindowLocation`。语义动作、辅助功能按压回退和 `--mode foreground` 不依赖。自检的存在就是为了让你立刻发现，而不是最终才发现——而且当它失败时，点击降级为辅助功能按压，而不是降级到你的光标上。
 - **浏览器扩展以未打包方式加载。** Chrome 为此要求开发者模式，并在 amcu 持有某个标签页的调试器期间显示信息栏。发布到 Web Store 可以去掉前者；后者是 Chrome 告诉用户有扩展正在驱动页面的方式，它会保留。
 - **仅限 macOS**，14.0+。
 

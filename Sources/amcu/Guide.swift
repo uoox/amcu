@@ -69,10 +69,15 @@ CHOOSING HOW TO ACT
 
 DELIVERY MODES
   `--mode auto` (default) is what you want. It uses semantic actions where
-  possible and verified background delivery otherwise.
+  possible and verified background delivery otherwise. If this system's routed
+  background path fails verification, coordinate clicks fall back to pressing
+  the element found at that point through the accessibility tree — the cursor
+  still does not move. Only scroll and drag can end up needing foreground.
   `--mode foreground` moves the real cursor and takes the user's focus. It is
   refused outright when the target is not already frontmost, because the event
-  would land on whatever is. Ask for it deliberately or not at all.
+  would land on whatever is. Ask for it deliberately or not at all. Never
+  reach for it just because a background click seemed to do nothing — check
+  the result and the interface state first.
 
 MENUS
   `amcu menu --app <selector>` reads the whole menu bar without opening
@@ -86,6 +91,12 @@ WHEN THE TREE IS EMPTY
   says so explicitly rather than returning a plausible-looking empty tree.
   `amcu scan --app <selector>` then recognises the text and gives each piece an
   index in the same space, so `click --element N` still works.
+  A few applications (WeChat and its mini-programs among them) go further and
+  discard ALL synthesized input — clicks, scrolls, keys — as anti-automation.
+  The click result warns when the target is one of them. After any optical
+  click, re-scan to confirm the interface changed; if it did not, do not retry
+  and do not switch to --mode foreground on your own — report that this
+  application only accepts real user input and let the user decide.
   Optical marks are weaker than elements: no role, no state, no actions, and no
   way to re-verify them before a click. They expire after 60 seconds
   (`--max-age`). `scan --annotate out.png` writes a numbered overlay to look at.

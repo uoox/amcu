@@ -24,9 +24,12 @@ enum BrowserCommands {
     TABS
       tabs                                  list tabs (id, window, title, url); marks the current one
       frames                                list the current tab's frames (ids appear in refs as f<id>)
-      tab         --new [--url U]           open a tab in the background (--activate to show it)
+      tab         --new [--url U]           open a tab in amcu's own background window (--activate
+                                            to focus that window; --user-window for the user's window)
       tab         --select ID               make ID the session's current tab (--activate to show it)
       tab         --close [--tab ID]        close a tab
+      window      [--show|--hide|--close]   amcu's background window: report its state and tabs,
+                                            focus it so the user can watch, minimise it, or close it
       navigate    --url U                   load a URL in the current tab and wait for it
       back | forward | reload [--hard]
 
@@ -92,6 +95,7 @@ enum BrowserCommands {
         case "tabs": try tabs(flags)
         case "frames": try frames(flags)
         case "tab": try tab(flags)
+        case "window": try window(flags)
         case "navigate", "goto", "open": try navigate(flags)
         case "back": try simple(flags, "back", action: "back")
         case "forward": try simple(flags, "forward", action: "forward")
@@ -383,10 +387,14 @@ enum BrowserCommands {
         if flags.has("new") {
             if let url = flags.string("url") { params["url"] = url }
             params["activate"] = flags.has("activate")
+            params["userWindow"] = flags.has("user-window")
             params["wait"] = !flags.has("no-wait")
             let result = try client.request("tabs.create", params: params, timeout: try timeout(flags, default: 40))
             emit(client, action: "tab-new", result: result) {
-                "opened \(tabLine(result["tab"])) (now current for this session\(flags.has("activate") ? ", shown" : ", in the background"))"
+                let place = flags.has("user-window")
+                    ? (flags.has("activate") ? ", shown in the user's window" : ", in the user's window, unselected")
+                    : (flags.has("activate") ? ", amcu's window focused" : ", in amcu's background window")
+                return "opened \(tabLine(result["tab"])) (now current for this session\(place))"
             }
             return
         }
@@ -408,6 +416,44 @@ enum BrowserCommands {
         throw AmcuError(.invalidArgument, "tab needs --new, --select ID or --close", nextSteps: [
             "`amcu browser tabs` lists tabs; `amcu browser tab --new --url https://…` opens one in the background."
         ])
+    }
+
+    /// amcu's own background window — where `tab --new` opens its tabs.
+    static func window(_ flags: Flags) throws {
+        let client = try client(flags)
+        if flags.has("show") {
+            let result = try client.request("window.show", params: try baseParams(flags), timeout: 10)
+            emit(client, action: "window-show", result: result) {
+                "amcu window \(result["window"]["id"].int ?? 0) focused — the user can watch; `amcu browser window --hide` puts it away again"
+            }
+            return
+        }
+        if flags.has("hide") {
+            let result = try client.request("window.hide", params: try baseParams(flags), timeout: 10)
+            emit(client, action: "window-hide", result: result) {
+                result["window"].isNull ? "no amcu window is open" : "amcu window \(result["window"]["id"].int ?? 0) minimised (screenshots restore it unfocused when they need it to render)"
+            }
+            return
+        }
+        if flags.has("close") {
+            let result = try client.request("window.close", params: try baseParams(flags), timeout: 10)
+            emit(client, action: "window-close", result: result) {
+                result["closed"].bool == true ? "closed the amcu window and its tabs" : "no amcu window is open"
+            }
+            return
+        }
+        let result = try client.request("window.info", params: try baseParams(flags), timeout: 10)
+        emit(client, action: "window", result: result) {
+            guard !result["window"].isNull else {
+                return "no amcu window is open (the first `amcu browser tab --new` creates it)"
+            }
+            let window = result["window"]
+            var lines = ["amcu window \(window["id"].int ?? 0): \(window["state"].string ?? "?"), \(window["focused"].bool == true ? "focused" : "not focused"), \(window["width"].int ?? 0)x\(window["height"].int ?? 0)"]
+            for tab in window["tabs"].array {
+                lines.append("  id=\(tab["id"].int ?? 0)\t\(tab["title"].string ?? "")\t\(tab["url"].string ?? "")\(tab["active"].bool == true ? "  (active)" : "")")
+            }
+            return lines.joined(separator: "\n")
+        }
     }
 
     static func navigate(_ flags: Flags) throws {

@@ -19,6 +19,7 @@ public struct AmcuError: Error, CustomStringConvertible {
         // strings; `AmcuError.bridge` maps anything unrecognised to page_error).
         case bridgeUnavailable = "bridge_unavailable"
         case tabNotFound = "tab_not_found"
+        case noCurrentTab = "no_current_tab"
         case pageError = "page_error"
         case dialogOpen = "dialog_open"
         case elementObscured = "element_obscured"

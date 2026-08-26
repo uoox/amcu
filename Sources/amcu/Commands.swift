@@ -47,11 +47,33 @@ enum Commands {
         flags.string("session") ?? "default"
     }
 
+    /// How a pointer-shaped command will reach the target, resolved from
+    /// `--mode` and, for `auto`, from the SelfCheck verdict.
+    enum ResolvedDelivery {
+        case background
+        case foreground
+        /// Routed background delivery is not usable on this system. Clicks fall
+        /// back to pressing through the accessibility tree at the target point
+        /// — still no cursor movement — and refuse when nothing there is
+        /// pressable. Scroll and drag have no such equivalent and refuse.
+        case hitTest
+
+        /// The event-posting mode, for the deliveries that post events at all.
+        var pointerMode: DeliveryMode? {
+            switch self {
+            case .background: return .background
+            case .foreground: return .foreground
+            case .hitTest: return nil
+            }
+        }
+    }
+
     /// Chooses how an event will be delivered.
     ///
-    /// `auto` refuses to silently fall back to foreground delivery: taking the
-    /// user's focus is a visible side effect, so it has to be asked for.
-    static func deliveryMode(_ flags: Flags, requiresRouting: Bool) throws -> DeliveryMode {
+    /// `auto` never silently falls back to foreground delivery: taking the
+    /// user's focus is a visible side effect, so it has to be asked for. When
+    /// routed background delivery is broken it resolves to `.hitTest` instead.
+    static func deliveryMode(_ flags: Flags, requiresRouting: Bool) throws -> ResolvedDelivery {
         let raw = flags.string("mode") ?? "auto"
         switch raw {
         case "background":
@@ -60,18 +82,66 @@ enum Commands {
             return .foreground
         case "auto":
             guard requiresRouting else { return .background }
-            let check = SelfCheck.ensure()
-            guard check.usable else {
-                throw AmcuError(.unsupported, "background pointer delivery is not usable on this system: \(check.summary)", nextSteps: [
-                    "Run `amcu doctor` for the full verdict.",
-                    "Re-run with --mode foreground to accept moving the cursor and taking focus.",
-                    "Or address the element semantically: `amcu snapshot` then `amcu click --element N`."
-                ])
-            }
-            return .background
+            return SelfCheck.ensure().usable ? .background : .hitTest
         default:
             throw AmcuError(.invalidArgument, "unknown --mode '\(raw)'", nextSteps: ["Use one of: auto, background, foreground."])
         }
+    }
+
+    /// Delivers a positioned click without disturbing the user, whichever way
+    /// this system supports: verified window routing where SelfCheck passed,
+    /// otherwise a semantic press on the element found at that point.
+    /// Foreground only ever happens because `--mode foreground` asked for it.
+    /// Returns the mode label for the result line.
+    static func deliverClick(
+        _ delivery: ResolvedDelivery,
+        app: NSRunningApplication,
+        windowInfo: WindowInfo,
+        global: CGPoint,
+        button: CGMouseButton,
+        clickCount: Int
+    ) throws -> String {
+        guard let mode = delivery.pointerMode else {
+            let check = SelfCheck.ensure()
+            let action = button == .right ? "AXShowMenu" : (kAXPressAction as String)
+            guard button != .center, clickCount == 1 else {
+                throw AmcuError(.unsupported, "background pointer delivery is not usable on this system (\(check.summary)), and only a plain left or right click can fall back to an accessibility press", nextSteps: [
+                    "Address the element semantically: `amcu snapshot` then `amcu click --element N`.",
+                    "Re-run with --mode foreground to accept moving the cursor and taking focus."
+                ])
+            }
+            guard let pressed = try AXHitTest.press(pid: app.processIdentifier, at: global, action: action) else {
+                throw AmcuError(.unsupported, "background pointer delivery is not usable on this system (\(check.summary)), and nothing at \(Int(global.x)),\(Int(global.y)) can be pressed through the accessibility tree", nextSteps: [
+                    "Address the element semantically: `amcu snapshot` then `amcu click --element N`.",
+                    "Re-run with --mode foreground to accept moving the cursor and taking focus."
+                ])
+            }
+            return "ax:\(pressed.action)@point"
+        }
+        try PointerInput.click(PointerInput.ClickRequest(
+            pid: app.processIdentifier,
+            windowID: windowInfo.windowID,
+            windowFrame: windowInfo.frame.cgRect,
+            global: global,
+            button: button,
+            clickCount: clickCount,
+            mode: mode
+        ))
+        return mode.rawValue
+    }
+
+    /// Applications known to discard synthesized input wholesale — clicks,
+    /// scrolls and keys posted to them vanish without an error, however they
+    /// are routed (verified empirically against WeChat's own windows and its
+    /// mini-program windows: shell process, content process, with and without
+    /// a preceding move, all ignored). Anti-automation by design. The events
+    /// are still sent — a subset of controls could react — but the result
+    /// carries this note so the caller re-checks and reports honestly instead
+    /// of retrying forever or silently escalating to the user's cursor.
+    static func syntheticInputImmunityNote(_ app: NSRunningApplication) -> String? {
+        let immune: Set<String> = ["com.tencent.xinwechat", "com.tencent.flue.wechatappex"]
+        guard let id = app.bundleIdentifier?.lowercased(), immune.contains(id) else { return nil }
+        return "warning: this application is known to discard synthesized input; verify with a re-scan, and if nothing changed only --mode foreground (visible, moves the cursor) reaches it — ask the user first"
     }
 
     /// Foreground delivery posts to the global event tap, which sends the event
@@ -79,7 +149,7 @@ enum Commands {
     /// `--app`. Acting anyway would click a stranger's interface, so a
     /// foreground request against a background application is refused rather
     /// than silently misdirected.
-    static func assertForegroundIsSafe(_ mode: DeliveryMode, app: NSRunningApplication) throws {
+    static func assertForegroundIsSafe(_ mode: ResolvedDelivery, app: NSRunningApplication) throws {
         guard mode == .foreground, !app.isActive else { return }
         let frontmost = NSWorkspace.shared.frontmostApplication?.localizedName ?? "another application"
         throw AmcuError(.unsupported, "--mode foreground would deliver to '\(frontmost)', not '\(app.localizedName ?? "the target")'", nextSteps: [
@@ -251,16 +321,9 @@ enum Commands {
                 let mode = try deliveryMode(flags, requiresRouting: true)
                 try assertForegroundIsSafe(mode, app: app)
                 let center = globalPoint(CGPoint(x: frame.midX, y: frame.midY), window: window.info, isScreenSpace: false)
-                try PointerInput.click(PointerInput.ClickRequest(
-                    pid: app.processIdentifier,
-                    windowID: window.info.windowID,
-                    windowFrame: window.info.frame.cgRect,
-                    global: center,
-                    button: button,
-                    clickCount: clickCount,
-                    mode: mode
-                ))
-                let result = ActionResult(action: "click", mode: mode.rawValue, target: "text \(elementIndex)", detail: node.label.map { "\"\($0)\"" })
+                let modeLabel = try deliverClick(mode, app: app, windowInfo: window.info, global: center, button: button, clickCount: clickCount)
+                let immunityNote = mode == .foreground ? nil : syntheticInputImmunityNote(app)
+                let result = ActionResult(action: "click", mode: modeLabel, target: "text \(elementIndex)", detail: combinedDetail(node.label.map { "\"\($0)\"" }, immunityNote))
                 Output.emit(result) { result.text }
                 return
             }
@@ -294,22 +357,15 @@ enum Commands {
             let mode = try deliveryMode(flags, requiresRouting: true)
             try assertForegroundIsSafe(mode, app: app)
             let global = CGPoint(x: target.midX, y: target.midY)
-            try PointerInput.click(PointerInput.ClickRequest(
-                pid: app.processIdentifier,
-                windowID: window.info.windowID,
-                windowFrame: window.info.frame.cgRect,
-                global: global,
-                button: button,
-                clickCount: clickCount,
-                mode: mode
-            ))
+            let modeLabel = try deliverClick(mode, app: app, windowInfo: window.info, global: global, button: button, clickCount: clickCount)
             let result = ActionResult(
                 action: "click",
-                mode: mode.rawValue,
+                mode: modeLabel,
                 target: "element \(elementIndex)",
                 detail: combinedDetail(
                     liveFrame == nil ? "coordinate fallback (recorded frame)" : "coordinate fallback (live frame)",
-                    forcedNote
+                    forcedNote,
+                    mode == .foreground ? nil : syntheticInputImmunityNote(app)
                 )
             )
             Output.emit(result) { result.text }
@@ -327,16 +383,8 @@ enum Commands {
         let mode = try deliveryMode(flags, requiresRouting: true)
         try assertForegroundIsSafe(mode, app: target.app)
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
-        try PointerInput.click(PointerInput.ClickRequest(
-            pid: target.app.processIdentifier,
-            windowID: target.windowInfo.windowID,
-            windowFrame: target.windowInfo.frame.cgRect,
-            global: global,
-            button: button,
-            clickCount: clickCount,
-            mode: mode
-        ))
-        let result = ActionResult(action: "click", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: nil)
+        let modeLabel = try deliverClick(mode, app: target.app, windowInfo: target.windowInfo, global: global, button: button, clickCount: clickCount)
+        let result = ActionResult(action: "click", mode: modeLabel, target: "\(Int(global.x)),\(Int(global.y))", detail: mode == .foreground ? nil : syntheticInputImmunityNote(target.app))
         Output.emit(result) { result.text }
     }
 
@@ -452,8 +500,9 @@ enum Commands {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
         let app = try resolveApp(flags, try flags.required("app"))
-        let mode = try deliveryMode(flags, requiresRouting: false)
-        try assertForegroundIsSafe(mode, app: app)
+        let delivery = try deliveryMode(flags, requiresRouting: false)
+        try assertForegroundIsSafe(delivery, app: app)
+        let mode = delivery.pointerMode ?? .background
         let focus = try focusForTyping(flags, app: app)
         try KeyboardInput.type(text: text, pid: app.processIdentifier, mode: mode)
         let result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters into \(focus.summary)")
@@ -606,8 +655,9 @@ enum Commands {
         let key = try flags.required("key", hint: "For example --key return, --key escape, --key a.")
         let modifiers = flags.list("mod")
         let app = try resolveApp(flags, try flags.required("app"))
-        let mode = try deliveryMode(flags, requiresRouting: false)
-        try assertForegroundIsSafe(mode, app: app)
+        let delivery = try deliveryMode(flags, requiresRouting: false)
+        try assertForegroundIsSafe(delivery, app: app)
+        let mode = delivery.pointerMode ?? .background
         let focus = try focusForTyping(flags, app: app)
         try KeyboardInput.press(key: key, modifiers: modifiers, pid: app.processIdentifier, mode: mode)
         let combination = (modifiers + [key]).joined(separator: "+")
@@ -619,8 +669,9 @@ enum Commands {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
         let app = try resolveApp(flags, try flags.required("app"))
-        let mode = try deliveryMode(flags, requiresRouting: false)
-        try assertForegroundIsSafe(mode, app: app)
+        let delivery = try deliveryMode(flags, requiresRouting: false)
+        try assertForegroundIsSafe(delivery, app: app)
+        let mode = delivery.pointerMode ?? .background
         let focus = try focusForTyping(flags, app: app)
         // Pasting sidesteps input methods entirely, which matters for CJK text
         // and for any layout where synthesised keystrokes would be recomposed.
@@ -651,8 +702,14 @@ enum Commands {
         }
         let windowFrame = target.windowInfo.frame.cgRect
         let point = try flags.point("at") ?? CGPoint(x: windowFrame.width / 2, y: windowFrame.height / 2)
-        let mode = try deliveryMode(flags, requiresRouting: true)
-        try assertForegroundIsSafe(mode, app: target.app)
+        let delivery = try deliveryMode(flags, requiresRouting: true)
+        try assertForegroundIsSafe(delivery, app: target.app)
+        guard let mode = delivery.pointerMode else {
+            throw AmcuError(.unsupported, "background scrolling is not usable on this system: \(SelfCheck.ensure().summary)", nextSteps: [
+                "Scroll semantically where the application allows it: `amcu snapshot`, then act on the scroll area's elements.",
+                "Re-run with --mode foreground to accept moving the cursor and taking focus."
+            ])
+        }
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
         try PointerInput.scroll(
             pid: target.app.processIdentifier,
@@ -663,7 +720,7 @@ enum Commands {
             deltaY: deltaY,
             mode: mode
         )
-        let result = ActionResult(action: "scroll", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: "dx=\(deltaX) dy=\(deltaY)")
+        let result = ActionResult(action: "scroll", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail("dx=\(deltaX) dy=\(deltaY)", mode == .foreground ? nil : syntheticInputImmunityNote(target.app)))
         Output.emit(result) { result.text }
     }
 
@@ -673,8 +730,13 @@ enum Commands {
         guard let from = try flags.point("from"), let to = try flags.point("to") else {
             throw AmcuError(.invalidArgument, "drag needs --from x,y and --to x,y")
         }
-        let mode = try deliveryMode(flags, requiresRouting: true)
-        try assertForegroundIsSafe(mode, app: target.app)
+        let delivery = try deliveryMode(flags, requiresRouting: true)
+        try assertForegroundIsSafe(delivery, app: target.app)
+        guard let mode = delivery.pointerMode else {
+            throw AmcuError(.unsupported, "background dragging is not usable on this system: \(SelfCheck.ensure().summary)", nextSteps: [
+                "Re-run with --mode foreground to accept moving the cursor and taking focus."
+            ])
+        }
         let isScreenSpace = flags.has("screen")
         try PointerInput.drag(
             pid: target.app.processIdentifier,
@@ -744,7 +806,7 @@ enum Commands {
             lines.append("  [\(AX.canResolveWindowID ? "ok" : "  ")] ax window ids: \(AX.canResolveWindowID ? "resolvable" : "unavailable — background pointer events cannot be routed")")
             lines.append("  [\(check.usable ? "ok" : "  ")] background pointer delivery: \(check.summary)")
             if !check.usable {
-                lines.append("  next: use --mode foreground, or drive elements semantically via `amcu snapshot` + `amcu click --element N`.")
+                lines.append("  next: clicks fall back to an accessibility press at the target point (still no cursor movement); scroll and drag need --mode foreground.")
             }
             if browsers.isEmpty {
                 lines.append("  [  ] browser bridge: no browser connected — optional; `amcu browser doctor` explains the one-time setup")

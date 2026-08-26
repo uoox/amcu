@@ -36,7 +36,10 @@ public enum ChromiumAccessibility {
         "notion.id",
         "com.spotify.client",
         "com.microsoft.teams2",
-        "md.obsidian"
+        "md.obsidian",
+        // WeChat's mini-program host: a separate Chromium process (also
+        // displaying itself as 微信) that owns every mini-program window.
+        "com.tencent.flue.WeChatAppEx"
     ]
 
     /// Case-insensitive, because bundle ids arrive from user selectors as well

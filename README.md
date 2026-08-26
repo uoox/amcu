@@ -73,7 +73,7 @@ amcu doctor — 27.0 (26A5388g)
   [ok] background pointer delivery: window-routed pointer events land accurately (verified on build 27.0 (26A5388g))
 ```
 
-If the self-check ever fails, background coordinate clicks are refused with an explanation rather than silently misfiring, and you are pointed at the two paths that do not depend on private API: semantic element actions, and explicit `--mode foreground`.
+If the self-check ever fails, coordinate clicks do not start moving your cursor: they fall back to pressing the element found at the target point through the accessibility tree — still no pointer events, still background. Only when nothing at that point is pressable are you pointed at the remaining choices: semantic element actions, or explicit `--mode foreground`. Scroll and drag have no such fallback and refuse instead.
 
 ## Quick start
 
@@ -171,6 +171,7 @@ ACT
 WEB PAGES
   amcu browser install                       one-time: register the native host, write the extension
   amcu browser tabs | tab --new --url U | tab --select ID | navigate --url U
+  amcu browser window [--show|--hide|--close]   amcu's own background window, where tab --new opens
   amcu browser snapshot                      the page as an outline with [ref=e12] on every control
   amcu browser snapshot --diff               only the lines added/removed since the last snapshot
   amcu browser find --text T                 search the last snapshot (substring or /regex/)
@@ -236,9 +237,11 @@ key ok: Enter to tab 727784600 "GitHub - uoox/amcu: another macOS computer use" 
 → navigated to https://github.com/search?q=background+click&type=repositories
 ```
 
-Refs are checked the way element indices are: before an action, the element is re-resolved and its role and accessible name compared with what the snapshot recorded, so a page that changed underneath you yields `stale_snapshot` instead of a click on whatever moved there. Frames are part of the address — `f42e12` is element 12 of frame 42, and the snapshot prints each frame as its own section, with the iframe it sits in and coordinates translated on the way to a click. Each `--session` has its own current tab, so concurrent agents do not steal each other's; `tab --new` opens in the background unless `--activate` says otherwise.
+Refs are checked the way element indices are: before an action, the element is re-resolved and its role and accessible name compared with what the snapshot recorded, so a page that changed underneath you yields `stale_snapshot` instead of a click on whatever moved there. Frames are part of the address — `f42e12` is element 12 of frame 42, and the snapshot prints each frame as its own section, with the iframe it sits in and coordinates translated on the way to a click. Each `--session` has its own current tab, so concurrent agents do not steal each other's.
 
-What `amcu browser` will not do, stated plainly: it cannot script `chrome://` pages, the Web Store or `file://` URLs unless the extension is granted file access; a screenshot needs the tab to render, which a background tab in a fully hidden window may not (the error says how to make it visible, and `snapshot` needs no pixels); `eval` cannot reach a cross-origin frame's script context, though clicking and typing inside one works; and a click on a covered element is refused with the cover named, because a click that lands on a cookie banner is exactly the kind of "success" this tool refuses to report. `--force` falls back to a JavaScript click when you know better.
+`tab --new` opens in a window of amcu's own: a separate, never-focused browser window created on first use, whose first tab is a pinned page saying what it is. Your focus, your active tab and your window order are untouched; the agent's tabs are out of your tab strip, so you cannot close them by accident; and because a tab there can be made active *within* that unfocused window, it keeps rendering and screenshots work with the window parked behind everything else (screenshots restore it from minimised by themselves, unfocused). `amcu browser window` reports it, `--show` focuses it when you want to watch the agent work, `--hide` minimises it, `--close` ends it. `tab --new --user-window` is the explicit exception that opens in your window. And a command that would *change* a page acts on the tab you are looking at only when told to explicitly — with no pinned tab and no `--tab`, acting commands refuse rather than navigate away what you are reading.
+
+What `amcu browser` will not do, stated plainly: it cannot script `chrome://` pages, the Web Store or `file://` URLs unless the extension is granted file access; a screenshot needs the tab to render, which amcu's own window guarantees invisibly but a background tab in *your* window may not (the error says what to do, and `snapshot` needs no pixels); `eval` cannot reach a cross-origin frame's script context, though clicking and typing inside one works; and a click on a covered element is refused with the cover named, because a click that lands on a cookie banner is exactly the kind of "success" this tool refuses to report. `--force` falls back to a JavaScript click when you know better.
 
 `amcu browser guide` carries the operating conventions for an agent, and `amcu browser doctor` diagnoses the setup end to end.
 
@@ -385,7 +388,7 @@ error [stale_snapshot]: element 4 changed label ("Archive" -> "Delete")
 
 ### Delivery modes
 
-- `--mode auto` (default) — semantic action if the element offers one, otherwise verified background delivery. **Never falls back to foreground silently**: stealing focus is a visible side effect, so it has to be asked for.
+- `--mode auto` (default) — semantic action if the element offers one, otherwise verified background delivery; if this system's routed delivery failed verification, clicks fall back to an accessibility press at the target point (cursor still untouched). **Never falls back to foreground silently**: stealing focus is a visible side effect, so it has to be asked for.
 - `--mode background` — window-routed, cursor stays put.
 - `--mode foreground` — global event tap. Moves the cursor and takes focus. Correct only when the target is already frontmost.
 
@@ -428,7 +431,7 @@ Stated plainly, because finding these out at runtime is worse:
 - **Optical fallback is text only.** `scan` finds text and where it is; it cannot tell a button from a caption, cannot see icons or unlabelled controls, and cannot report state. It is a fallback for windows that publish nothing, not a substitute for an accessibility tree.
 - **Window management is opt-in.** `amcu window` moves, resizes, raises and un-minimizes — but no other command will do any of that on your behalf to make its own job easier.
 - **Lazily built menus read as empty.** Applications that populate a submenu only when it opens show that submenu with no items. `menu-item --press` can still reach them by opening the menu.
-- **Private API dependency.** Background *coordinate* clicks rely on `CGEventSetWindowLocation`. Semantic actions and `--mode foreground` do not. The self-check exists so you find out immediately rather than eventually.
+- **Private API dependency.** Background *coordinate* clicks rely on `CGEventSetWindowLocation`. Semantic actions, the accessibility-press fallback and `--mode foreground` do not. The self-check exists so you find out immediately rather than eventually — and when it fails, clicks degrade to the accessibility press, not to your cursor.
 - **The browser extension is loaded unpacked.** Chrome requires Developer mode for that, and shows an infobar while amcu holds a tab's debugger. Publishing to the Web Store would remove the first; the second is how Chrome tells the user an extension is driving the page, and it stays.
 - **macOS only**, 14.0+.
 

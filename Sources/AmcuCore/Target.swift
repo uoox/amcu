@@ -91,11 +91,39 @@ public enum Target {
             return match
         }
 
-        if let match = apps.first(where: { $0.bundleIdentifier?.caseInsensitiveCompare(selector) == .orderedSame }) {
-            return match
+        // A bundle id can be running more than once: WeChat spawns one
+        // WeChatAppEx process per mini-program batch, all with the same id.
+        // When exactly one of them owns windows it is the one every window
+        // command means; otherwise the choice is the caller's.
+        let exactBundle = apps.filter { $0.bundleIdentifier?.caseInsensitiveCompare(selector) == .orderedSame }
+        if exactBundle.count == 1 { return exactBundle[0] }
+        if exactBundle.count > 1 {
+            let withWindows = exactBundle.filter { app in
+                let element = AXUIElementCreateApplication(app.processIdentifier)
+                AX.setMessagingTimeout(element, seconds: 1.0)
+                return !AX.windows(element).isEmpty
+            }
+            if withWindows.count == 1 { return withWindows[0] }
+            let names = exactBundle.map { app in
+                "pid \(app.processIdentifier)\(withWindows.contains(app) ? " (has windows)" : "")"
+            }.joined(separator: ", ")
+            throw AmcuError(.invalidArgument, "'\(selector)' is running as \(exactBundle.count) processes: \(names)", nextSteps: [
+                "Re-run with pid:N to pick one.",
+                "`amcu windows --app pid:N` shows which process owns the window you are after."
+            ])
         }
-        if let match = apps.first(where: { $0.localizedName?.caseInsensitiveCompare(selector) == .orderedSame }) {
-            return match
+        // An exact display name can still be ambiguous: WeChat's mini-program
+        // host (WeChatAppEx) calls itself 微信 just like the main process, and
+        // they are different processes with different windows. Guessing here
+        // sends every later event to the wrong pid, so ambiguity is reported.
+        let exactName = apps.filter { $0.localizedName?.caseInsensitiveCompare(selector) == .orderedSame }
+        if exactName.count == 1 { return exactName[0] }
+        if exactName.count > 1 {
+            let names = exactName.map { "\($0.bundleIdentifier ?? "?") (pid \($0.processIdentifier))" }.joined(separator: ", ")
+            throw AmcuError(.invalidArgument, "'\(selector)' names \(exactName.count) running processes: \(names)", nextSteps: [
+                "Re-run with a full bundle id or pid:N to disambiguate.",
+                "They are different processes with different windows — check both if unsure which owns your target window."
+            ])
         }
 
         let prefixed = apps.filter {

@@ -13,7 +13,8 @@ struct Flags {
         "press", "raise", "minimize", "restore", "allow-sensitive",
         // browser verbs
         "activate", "new", "close", "no-wait", "all-refs", "interactive", "full", "submit", "slowly",
-        "replace", "clear", "load", "hard", "all", "accept", "dismiss", "diff"
+        "replace", "clear", "load", "hard", "all", "accept", "dismiss", "diff",
+        "show", "hide", "user-window"
     ]
 
     init(_ arguments: [String]) throws {

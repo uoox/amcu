@@ -175,6 +175,51 @@ chrome.runtime.onInstalled.addListener(connect);
 connect();
 
 // ---------------------------------------------------------------------------
+// The automation window.
+//
+// Tabs the CLI opens live in a window of amcu's own, created unfocused so the
+// user's focus, active tab and window order are never touched. Inside that
+// window tabs can be freely activated — activation is only visible when a
+// window is focused — which keeps them rendering, so screenshots work without
+// ever surfacing anything. Its first tab is a pinned extension page that says
+// what the window is, and keeps the window alive between tasks.
+
+const AMCU_WINDOW_KEY = 'amcuWindow';
+
+async function amcuWindowId() {
+  const stored = await chrome.storage.session.get(AMCU_WINDOW_KEY);
+  const id = stored[AMCU_WINDOW_KEY];
+  if (id === undefined || id === null) return null;
+  try {
+    const win = await chrome.windows.get(id);
+    if (win && win.type === 'normal') return id;
+  } catch (_) { /* closed */ }
+  await chrome.storage.session.remove(AMCU_WINDOW_KEY);
+  return null;
+}
+
+async function ensureAmcuWindow() {
+  const existing = await amcuWindowId();
+  if (existing !== null) return existing;
+  const win = await chrome.windows.create({
+    url: chrome.runtime.getURL('window.html'),
+    focused: false,
+    type: 'normal',
+    width: 1280,
+    height: 850
+  });
+  await chrome.storage.session.set({ [AMCU_WINDOW_KEY]: win.id });
+  const first = win.tabs && win.tabs[0];
+  if (first) await chrome.tabs.update(first.id, { pinned: true }).catch(() => {});
+  return win.id;
+}
+
+async function inAmcuWindow(tab) {
+  const id = await amcuWindowId();
+  return id !== null && tab.windowId === id;
+}
+
+// ---------------------------------------------------------------------------
 // Sessions: each CLI --session has its own current tab.
 
 async function currentTabId(session) {
@@ -197,7 +242,12 @@ async function getTab(tabId) {
   }
 }
 
-async function resolveTab(params) {
+// `acting: true` marks the commands that change the page (navigate, click,
+// type, eval, …). Reading the tab the user happens to be looking at is fine;
+// silently *acting* on it is exactly the "my tab suddenly changed under me"
+// failure, so an acting command with neither a pinned session tab nor an
+// explicit --tab refuses instead of falling through to the user's tab.
+async function resolveTab(params, { acting = false } = {}) {
   if (params.tab !== undefined && params.tab !== null) {
     const tab = await getTab(params.tab);
     if (!tab) {
@@ -215,9 +265,16 @@ async function resolveTab(params) {
     await setCurrentTab(session, null);
   }
   const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (active) return active;
-  const [any] = await chrome.tabs.query({ active: true });
-  if (any) return any;
+  const [any] = active ? [active] : await chrome.tabs.query({ active: true });
+  if (any) {
+    if (acting && !(await inAmcuWindow(any))) {
+      throw new BridgeError('no_current_tab', `this session has no current tab, and acting would hit the tab the user is looking at ("${truncate(any.title, 80)}")`, [
+        'Open a tab of your own with `amcu browser tab --new --url …` — it lives in amcu\'s background window and never disturbs the user.',
+        'To act on an existing tab deliberately: `amcu browser tabs`, then `tab --select ID` or --tab ID.'
+      ]);
+    }
+    return any;
+  }
   throw new BridgeError('tab_not_found', 'the browser has no tabs', ['Open one with `amcu browser tab --new --url https://…`.']);
 }
 
@@ -929,7 +986,20 @@ const handlers = {
 
   async 'tabs.create'(params) {
     const session = params.session || 'default';
-    const tab = await chrome.tabs.create({ url: params.url || 'about:blank', active: !!params.activate });
+    const create = { url: params.url || 'about:blank' };
+    if (params.userWindow) {
+      // Explicitly asked for the user's window — the old behaviour.
+      create.active = !!params.activate;
+    } else {
+      create.windowId = await ensureAmcuWindow();
+      // Active within the unfocused amcu window: invisible to the user, and
+      // the tab renders, so screenshots work without any visible change.
+      create.active = true;
+    }
+    const tab = await chrome.tabs.create(create);
+    if (params.activate && !params.userWindow) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
     await setCurrentTab(session, tab.id);
     const loaded = params.url && params.wait !== false ? await waitForLoad(tab.id, params.timeoutMs || 30000) : tab;
     return { tab: tabSummary(loaded, { current: true }) };
@@ -942,18 +1012,23 @@ const handlers = {
     await setCurrentTab(session, tab.id);
     if (params.activate) {
       await chrome.tabs.update(tab.id, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } else if (await inAmcuWindow(tab)) {
+      // Activation inside the amcu window is invisible and keeps the tab
+      // rendering; in the user's windows it would be a visible change.
+      await chrome.tabs.update(tab.id, { active: true });
     }
     return { tab: tabSummary(await getTab(tab.id) || tab, { current: true }) };
   },
 
   async 'tabs.close'(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     await chrome.tabs.remove(tab.id);
     return { closed: tabSummary(tab) };
   },
 
   async navigate(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     if (!params.url) throw new BridgeError('invalid_argument', '--url is required');
     let url = params.url;
@@ -966,7 +1041,7 @@ const handlers = {
   },
 
   async back(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     const from = tab.url;
     await chrome.tabs.goBack(tab.id);
@@ -975,7 +1050,7 @@ const handlers = {
   },
 
   async forward(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     const from = tab.url;
     await chrome.tabs.goForward(tab.id);
@@ -984,7 +1059,7 @@ const handlers = {
   },
 
   async reload(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await chrome.tabs.reload(tab.id, { bypassCache: !!params.hard });
     if (params.wait === false) return { tab: tabSummary(await getTab(tab.id) || tab) };
@@ -1098,7 +1173,7 @@ const handlers = {
   },
 
   async click(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     const before = { url: tab.url };
     await ensureAttached(tab.id);
@@ -1141,7 +1216,7 @@ const handlers = {
   },
 
   async hover(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const target = await locate(tab.id, params.ref);
@@ -1150,7 +1225,7 @@ const handlers = {
   },
 
   async drag(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const from = await locate(tab.id, params.from);
@@ -1169,7 +1244,7 @@ const handlers = {
   },
 
   async type(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
@@ -1205,7 +1280,7 @@ const handlers = {
   },
 
   async fill(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
@@ -1245,7 +1320,7 @@ const handlers = {
   },
 
   async 'select-option'(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     const { frameId, local } = parseRef(params.ref);
     const result = await callFrame(tab.id, frameId, 'select-option', { ref: local, values: params.values || [] });
@@ -1253,7 +1328,7 @@ const handlers = {
   },
 
   async key(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     if (params.ref) {
@@ -1284,7 +1359,7 @@ const handlers = {
   },
 
   async scroll(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     let x, y, description = 'viewport';
@@ -1308,6 +1383,18 @@ const handlers = {
   async screenshot(params) {
     const tab = await resolveTab(params);
     await ensureAttached(tab.id);
+    // A tab that is not its window's active tab does not render. In the amcu
+    // window that is fixable invisibly; restore from minimised too, unfocused.
+    if (await inAmcuWindow(tab)) {
+      const win = await chrome.windows.get(tab.windowId).catch(() => null);
+      if (win && win.state === 'minimized') {
+        await chrome.windows.update(tab.windowId, { state: 'normal', focused: false }).catch(() => {});
+      }
+      if (!tab.active) {
+        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+        await sleep(200);
+      }
+    }
     const format = params.format === 'jpeg' ? 'jpeg' : 'png';
     const request = { format, fromSurface: true, captureBeyondViewport: !!params.full };
     if (format === 'jpeg') request.quality = params.quality || 80;
@@ -1331,9 +1418,10 @@ const handlers = {
     } catch (error) {
       const bridge = asBridgeError(error);
       if (bridge.code === 'timeout') {
-        throw new BridgeError('capture_failure', 'the tab did not produce a frame — background tabs and fully hidden windows may not render', [
-          'Make the tab visible in its window with `amcu browser tab --select ID --activate` (a visible change), then retry.',
-          'Or read the page with `amcu browser snapshot`, which needs no rendering.'
+        throw new BridgeError('capture_failure', 'the tab did not produce a frame — a tab that is not its window\'s active tab may not render', [
+          'Move the work into amcu\'s background window: `amcu browser tab --new --url …` opens there and renders without disturbing the user.',
+          'Or read the page with `amcu browser snapshot`, which needs no rendering.',
+          'Only as a last resort make the tab visible: `amcu browser tab --select ID --activate` (a visible change in the user\'s window).'
         ]);
       }
       throw bridge;
@@ -1342,7 +1430,7 @@ const handlers = {
   },
 
   async evaluate(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const source = String(params.expression || '');
@@ -1468,7 +1556,7 @@ const handlers = {
   },
 
   async dialog(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     const entry = await ensureAttached(tab.id);
     if (!entry.dialog) {
       // The event only arrives while attached; ask the page whether it is stuck.
@@ -1495,7 +1583,7 @@ const handlers = {
   },
 
   async upload(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
@@ -1525,13 +1613,50 @@ const handlers = {
   },
 
   async resize(params) {
-    const tab = await resolveTab(params);
+    const tab = await resolveTab(params, { acting: true });
     const update = {};
     if (params.width) update.width = params.width;
     if (params.height) update.height = params.height;
     if (!Object.keys(update).length) throw new BridgeError('invalid_argument', 'resize needs --width and/or --height');
     const win = await chrome.windows.update(tab.windowId, update);
     return { tab: tabSummary(tab), window: { id: win.id, width: win.width, height: win.height } };
+  },
+
+  async 'window.info'() {
+    const id = await amcuWindowId();
+    if (id === null) return { window: null };
+    const win = await chrome.windows.get(id, { populate: true });
+    return {
+      window: {
+        id: win.id,
+        state: win.state,
+        focused: !!win.focused,
+        width: win.width,
+        height: win.height,
+        tabs: (win.tabs || []).map(t => tabSummary(t))
+      }
+    };
+  },
+
+  async 'window.show'() {
+    const id = await ensureAmcuWindow();
+    const win = await chrome.windows.update(id, { state: 'normal', focused: true });
+    return { window: { id: win.id, state: win.state, focused: !!win.focused } };
+  },
+
+  async 'window.hide'() {
+    const id = await amcuWindowId();
+    if (id === null) return { window: null };
+    const win = await chrome.windows.update(id, { state: 'minimized' });
+    return { window: { id: win.id, state: win.state, focused: !!win.focused } };
+  },
+
+  async 'window.close'() {
+    const id = await amcuWindowId();
+    if (id === null) return { closed: false };
+    await chrome.windows.remove(id);
+    await chrome.storage.session.remove(AMCU_WINDOW_KEY);
+    return { closed: true };
   },
 
   async detach(params) {
