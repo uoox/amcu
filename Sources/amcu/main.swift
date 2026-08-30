@@ -16,7 +16,7 @@ INSPECT
   scan         --app S                  optical fallback: recognise text and where it is
   menu         --app S                  read the menu bar without opening it
   focus        --app S                  report what currently has keyboard focus
-  doctor                                check permissions and verify background delivery
+  doctor                                check permissions (host app and amcu itself) and verify background delivery
   guide                                 operating instructions for an agent driving this tool
 
 ACT
@@ -140,6 +140,12 @@ do {
     case "drag": try Commands.drag(flags)
     case "screenshot": try Commands.screenshot(flags)
     case "doctor": try Commands.doctor(flags)
+    // Hidden: re-exec'd with responsibility disclaimed by `doctor`, so the
+    // answers below are about the amcu binary itself, not the hosting app.
+    case "__permission-probe":
+        if flags.has("request") { Permissions.request() }
+        let data = try JSONEncoder().encode(Permissions.probeNow())
+        print(String(decoding: data, as: UTF8.self))
     case "browser": try BrowserCommands.run(flags)
     case "guide": print(guideText)
     case "help": print(helpText)

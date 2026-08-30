@@ -67,11 +67,16 @@ both                    → delivered to window, landed at (200, 150) ← exact
 ```console
 $ amcu doctor
 amcu doctor — 27.0 (26A5388g)
-  [ok] accessibility: reading and acting on user interfaces is permitted
-  [ok] screen_recording: window capture is permitted
+  subject: this run answers for iTerm2 (pid 812, /Applications/iTerm.app)
+  [ok] accessibility (iTerm2): reading and acting on user interfaces is permitted
+  [ok] screen_recording (iTerm2): window capture is permitted
+  [ok] accessibility (amcu itself): counts when amcu answers for itself — a launchd service or a disclaimed spawn
+  [  ] screen_recording (amcu itself): not granted to the amcu binary — counts when amcu answers for itself — a launchd service or a disclaimed spawn
   [ok] ax window ids: resolvable
   [ok] background pointer delivery: window-routed pointer events land accurately (verified on build 27.0 (26A5388g))
 ```
+
+`doctor` 会报告**两个 TCC 主体**：macOS 把命令行工具的权限查询归因到它的*责任进程*——托管这次运行的 App——而不是二进制本身。带 `(宿主名)` 的行是本次运行实际拿到的权限，并点名系统设置里该启用谁；`(amcu itself)` 的行通过以「责任豁免（disclaim）」方式重新运行 amcu 测得，只在 amcu 为自己负责时生效（作为 launchd 服务运行，或被 disclaim 启动）。在终端里运行时给 amcu 二进制授权不会有任何效果——这正是「权限明明都给了，doctor 还是说没给」的经典成因。
 
 一旦自检失败，坐标点击并不会开始移动你的光标：它退回到在目标点上通过辅助功能树按压找到的元素——仍然没有指针事件，仍然在后台。只有当那个点上没有任何可按压的东西时，才会指给你剩下的选择：语义化元素动作，或显式的 `--mode foreground`。滚动和拖拽没有这样的回退，会直接拒绝。
 
@@ -92,7 +97,7 @@ $ amcu doctor --request     # macOS 弹出授权提示；批准它们
 $ amcu doctor               # 每一行都应显示 [ok]
 ```
 
-权限属于**运行 amcu 的那个程序**——你的终端，或 agent 的宿主——而不是这个二进制本身：
+权限属于**运行 amcu 的那个程序**——你的终端，或 agent 的宿主——而不是这个二进制本身。`doctor` 的 `subject:` 行会直接点名这个宿主，让你第一次就授对对象：
 
 - **辅助功能** —— 一切操作都需要。
 - **屏幕录制** —— 仅 `amcu screenshot` 需要。

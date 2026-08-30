@@ -67,11 +67,16 @@ So amcu does not trust the symbol's presence. On first use for a given OS build 
 ```console
 $ amcu doctor
 amcu doctor — 27.0 (26A5388g)
-  [ok] accessibility: reading and acting on user interfaces is permitted
-  [ok] screen_recording: window capture is permitted
+  subject: this run answers for iTerm2 (pid 812, /Applications/iTerm.app)
+  [ok] accessibility (iTerm2): reading and acting on user interfaces is permitted
+  [ok] screen_recording (iTerm2): window capture is permitted
+  [ok] accessibility (amcu itself): counts when amcu answers for itself — a launchd service or a disclaimed spawn
+  [  ] screen_recording (amcu itself): not granted to the amcu binary — counts when amcu answers for itself — a launchd service or a disclaimed spawn
   [ok] ax window ids: resolvable
   [ok] background pointer delivery: window-routed pointer events land accurately (verified on build 27.0 (26A5388g))
 ```
+
+`doctor` reports **two TCC subjects**, because macOS attributes a CLI tool's permission checks to its *responsible process* — the app hosting the run — not to the binary. The `(host)` rows are what this run actually gets and name exactly who to enable in System Settings; the `(amcu itself)` rows, measured by re-running amcu with responsibility disclaimed, only apply when amcu answers for itself (under a launchd service, or spawned disclaimed). Granting the amcu binary while running from a terminal changes nothing — that mismatch is the classic "I granted everything but doctor still says no".
 
 If the self-check ever fails, coordinate clicks do not start moving your cursor: they fall back to pressing the element found at the target point through the accessibility tree — still no pointer events, still background. Only when nothing at that point is pressable are you pointed at the remaining choices: semantic element actions, or explicit `--mode foreground`. Scroll and drag have no such fallback and refuse instead.
 
@@ -92,7 +97,7 @@ $ amcu doctor --request     # macOS shows the prompts; approve them
 $ amcu doctor               # every line should read [ok]
 ```
 
-Permissions belong to **whatever runs amcu** — your terminal, or the agent host — not to the binary:
+Permissions belong to **whatever runs amcu** — your terminal, or the agent host — not to the binary. `doctor` names that host on its `subject:` line so you grant the right thing the first time:
 
 - **Accessibility** — required for everything.
 - **Screen Recording** — only for `amcu screenshot`.

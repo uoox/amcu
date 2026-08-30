@@ -776,15 +776,47 @@ enum Commands {
 
     static func doctor(_ flags: Flags) throws {
         if flags.has("request") { Permissions.request() }
-        let permissions = Permissions.all()
+        let host = Responsibility.current()
+
+        // Two TCC subjects can hold grants for the same amcu binary: the host
+        // this run answers as (terminal app, dinotty, a launchd service), and
+        // the binary itself (consulted only for self-responsible runs). Report
+        // both, so "I granted everything" and "doctor says no" stop coexisting.
+        let permissions = Permissions.effective(hostName: (host?.isSelf == false) ? host?.name : nil)
+        let selfProbe: PermissionProbe? = (host?.isSelf == true)
+            ? nil // one subject only; the rows above already answer for amcu
+            : Permissions.selfProbe(request: flags.has("request-self"))
+        let selfPermissions: [PermissionState]? = selfProbe.map { probe in
+            let note = "counts when amcu answers for itself — a launchd service (aaa-daemon) or a disclaimed spawn"
+            return [
+                PermissionState(
+                    id: "accessibility",
+                    granted: probe.accessibility,
+                    detail: probe.accessibility ? note : "not granted to the amcu binary — \(note)"
+                ),
+                PermissionState(
+                    id: "screen_recording",
+                    granted: probe.screenRecording,
+                    detail: probe.screenRecording ? note : "not granted to the amcu binary — \(note)"
+                ),
+            ]
+        }
         let check = flags.has("force") ? SelfCheck.probe() : SelfCheck.ensure()
         if flags.has("force") { SelfCheck.store(check) }
 
         let browsers = BrowserClient.discover()
 
+        struct ResponsibleJSON: Encodable {
+            let pid: Int32
+            let name: String
+            let path: String?
+            let isSelf: Bool
+        }
         struct Payload: Encodable {
             let ok: Bool
             let permissions: [PermissionState]
+            let responsibleProcess: ResponsibleJSON?
+            let selfPermissions: [PermissionState]?
             let windowRouting: SelfCheckResult
             let axWindowIDs: Bool
             let osBuild: String
@@ -793,6 +825,8 @@ enum Commands {
         let payload = Payload(
             ok: permissions.allSatisfy(\.granted) && check.usable,
             permissions: permissions,
+            responsibleProcess: host.map { ResponsibleJSON(pid: $0.pid, name: $0.name, path: $0.path, isSelf: $0.isSelf) },
+            selfPermissions: selfPermissions,
             windowRouting: check,
             axWindowIDs: AX.canResolveWindowID,
             osBuild: SelfCheck.osBuild,
@@ -800,8 +834,21 @@ enum Commands {
         )
         Output.emit(payload) {
             var lines = ["amcu doctor — \(SelfCheck.osBuild)"]
+            if let host {
+                lines.append(host.isSelf
+                    ? "  subject: amcu itself (self-responsible run — launchd or disclaimed)"
+                    : "  subject: this run answers for \(host.name) (pid \(host.pid)\(host.path.map { ", \($0)" } ?? ""))")
+            }
+            let hostTag = (host?.isSelf == false) ? host.map { " (\($0.name))" } ?? "" : ""
             for permission in permissions {
-                lines.append("  [\(permission.granted ? "ok" : "  ")] \(permission.id): \(permission.detail)")
+                lines.append("  [\(permission.granted ? "ok" : "  ")] \(permission.id)\(hostTag): \(permission.detail)")
+            }
+            if let selfPermissions {
+                for permission in selfPermissions {
+                    lines.append("  [\(permission.granted ? "ok" : "  ")] \(permission.id) (amcu itself): \(permission.detail)")
+                }
+            } else if host?.isSelf != true {
+                lines.append("  [ ?] amcu itself: unknown — responsibility disclaim unavailable; only the host rows apply")
             }
             lines.append("  [\(AX.canResolveWindowID ? "ok" : "  ")] ax window ids: \(AX.canResolveWindowID ? "resolvable" : "unavailable — background pointer events cannot be routed")")
             lines.append("  [\(check.usable ? "ok" : "  ")] background pointer delivery: \(check.summary)")
