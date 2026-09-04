@@ -10,6 +10,10 @@
 #   --dir DIR          AMCU_INSTALL_DIR  where to put the binary (default: ~/.local/bin)
 #   --source           AMCU_SOURCE=1     build from the main branch instead of
 #                                        downloading a release (needs a Swift toolchain)
+#                      AMCU_SIGN_IDENTITY  macOS: code-signing identity to sign the
+#                                        installed binary with, so the accessibility
+#                                        (TCC) grant survives rebuilds (default: leave
+#                                        the toolchain's ad-hoc signature)
 #
 # It downloads the universal tarball for the chosen release, verifies its
 # SHA-256 against the sum published beside it, installs the binary, and then
@@ -95,6 +99,23 @@ install -m 755 "$binary" "$DIR/amcu"
 # curl does not set the quarantine attribute, but a tarball that arrived via a
 # browser might carry one; clearing it is harmless either way.
 xattr -d com.apple.quarantine "$DIR/amcu" 2>/dev/null || true
+
+# On macOS the toolchain ad-hoc-signs the binary, and an ad-hoc signature
+# changes every build — which makes the accessibility (TCC) permission prompt
+# reappear after each reinstall. To keep the grant across rebuilds, sign with a
+# stable identity of your own: create a self-signed code-signing certificate
+# once (Keychain Access › Certificate Assistant › Create a Certificate, type
+# "Code Signing"), then set AMCU_SIGN_IDENTITY to its name. Left unset, the
+# binary keeps its default ad-hoc signature — nothing to configure for a plain
+# install.
+if [ "$(uname -s)" = "Darwin" ] && [ -n "${AMCU_SIGN_IDENTITY:-}" ]; then
+    if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$AMCU_SIGN_IDENTITY"; then
+        codesign --force --sign "$AMCU_SIGN_IDENTITY" "$DIR/amcu" \
+            && say "signed with '$AMCU_SIGN_IDENTITY' (TCC grant persists across rebuilds)"
+    else
+        say "AMCU_SIGN_IDENTITY='$AMCU_SIGN_IDENTITY' not found in the keychain; left ad-hoc signed"
+    fi
+fi
 
 installed="$("$DIR/amcu" --version)"
 say "installed amcu $installed → $DIR/amcu"
