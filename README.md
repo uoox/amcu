@@ -193,9 +193,9 @@ The desktop path can already read a browser window's accessibility tree, but a w
 - **The extension talks to amcu through Chrome's native messaging.** `amcu browser install` writes a manifest that names this binary as the host for the `amcu bridge` extension. The browser starts the host itself when the extension loads and enforces which extension id may connect. There is no listening port for a web page to probe, and no token, because the operating system already knows who is talking to whom.
 - **`amcu browser …` reaches that host over a Unix socket** in `~/Library/Caches/amcu/browser/`, one per running browser. If the extension is reloaded, the browser starts a new host and the next command finds it. If the browser quits, the socket goes away and the CLI says so instead of hanging.
 - **Reading is a content script; acting is the debugger protocol.** The snapshot is computed in the page (roles, accessible names, states, visibility, refs) and needs no debugger. Clicks, keys, drags, screenshots, evaluation, console and network go through `chrome.debugger`, so input events are indistinguishable from a user's — including for tabs that are not visible. The one visible side effect is the browser's "amcu bridge started debugging this browser" infobar while a tab stays attached; `amcu browser detach` removes it.
-- **Every action reports what it did.** `click`, `type` and `key` come back with what visibly followed: navigation, an opened dialog, how many DOM changes were observed, what appeared (a menu, a dialog), where focus went — or `no DOM change observed` when nothing did. `snapshot --diff` prints only the lines added and removed since the last snapshot, and refs new since then carry `[new]`; often the report alone answers "did it work?" without re-reading the page. The association is temporal, not causal — a busy page's own updates are counted too, and the report says when the page had not yet gone quiet.
-- **The outline states facts a screenshot would hide.** Inputs carry their live validation constraints (`[maxlength=5] [pattern=…] [accept=…]`), elements whose only interactivity is a framework click handler (`jsaction`, `ng-click`, inline mouse handlers) are included and marked `[clickable]`, text a human cannot see is marked `[unseen=opacity|font-size|contrast]` (a classic prompt-injection channel — the flag is a fact, the judgment stays with the caller), frames from another origin are marked `[cross-origin]`, and the footer says how much page sits above and below the viewport. Before any pointer event the target must hold still for two animation frames, so a click never lands where an animating element used to be.
-- **Secrets stay out of transcripts.** `--secrets .env` (or `$AMCU_SECRETS`) loads dotenv keys: `fill --ref e7 --secret DB_PASSWORD` types by reference, and the loaded values are masked as `[secret:KEY]` in all output — snapshots and echoes reliably; console and network only until a page re-encodes the value, and the docs say so rather than promising a boundary.
+- **Every action reports what it did.** `click`, `type` and `key` come back with what visibly followed: navigation, an opened dialog, how many DOM changes were observed, what appeared (a menu, a dialog), where focus went, a tab the action opened — or `no DOM change observed` when nothing did. When a click on the session's current tab opens a new tab, that tab becomes current and the result says so, instead of the click looking like a no-op while the interesting page sits elsewhere. `snapshot --diff` prints only the lines added and removed since the last snapshot, and refs new since then carry `[new]`; often the report alone answers "did it work?" without re-reading the page. The association is temporal, not causal — a busy page's own updates are counted too, and the report says when the page had not yet gone quiet.
+- **The outline states facts a screenshot would hide.** Inputs carry their live validation constraints (`[maxlength=5] [pattern=…] [accept=…]`), elements whose only interactivity is a script or framework click handler are included and marked `[clickable]` — `jsaction`, `ng-click` and inline handlers always; `addEventListener` handlers too once the debugger is attached to the tab, listed through the debugger protocol rather than guessed from `cursor: pointer` — a control another element sits over is marked `[covered]` (a click there would be refused; the marker predicts it), a container with its own scrollbar is marked `[scrollable: 120px above, 900px below]` so content hidden inside it is not mistaken for absent, text a human cannot see is marked `[unseen=opacity|font-size|contrast]` (a classic prompt-injection channel — the flag is a fact, the judgment stays with the caller), frames from another origin are marked `[cross-origin]`, and the footer says how much page sits above and below the viewport. `[new]` and `[covered]` describe the moment rather than the element, so `find` and `--diff` ignore them and a dialog opening does not rewrite every line beneath it. Before any pointer event the target must hold still for two animation frames, so a click never lands where an animating element used to be.
+- **Secrets stay out of transcripts, and out of the wrong page.** `--secrets .env` (or `$AMCU_SECRETS`) loads dotenv keys: `fill --ref e7 --secret DB_PASSWORD` types by reference, and the loaded values are masked as `[secret:KEY]` in all output — snapshots and echoes reliably; console and network only until a page re-encodes the value, and the docs say so rather than promising a boundary. A `DB_PASSWORD__DOMAINS=accounts.example.com,*.example.org` line in the same file (still valid dotenv) pins where that key may be typed: a tab — or a frame — on any other host gets a `secret_scope` refusal, which is the one mistake masking cannot undo.
 
 Setup, once:
 
@@ -350,10 +350,14 @@ What was hidden is counted in the output. `--no-shaping` turns all of it off.
 
 ### Reaching Chromium and Electron hierarchies
 
-Whitelisted hosts are asked to publish their accessibility tree — only
+Chromium hosts are asked to publish their accessibility tree — only
 `AXManualAccessibility`, never `AXEnhancedUserInterface`, because that second
 flag makes `AXPosition` writes be ignored and would quietly break this tool's
-own `window --move`.
+own `window --move`. Which applications count is decided two ways: a
+whitelist of known bundle ids, and a look inside the application bundle for
+the engine itself (`Electron Framework.framework`, Chromium Embedded
+Framework, a browser's own framework), so an Electron app nobody listed is
+treated the same as Slack or VS Code. Native applications are never touched.
 
 Measured honestly: on macOS 27 it changed nothing. Chrome reported 151 nodes
 before activation and 152 after; Lark, a genuine Electron app with a real
@@ -362,6 +366,20 @@ accessibility on its own once any assistive client is active. The flag is kept
 because it is one idempotent write, it is what these hosts document, and older
 systems may still need it — but it is a defensive measure that demonstrated no
 benefit here, not a fix for anything observed.
+
+### Background input that took focus anyway is reported
+
+Background delivery posts events to the target process without touching the
+user's focus. AppKit does not always cooperate: a mouse-down reaching a window
+that is not active can activate that application, as a real click would. amcu
+reads the frontmost application before and after every background click,
+scroll, drag, keystroke and paste (through the accessibility API, which does
+not depend on this process's run loop) and, when a background target became
+frontmost, the result carries `warning: the target became the frontmost
+application`. Nothing is put back — restoring focus would be a second
+disturbance — but the result never pretends the promise held when it did not.
+`click --element N` presses through the accessibility API and cannot activate
+anything, which is one more reason it is the preferred path.
 
 ### Typing goes where the target's focus is
 

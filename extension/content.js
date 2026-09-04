@@ -261,6 +261,77 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Listeners the DOM cannot show. A click handler bound with addEventListener
+  // leaves no attribute behind; only the debugger protocol can list it. The
+  // worker asks for them while a tab is attached anyway (never attaching for
+  // a read) and hands the results over as DOM-order positions plus a
+  // signature. The positions are recomputed here over the *same* traversal —
+  // keep `domOrderElements` identical to the worker's walk in `listenerHints`
+  // — and a signature that no longer matches (the page mutated in between) is
+  // dropped rather than guessed at.
+
+  function domOrderElements(limit) {
+    const out = [];
+    const stack = [document.documentElement];
+    while (stack.length && out.length <= limit) {
+      const el = stack.pop();
+      if (!el) continue;
+      out.push(el);
+      const kids = [];
+      if (el.shadowRoot) for (const c of el.shadowRoot.children) kids.push(c);
+      for (const c of el.children) kids.push(c);
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    return out;
+  }
+
+  function signatureOf(el) {
+    return el.tagName + '|' + (el.id || '') + '|' + ((el.getAttribute && el.getAttribute('class')) || '').slice(0, 40);
+  }
+
+  function listenerSet(hints) {
+    const set = new Set();
+    if (!Array.isArray(hints) || !hints.length) return set;
+    let max = 0;
+    for (const hint of hints) if (Array.isArray(hint) && hint[0] > max) max = hint[0];
+    const elements = domOrderElements(max);
+    for (const hint of hints) {
+      if (!Array.isArray(hint)) continue;
+      const el = elements[hint[0]];
+      if (el && signatureOf(el) === hint[1]) set.add(el);
+    }
+    return set;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Independently scrollable containers. The footer already says how much of
+  // the *page* sits above and below the viewport; a list or panel with its own
+  // scrollbar hides content the same way and, without this, silently. The
+  // page-level scroller itself is excluded (that is the footer's job), as are
+  // form controls, whose overflow is their own business.
+
+  const SCROLL_SLACK = 8;
+
+  function scrollInfo(el, style, tag) {
+    if (el === document.documentElement || el === document.body || el === document.scrollingElement) return null;
+    if (tag === 'textarea' || tag === 'input' || tag === 'select') return null;
+    if (!(el.clientHeight > 0 && el.clientWidth > 0)) return null;
+    const scrollsY = ['auto', 'scroll', 'overlay'].includes(style.overflowY) && el.scrollHeight > el.clientHeight + SCROLL_SLACK;
+    const scrollsX = ['auto', 'scroll', 'overlay'].includes(style.overflowX) && el.scrollWidth > el.clientWidth + SCROLL_SLACK;
+    if (!scrollsY && !scrollsX) return null;
+    const parts = [];
+    if (scrollsY) {
+      parts.push(`${Math.round(el.scrollTop)}px above`);
+      parts.push(`${Math.round(el.scrollHeight - el.clientHeight - el.scrollTop)}px below`);
+    }
+    if (scrollsX) {
+      parts.push(`${Math.round(el.scrollLeft)}px left`);
+      parts.push(`${Math.round(el.scrollWidth - el.clientWidth - el.scrollLeft)}px right`);
+    }
+    return 'scrollable: ' + parts.join(', ');
+  }
+
+  // ---------------------------------------------------------------------------
   // Validation constraints, read from live IDL properties (frameworks mutate
   // them without touching the serialised attributes).
 
@@ -599,7 +670,8 @@
     lastSnapshotAt: 0,
     prevSeen: null,          // Set of refs the previous base snapshot rendered
     lastLines: null,         // [{line, ref}] of the last base snapshot (diff/find base)
-    lastGen: 0               // the generation lastLines belongs to
+    lastGen: 0,              // the generation lastLines belongs to
+    hintsApplied: false      // a listener scan has contributed refs to a snapshot before
   };
 
   function refFor(el, role, name) {
@@ -677,6 +749,13 @@
     const isBase = !scoped && !interactiveOnly;
     const prevSeen = state.prevSeen;
     const angularPage = !!(document.querySelector && document.querySelector('.ng-scope'));
+    // Refs that exist only because the worker's listener scan found a handler
+    // are not "new" the first time the scan contributes — the element was
+    // there all along, the outline just could not see it before the debugger
+    // attached. After that first time they are tracked like any other ref.
+    const listeners = listenerSet(options.listenerHints);
+    const hintsBefore = state.hintsApplied;
+    if (listeners.size && isBase) state.hintsApplied = true;
 
     let root = document.body || document.documentElement;
     if (options.selector) {
@@ -738,7 +817,9 @@
 
       const focusable = isFocusable(el);
       const handler = hasClickHandler(el, angularPage);
-      const interactive = (role && INTERACTIVE_ROLES.has(role)) || focusable || pointerHere || handler || isEditableHost(el);
+      const viaListener = !handler && listeners.has(el);
+      const scroll = scrollInfo(el, style, tag);
+      const interactive = (role && INTERACTIVE_ROLES.has(role)) || focusable || pointerHere || handler || viaListener || !!scroll || isEditableHost(el);
 
       // Generic containers get no line of their own unless they behave like a control.
       if (!role) {
@@ -764,13 +845,14 @@
       const effectiveRole = role || 'generic';
       stats.nodes += 1;
       const name = accessibleName(el, effectiveRole);
-      const node = { role: effectiveRole, name, el, attrs: [], children: [] };
+      const node = { role: effectiveRole, name, el, attrs: [], children: [], interactive, viaListener };
 
       if (allRefs || interactive || effectiveRole === 'iframe' || effectiveRole === 'img' || effectiveRole === 'heading' || effectiveRole === 'dialog') {
         node.ref = refFor(el, effectiveRole, name);
       }
       if (pointerHere && !(role && INTERACTIVE_ROLES.has(role))) node.attrs.push('cursor=pointer');
-      if (handler && !(role && INTERACTIVE_ROLES.has(role)) && !focusable) node.attrs.push('clickable');
+      if ((handler || viaListener) && !(role && INTERACTIVE_ROLES.has(role)) && !focusable) node.attrs.push('clickable');
+      if (scroll) node.attrs.push(scroll);
       if (unseenHere.length) node.attrs.push('unseen=' + unseenHere.join(','));
       if (el === active && el !== document.body) node.attrs.push('active');
       const checked = checkedState(el, effectiveRole);
@@ -887,24 +969,34 @@
     if (interactiveOnly) tree = pruneToInteractive(tree);
 
     // Render within the budget. `entries` carries the unmarked line (the
-    // diff/find base); `display` additionally carries the [new] markers.
+    // diff/find base); `display` additionally carries the display-only
+    // markers — [new] and [covered] — which describe this moment rather than
+    // the element, so a dialog opening does not rewrite every line beneath it
+    // in --diff.
     const entries = [];
     const display = [];
     const seenNow = new Set();
     let rendered = 0;
     let truncated = false;
     let focusedRef = null;
-    function emitLine(line, ref, markNew) {
+    function emitLine(line, ref, markers) {
       entries.push(ref ? { line, ref } : { line });
-      display.push(markNew ? line + ' [new]' : line);
+      display.push(markers ? line + markers : line);
       rendered += 1;
+    }
+    function markersFor(node) {
+      if (!node.ref) return '';
+      let markers = '';
+      if (prevSeen && !prevSeen.has(node.ref) && !(node.viaListener && !hintsBefore)) markers += ' [new]';
+      if (node.el && isCovered(node.el)) markers += ' [covered]';
+      return markers;
     }
     function render(nodes, indent) {
       for (const node of nodes) {
         if (rendered >= maxNodes) { truncated = true; return; }
         if (node.text !== undefined) {
           const facts = node.unseen && node.unseen.length ? ` [unseen=${node.unseen.join(',')}]` : '';
-          emitLine(`${indent}- text${facts}: ${cap(node.text)}`, null, false);
+          emitLine(`${indent}- text${facts}: ${cap(node.text)}`, null, '');
           continue;
         }
         let line = `${indent}- ${node.role}`;
@@ -912,7 +1004,7 @@
         if (node.ref) line += ` [ref=${node.ref}]`;
         for (const a of node.attrs) line += ` [${a}]`;
         if (node.attrs.includes('active') && node.ref) focusedRef = node.ref;
-        const markNew = !!(node.ref && prevSeen && !prevSeen.has(node.ref));
+        const markers = markersFor(node);
         if (node.ref) seenNow.add(node.ref);
         const kids = node.children;
         const single = kids.length === 1 && kids[0].text !== undefined && !node.url;
@@ -922,12 +1014,12 @@
             if (!line.includes(facts)) line += ' ' + facts;
           }
           line += ': ' + cap(kids[0].text);
-          emitLine(line, node.ref || null, markNew);
+          emitLine(line, node.ref || null, markers);
           continue;
         }
         if (kids.length || node.url) line += ':';
-        emitLine(line, node.ref || null, markNew);
-        if (node.url) emitLine(`${indent}  - /url: ${cap(node.url)}`, null, false);
+        emitLine(line, node.ref || null, markers);
+        if (node.url) emitLine(`${indent}  - /url: ${cap(node.url)}`, null, '');
         if (kids.length) render(kids, indent + '  ');
         if (truncated) return;
       }
@@ -1043,6 +1135,29 @@
     if (!name) text += ` <${tagOf(el)}${el.id ? '#' + el.id : ''}>`;
     if (ref && state.byRef.get(ref)?.el === el) text += ` [ref=${ref}]`;
     return text;
+  }
+
+  // Snapshot-time occlusion. The element's centre is hit-tested exactly the
+  // way `measure` will before a click, so [covered] predicts an
+  // element_obscured refusal: a modal, cookie banner or sticky header sits
+  // over it. Only elements inside the viewport can be tested (elementFromPoint
+  // sees nothing outside it); the rest carry no marker rather than a guess.
+  function isCovered(el) {
+    let rect;
+    try {
+      rect = bestRect(el);
+    } catch (_) {
+      return false;
+    }
+    if (!(rect.width > 0 && rect.height > 0)) return false;
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) return false;
+    try {
+      return hitTest(el, x, y).status === 'obscured';
+    } catch (_) {
+      return false;
+    }
   }
 
   function hitTest(el, x, y) {
@@ -1483,5 +1598,7 @@
     return true;
   });
 
-  globalThis.__amcu = { version: VERSION, state, snapshot };
+  // Internals exposed to the extension's own world only (nothing in the page
+  // can see this object): the e2e probes exercise the matching directly.
+  globalThis.__amcu = { version: VERSION, state, snapshot, domOrderElements, signatureOf, listenerSet };
 })();

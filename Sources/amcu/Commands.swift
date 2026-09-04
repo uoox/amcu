@@ -92,7 +92,8 @@ enum Commands {
     /// this system supports: verified window routing where SelfCheck passed,
     /// otherwise a semantic press on the element found at that point.
     /// Foreground only ever happens because `--mode foreground` asked for it.
-    /// Returns the mode label for the result line.
+    /// Returns the mode label for the result line and, when a background
+    /// click activated its target anyway, the note that says so.
     static func deliverClick(
         _ delivery: ResolvedDelivery,
         app: NSRunningApplication,
@@ -100,7 +101,7 @@ enum Commands {
         global: CGPoint,
         button: CGMouseButton,
         clickCount: Int
-    ) throws -> String {
+    ) throws -> (mode: String, note: String?) {
         guard let mode = delivery.pointerMode else {
             let check = SelfCheck.ensure()
             let action = button == .right ? "AXShowMenu" : (kAXPressAction as String)
@@ -116,8 +117,9 @@ enum Commands {
                     "Re-run with --mode foreground to accept moving the cursor and taking focus."
                 ])
             }
-            return "ax:\(pressed.action)@point"
+            return ("ax:\(pressed.action)@point", nil)
         }
+        let focus = focusGuard(app, mode: mode)
         try PointerInput.click(PointerInput.ClickRequest(
             pid: app.processIdentifier,
             windowID: windowInfo.windowID,
@@ -127,7 +129,16 @@ enum Commands {
             clickCount: clickCount,
             mode: mode
         ))
-        return mode.rawValue
+        return (mode.rawValue, focus?.note())
+    }
+
+    /// Background delivery promises not to touch the user's focus; AppKit can
+    /// break that promise by activating the target on a mouse-down or a key.
+    /// The guard records who was frontmost before the event and, afterwards,
+    /// produces the note for the result when the target took over. Foreground
+    /// delivery takes focus by definition and needs no guard.
+    static func focusGuard(_ app: NSRunningApplication, mode: DeliveryMode) -> FocusGuard? {
+        mode == .background ? FocusGuard(targetPID: app.processIdentifier) : nil
     }
 
     /// Applications known to discard synthesized input wholesale — clicks,
@@ -321,9 +332,9 @@ enum Commands {
                 let mode = try deliveryMode(flags, requiresRouting: true)
                 try assertForegroundIsSafe(mode, app: app)
                 let center = globalPoint(CGPoint(x: frame.midX, y: frame.midY), window: window.info, isScreenSpace: false)
-                let modeLabel = try deliverClick(mode, app: app, windowInfo: window.info, global: center, button: button, clickCount: clickCount)
+                let delivered = try deliverClick(mode, app: app, windowInfo: window.info, global: center, button: button, clickCount: clickCount)
                 let immunityNote = mode == .foreground ? nil : syntheticInputImmunityNote(app)
-                let result = ActionResult(action: "click", mode: modeLabel, target: "text \(elementIndex)", detail: combinedDetail(node.label.map { "\"\($0)\"" }, immunityNote))
+                let result = ActionResult(action: "click", mode: delivered.mode, target: "text \(elementIndex)", detail: combinedDetail(node.label.map { "\"\($0)\"" }, immunityNote, delivered.note))
                 Output.emit(result) { result.text }
                 return
             }
@@ -357,15 +368,16 @@ enum Commands {
             let mode = try deliveryMode(flags, requiresRouting: true)
             try assertForegroundIsSafe(mode, app: app)
             let global = CGPoint(x: target.midX, y: target.midY)
-            let modeLabel = try deliverClick(mode, app: app, windowInfo: window.info, global: global, button: button, clickCount: clickCount)
+            let delivered = try deliverClick(mode, app: app, windowInfo: window.info, global: global, button: button, clickCount: clickCount)
             let result = ActionResult(
                 action: "click",
-                mode: modeLabel,
+                mode: delivered.mode,
                 target: "element \(elementIndex)",
                 detail: combinedDetail(
                     liveFrame == nil ? "coordinate fallback (recorded frame)" : "coordinate fallback (live frame)",
                     forcedNote,
-                    mode == .foreground ? nil : syntheticInputImmunityNote(app)
+                    mode == .foreground ? nil : syntheticInputImmunityNote(app),
+                    delivered.note
                 )
             )
             Output.emit(result) { result.text }
@@ -383,8 +395,8 @@ enum Commands {
         let mode = try deliveryMode(flags, requiresRouting: true)
         try assertForegroundIsSafe(mode, app: target.app)
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
-        let modeLabel = try deliverClick(mode, app: target.app, windowInfo: target.windowInfo, global: global, button: button, clickCount: clickCount)
-        let result = ActionResult(action: "click", mode: modeLabel, target: "\(Int(global.x)),\(Int(global.y))", detail: mode == .foreground ? nil : syntheticInputImmunityNote(target.app))
+        let delivered = try deliverClick(mode, app: target.app, windowInfo: target.windowInfo, global: global, button: button, clickCount: clickCount)
+        let result = ActionResult(action: "click", mode: delivered.mode, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail(mode == .foreground ? nil : syntheticInputImmunityNote(target.app), delivered.note))
         Output.emit(result) { result.text }
     }
 
@@ -504,8 +516,9 @@ enum Commands {
         try assertForegroundIsSafe(delivery, app: app)
         let mode = delivery.pointerMode ?? .background
         let focus = try focusForTyping(flags, app: app)
+        let guarded = focusGuard(app, mode: mode)
         try KeyboardInput.type(text: text, pid: app.processIdentifier, mode: mode)
-        let result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters into \(focus.summary)")
+        let result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combinedDetail("\(text.count) characters into \(focus.summary)", guarded?.note()))
         Output.emit(result) { result.text }
     }
 
@@ -659,9 +672,10 @@ enum Commands {
         try assertForegroundIsSafe(delivery, app: app)
         let mode = delivery.pointerMode ?? .background
         let focus = try focusForTyping(flags, app: app)
+        let guarded = focusGuard(app, mode: mode)
         try KeyboardInput.press(key: key, modifiers: modifiers, pid: app.processIdentifier, mode: mode)
         let combination = (modifiers + [key]).joined(separator: "+")
-        let result = ActionResult(action: "key", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(combination) to \(focus.summary)")
+        let result = ActionResult(action: "key", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combinedDetail("\(combination) to \(focus.summary)", guarded?.note()))
         Output.emit(result) { result.text }
     }
 
@@ -685,10 +699,11 @@ enum Commands {
             pasteboard.clearContents()
             if let previous { pasteboard.setString(previous, forType: .string) }
         }
+        let guarded = focusGuard(app, mode: mode)
         try KeyboardInput.press(key: "v", modifiers: ["cmd"], pid: app.processIdentifier, mode: mode)
         // Give the target a moment to read the pasteboard before it is restored.
         usleep(120_000)
-        let result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters via pasteboard into \(focus.summary)")
+        let result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combinedDetail("\(text.count) characters via pasteboard into \(focus.summary)", guarded?.note()))
         Output.emit(result) { result.text }
     }
 
@@ -711,6 +726,7 @@ enum Commands {
             ])
         }
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
+        let guarded = focusGuard(target.app, mode: mode)
         try PointerInput.scroll(
             pid: target.app.processIdentifier,
             windowID: target.windowInfo.windowID,
@@ -720,7 +736,7 @@ enum Commands {
             deltaY: deltaY,
             mode: mode
         )
-        let result = ActionResult(action: "scroll", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail("dx=\(deltaX) dy=\(deltaY)", mode == .foreground ? nil : syntheticInputImmunityNote(target.app)))
+        let result = ActionResult(action: "scroll", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail("dx=\(deltaX) dy=\(deltaY)", mode == .foreground ? nil : syntheticInputImmunityNote(target.app), guarded?.note()))
         Output.emit(result) { result.text }
     }
 
@@ -738,6 +754,7 @@ enum Commands {
             ])
         }
         let isScreenSpace = flags.has("screen")
+        let guarded = focusGuard(target.app, mode: mode)
         try PointerInput.drag(
             pid: target.app.processIdentifier,
             windowID: target.windowInfo.windowID,
@@ -747,7 +764,7 @@ enum Commands {
             steps: try flags.boundedInt("steps", min: 1, max: 500) ?? 12,
             mode: mode
         )
-        let result = ActionResult(action: "drag", mode: mode.rawValue, target: target.appInfo.name, detail: nil)
+        let result = ActionResult(action: "drag", mode: mode.rawValue, target: target.appInfo.name, detail: guarded?.note())
         Output.emit(result) { result.text }
     }
 

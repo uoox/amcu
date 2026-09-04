@@ -147,7 +147,10 @@ public enum Target {
         // activation is idempotent and whitelisted, so doing it on every
         // resolution is the cheapest way to guarantee it happened before any
         // read. Native apps are never touched — the flag degrades their trees.
-        if ChromiumAccessibility.requiresActivation(bundleID: app.bundleIdentifier) {
+        // The whitelist is backed by a look at the bundle itself, so an
+        // Electron app nobody listed still gets its tree.
+        if ChromiumAccessibility.requiresActivation(bundleID: app.bundleIdentifier)
+            || ChromiumAccessibility.looksLikeChromiumHost(bundleURL: app.bundleURL) {
             ChromiumAccessibility.activate(pid: app.processIdentifier)
         }
         return element

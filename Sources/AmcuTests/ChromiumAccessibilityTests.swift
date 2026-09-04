@@ -33,4 +33,25 @@ func runChromiumAccessibilityTests(_ t: Harness) {
     // Substrings of whitelisted ids must not match — only exact ids do.
     t.expect(!ChromiumAccessibility.requiresActivation(bundleID: "com.google"), "a prefix of a whitelisted id does not match")
     t.expect(!ChromiumAccessibility.requiresActivation(bundleID: "com.google.Chrome.helper"), "an extension of a whitelisted id does not match")
+
+    t.suite("chromium accessibility: bundle detection")
+    // The list can never be complete; the bundle on disk says what engine it
+    // ships. Fake bundles stand in for real ones so the check needs no apps.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("amcu-bundle-tests-\(ProcessInfo.processInfo.processIdentifier)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    func fakeBundle(_ name: String, frameworks: [String]) -> URL {
+        let bundle = root.appendingPathComponent(name, isDirectory: true)
+        let dir = bundle.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for framework in frameworks {
+            try? FileManager.default.createDirectory(at: dir.appendingPathComponent(framework, isDirectory: true), withIntermediateDirectories: true)
+        }
+        return bundle
+    }
+    t.expect(ChromiumAccessibility.looksLikeChromiumHost(bundleURL: fakeBundle("Unknown Electron.app", frameworks: ["Electron Framework.framework", "Squirrel.framework"])), "an Electron app nobody listed is recognised from its bundle")
+    t.expect(ChromiumAccessibility.looksLikeChromiumHost(bundleURL: fakeBundle("CEF Host.app", frameworks: ["Chromium Embedded Framework.framework"])), "a CEF host is recognised from its bundle")
+    t.expect(!ChromiumAccessibility.looksLikeChromiumHost(bundleURL: fakeBundle("Native.app", frameworks: ["Sparkle.framework"])), "a native app with other frameworks is not touched")
+    t.expect(!ChromiumAccessibility.looksLikeChromiumHost(bundleURL: fakeBundle("Bare.app", frameworks: [])), "an app without frameworks is not touched")
+    t.expect(!ChromiumAccessibility.looksLikeChromiumHost(bundleURL: root.appendingPathComponent("Missing.app")), "a bundle that does not exist is not touched")
+    t.expect(!ChromiumAccessibility.looksLikeChromiumHost(bundleURL: nil), "no bundle url, no activation")
 }

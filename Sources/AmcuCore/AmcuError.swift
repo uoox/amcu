@@ -24,6 +24,9 @@ public struct AmcuError: Error, CustomStringConvertible {
         case dialogOpen = "dialog_open"
         case elementObscured = "element_obscured"
         case valueMismatch = "value_mismatch"
+        /// A `--secret KEY` restricted by `KEY__DOMAINS` was aimed at a tab or
+        /// frame whose host is not on the list.
+        case secretScope = "secret_scope"
     }
 
     public let code: Code

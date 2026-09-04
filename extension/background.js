@@ -339,6 +339,179 @@ async function listFrames(tabId) {
   return frames.filter(f => f.frameId >= 0 && !f.errorOccurred);
 }
 
+// ---------------------------------------------------------------------------
+// Script-bound click handlers. The DOM shows inline handlers and framework
+// attributes; a listener added with addEventListener is invisible to it. The
+// debugger protocol can list them (`DOMDebugger.getEventListeners` over the
+// document subtree — one call, milliseconds), so while a tab is attached
+// anyway — after its first action — the snapshot asks for them. This never
+// attaches on its own: a read must not raise the infobar.
+//
+// The protocol names elements by backendNodeId, which a content script cannot
+// resolve, so `DOM.getDocument` supplies the tree and the same pre-order walk
+// the content script performs (`domOrderElements`: open shadow roots first,
+// then light children, elements only) turns each id into a DOM-order position
+// plus a tag|id|class signature. The content script re-derives the position
+// and checks the signature; a mismatch (the page mutated in between) is
+// dropped rather than guessed at. Delegated handlers (React attaches at the
+// root) are not on the element and are not found; direct ones (vanilla,
+// jQuery, Vue, Angular, Svelte) are.
+//
+// (The command-line API `getEventListeners` would be simpler, but a
+// chrome.debugger session receives an empty answer from it where a raw CDP
+// session on the same tab lists everything — measured, not assumed.)
+
+const LISTENER_TYPES = new Set(['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend']);
+const LISTENER_NODE_LIMIT = 12000;
+const LISTENER_HINT_LIMIT = 1500;
+
+async function listenerHints(tabId, frameId) {
+  if (!attached.has(tabId)) return null;
+  try {
+    const evalParams = { expression: 'document' };
+    if (frameId !== 0) evalParams.contextId = await executionContextFor(tabId, frameId);
+    const doc = await cdp(tabId, 'Runtime.evaluate', evalParams, 3000);
+    if (!doc.result || !doc.result.objectId) return null;
+    const found = await cdp(tabId, 'DOMDebugger.getEventListeners', { objectId: doc.result.objectId, depth: -1, pierce: true }, 5000);
+    const wanted = new Set();
+    for (const listener of found.listeners || []) {
+      if (LISTENER_TYPES.has(listener.type) && listener.backendNodeId) wanted.add(listener.backendNodeId);
+    }
+    if (!wanted.size) return [];
+
+    const tree = await cdp(tabId, 'DOM.getDocument', { depth: -1, pierce: true }, 10000);
+    let documentNode = tree.root;
+    if (frameId !== 0) {
+      const cdpFrameId = (await matchFrames(tabId)).get(frameId);
+      documentNode = cdpFrameId ? findFrameDocument(tree.root, cdpFrameId) : null;
+      if (!documentNode) return null;
+    }
+    const html = (documentNode.children || []).find(n => n.nodeType === 1);
+    if (!html) return null;
+
+    // Pre-order, open shadow roots before light children, elements only —
+    // the content script's domOrderElements, expressed over protocol nodes.
+    const hints = [];
+    const stack = [html];
+    let index = -1;
+    while (stack.length && hints.length < LISTENER_HINT_LIMIT) {
+      const node = stack.pop();
+      index += 1;
+      if (index > LISTENER_NODE_LIMIT) break;
+      if (wanted.has(node.backendNodeId) && node.nodeName !== 'HTML' && node.nodeName !== 'BODY') {
+        hints.push([index, signatureOfNode(node)]);
+      }
+      const kids = [];
+      for (const root of node.shadowRoots || []) {
+        if (root.shadowRootType !== 'open') continue;
+        for (const c of root.children || []) if (c.nodeType === 1) kids.push(c);
+      }
+      for (const c of node.children || []) if (c.nodeType === 1) kids.push(c);
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    return hints;
+  } catch (error) {
+    noteError('listenerHints', error);
+    return null; // a frame without a reachable context, or a page mid-navigation: the outline stands on its own
+  }
+}
+
+function signatureOfNode(node) {
+  const attrs = node.attributes || [];
+  let id = '';
+  let cls = '';
+  for (let i = 0; i + 1 < attrs.length; i += 2) {
+    if (attrs[i] === 'id') id = attrs[i + 1];
+    else if (attrs[i] === 'class') cls = attrs[i + 1];
+  }
+  return node.nodeName + '|' + id + '|' + cls.slice(0, 40);
+}
+
+function findFrameDocument(node, cdpFrameId) {
+  if (node.frameId === cdpFrameId && node.contentDocument) return node.contentDocument;
+  for (const child of node.children || []) {
+    const hit = findFrameDocument(child, cdpFrameId);
+    if (hit) return hit;
+  }
+  for (const root of node.shadowRoots || []) {
+    const hit = findFrameDocument(root, cdpFrameId);
+    if (hit) return hit;
+  }
+  if (node.contentDocument) return findFrameDocument(node.contentDocument, cdpFrameId);
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tabs an action opened. A target=_blank link or window.open() looks like a
+// no-op from the acting tab — nothing navigated, little changed — while the
+// interesting page is somewhere else. Tab creation is recorded as it happens
+// and matched back to the acting tab by opener; when the acting tab was the
+// session's current tab, the new one takes its place, and the result says so.
+
+const createdTabs = [];
+
+chrome.tabs.onCreated.addListener(tab => {
+  createdTabs.push({ id: tab.id, openerTabId: tab.openerTabId, at: Date.now() });
+  while (createdTabs.length > 50) createdTabs.shift();
+});
+
+async function openedTabSince(openerId, since, params) {
+  const hits = createdTabs.filter(t => t.at >= since && t.openerTabId === openerId);
+  if (!hits.length) return null;
+  const tab = await getTab(hits[hits.length - 1].id);
+  if (!tab) return null;
+  let nowCurrent = false;
+  // Only a session tab is followed; an explicit --tab stays where it pointed.
+  if (params.tab === undefined || params.tab === null) {
+    const session = params.session || 'default';
+    if ((await currentTabId(session)) === openerId) {
+      await setCurrentTab(session, tab.id);
+      nowCurrent = true;
+    }
+  }
+  return tabSummary(tab, { nowCurrent, opened: hits.length });
+}
+
+// ---------------------------------------------------------------------------
+// Secrets scoped to hosts. A key the secrets file restricts (KEY__DOMAINS=…)
+// is typed only into a tab — and, for a frame-targeted field, a frame — whose
+// host matches. The value has crossed the local pipe by now, but it never
+// enters a page that is not the one it was meant for.
+
+function hostMatches(host, pattern) {
+  pattern = String(pattern || '').trim().toLowerCase();
+  if (!pattern || !host) return false;
+  if (pattern.startsWith('*.')) {
+    const base = pattern.slice(2);
+    return host === base || host.endsWith('.' + base);
+  }
+  return host === pattern;
+}
+
+async function requireSecretScope(tab, params, frameId) {
+  const domains = params.secretDomains;
+  if (!Array.isArray(domains) || !domains.length) return;
+  const hostOf = url => {
+    try { return new URL(url).hostname.toLowerCase(); } catch (_) { return ''; }
+  };
+  const places = [{ what: 'this tab', host: hostOf(tab.url || '') }];
+  if (frameId && frameId !== 0) {
+    let host = '';
+    try {
+      const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId });
+      host = frame ? hostOf(frame.url || '') : '';
+    } catch (_) { /* fails closed below */ }
+    places.push({ what: `frame ${frameId}`, host });
+  }
+  for (const place of places) {
+    if (domains.some(pattern => hostMatches(place.host, pattern))) continue;
+    throw new BridgeError('secret_scope', `secret ${params.secretKey || ''} is restricted to ${domains.join(', ')}; ${place.what} is at ${place.host || '(unknown host)'}`, [
+      'The secrets file limits where this key may be typed (KEY__DOMAINS=host,*.example.com). Check that the page is the one you meant — a look-alike host is exactly what this guard is for.',
+      'If the restriction itself is wrong, widen KEY__DOMAINS in the secrets file.'
+    ]);
+  }
+}
+
 // A ref is `e12` for the main frame or `f<frameId>e12` for a child frame.
 function parseRef(ref) {
   const match = /^(?:f(\d+))?e(\d+)$/.exec(String(ref || '').trim());
@@ -1096,6 +1269,8 @@ const handlers = {
       const frameOptions = Object.assign({}, options, { maxNodes: budget });
       if (!isMain && params.selector) frameOptions.selector = undefined;
       if (within && frame.frameId === within.frameId) frameOptions.within = within.local;
+      const hints = await listenerHints(tab.id, frame.frameId);
+      if (hints) frameOptions.listenerHints = hints;
       let result;
       try {
         result = await callFrame(tab.id, frame.frameId, 'snapshot', frameOptions, 15000);
@@ -1126,6 +1301,8 @@ const handlers = {
         iframes: localIframes,
         gen: result.gen,
         scroll: result.scroll || null,
+        listenersScanned: !!hints,
+        listenersFound: hints ? hints.length : 0,
         diff: result.diff === true,
         added: result.added,
         removed: result.removed,
@@ -1192,6 +1369,7 @@ const handlers = {
     let mode = 'cdp';
     let dialog = null;
     const armed = await armObserver(tab.id, target.frameId);
+    const startedAt = Date.now();
     if (params.force && target.hit !== 'ok' && target.hit !== 'ancestor') {
       await callFrame(tab.id, target.frameId, 'js-click', { ref: target.local });
       mode = 'js:click';
@@ -1202,6 +1380,8 @@ const handlers = {
     const after = await settle(tab.id, before, 5000, dialog);
     const effect = await reportObserver(tab.id, armed, after);
     if (effect) after.effect = effect;
+    const opened = await openedTabSince(tab.id, startedAt, params);
+    if (opened) after.openedTab = opened;
     return {
       tab: tabSummary(tab),
       ref: params.ref,
@@ -1248,8 +1428,10 @@ const handlers = {
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
+    await requireSecretScope(tab, params, frameId);
     const focus = await callFrame(tab.id, frameId, 'focus-for-input', { ref: local, mode: params.replace ? 'replace' : 'append' });
     const armed = await armObserver(tab.id, frameId);
+    const startedAt = Date.now();
     const text = String(params.text === undefined ? '' : params.text);
     let dialog = null;
     if (params.slowly) dialog = (await typeSlowly(tab.id, text)).dialog;
@@ -1263,6 +1445,10 @@ const handlers = {
     const after = params.submit || dialog ? await settle(tab.id, before, 5000, dialog) : { navigated: false, url: tab.url };
     const effect = await reportObserver(tab.id, armed, after);
     if (effect) after.effect = effect;
+    if (params.submit) {
+      const opened = await openedTabSince(tab.id, startedAt, params);
+      if (opened) after.openedTab = opened;
+    }
     let value = null;
     try {
       value = (await callFrame(tab.id, frameId, 'value', { ref: local }, 3000)).value;
@@ -1284,6 +1470,7 @@ const handlers = {
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const { frameId, local } = parseRef(params.ref);
+    await requireSecretScope(tab, params, frameId);
     const value = String(params.value === undefined ? '' : params.value);
     const focus = await callFrame(tab.id, frameId, 'focus-for-input', { ref: local, mode: 'replace' });
     let mode = 'cdp:insertText';
@@ -1347,6 +1534,7 @@ const handlers = {
     const before = { url: tab.url };
     const count = Math.max(1, params.count || 1);
     const armed = await armObserver(tab.id, params.ref ? parseRef(params.ref).frameId : 0);
+    const startedAt = Date.now();
     let pressed;
     for (let i = 0; i < count; i++) {
       pressed = await pressKey(tab.id, params.key, params.modifiers || []);
@@ -1355,6 +1543,8 @@ const handlers = {
     const after = await settle(tab.id, before, 3000, pressed.dialog);
     const effect = await reportObserver(tab.id, armed, after);
     if (effect) after.effect = effect;
+    const opened = await openedTabSince(tab.id, startedAt, params);
+    if (opened) after.openedTab = opened;
     return { tab: tabSummary(tab), key: pressed.key, modifiers: params.modifiers || [], count, after };
   },
 

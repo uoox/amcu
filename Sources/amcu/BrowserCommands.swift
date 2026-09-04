@@ -67,15 +67,21 @@ enum BrowserCommands {
       --timeout S       per-command limit in seconds (default 30; navigation and wait honour it)
       --secrets FILE    dotenv KEY=VALUE file (or $AMCU_SECRETS): enables --secret KEY and masks
                         the values in all output (snapshots/echoes reliably; network/console
-                        best-effort — re-encoded copies are not caught)
+                        best-effort — re-encoded copies are not caught); a KEY__DOMAINS=a.com,*.b.org
+                        line restricts where KEY may be typed (refused elsewhere: secret_scope)
       --json            machine-readable output
 
     Refs look like e12 (main frame) or f42e12 (frame 42). They are re-verified
     against the element's role and name before use; a changed page yields a
     stale_snapshot error, not a click on whatever moved there.
     After click/type/key the result reports what the action visibly did:
-    navigation, a dialog, N DOM changes, what appeared, where focus went —
-    or "no DOM change observed" when nothing did.
+    navigation, a dialog, N DOM changes, what appeared, where focus went, a
+    tab the action opened — or "no DOM change observed" when nothing did.
+    Snapshot markers: [new] (ref not in the previous snapshot), [covered]
+    (another element sits over its centre; a click would be refused),
+    [clickable] (only a script/framework handler makes it interactive),
+    [scrollable: …] (a container with its own scrollbar; scroll --ref it),
+    [unseen=…] (text a human cannot see).
     """
 
     static func run(_ flags: Flags) throws {
@@ -172,6 +178,36 @@ enum BrowserCommands {
             return "→ navigated to \(after["url"].string ?? "?")\(loading)"
         }
         return effectLine(after["effect"])
+    }
+
+    /// A tab the action opened (target=_blank, window.open). When the acting
+    /// tab was the session's current tab, the new one has taken its place —
+    /// the next command lands there — and the line says so; with an explicit
+    /// --tab nothing moves and the line says how to get there.
+    static func openedTabLine(_ after: JSONValue) -> String? {
+        let opened = after["openedTab"]
+        guard !opened.isNull, let id = opened["id"].int else { return nil }
+        var line = "→ opened \(tabLine(opened))"
+        if let count = opened["opened"].int, count > 1 { line += " (and \(count - 1) more)" }
+        line += opened["nowCurrent"].bool == true
+            ? " — now current for this session"
+            : " — not current; use --tab \(id) or `amcu browser tab --select \(id)`"
+        return line
+    }
+
+    /// Everything an acting command appends under its own line.
+    static func afterLines(_ after: JSONValue) -> [String] {
+        [afterLine(after), openedTabLine(after)].compactMap { $0 }
+    }
+
+    /// `--secret KEY` resolves the value and carries the key's host scope, if
+    /// the secrets file gave it one, so the extension can refuse a wrong host.
+    static func applySecret(_ key: String, into params: inout [String: Any], as field: String) throws {
+        params[field] = try SecretStore.value(forKey: key)
+        params["secretKey"] = key
+        if let domains = SecretStore.domains(forKey: key), !domains.isEmpty {
+            params["secretDomains"] = domains
+        }
     }
 
     /// What the action visibly did, from the change observer: DOM mutation
@@ -739,9 +775,7 @@ enum BrowserCommands {
             if let note = result["obscuredNote"].string { line += " (\(note))" }
             if result["unstable"].bool == true { line += " (target was still moving when clicked)" }
             if result["fromEarlierSnapshot"].bool == true { line += " (ref from an earlier snapshot)" }
-            var lines = [line]
-            if let after = afterLine(result["after"]) { lines.append(after) }
-            return lines.joined(separator: "\n")
+            return ([line] + afterLines(result["after"])).joined(separator: "\n")
         }
     }
 
@@ -759,7 +793,7 @@ enum BrowserCommands {
         var params = try baseParams(flags)
         params["ref"] = try requiredRef(flags)
         if let key = flags.string("secret") {
-            params["text"] = try SecretStore.value(forKey: key)
+            try applySecret(key, into: &params, as: "text")
         } else {
             params["text"] = try flags.required("text", hint: "Pass --text T, or --secret KEY with --secrets FILE to type from a dotenv file.")
         }
@@ -772,9 +806,7 @@ enum BrowserCommands {
             var line = "type ok on \(result["ref"].string ?? "") (\(result["description"].string ?? "")): \(result["typed"].int ?? 0) characters"
             if result["submitted"].bool == true { line += ", then Enter" }
             if let value = result["value"].string { line += " — value now \"\(value.count > 120 ? String(value.prefix(120)) + "…" : value)\"" }
-            var lines = [line]
-            if let after = afterLine(result["after"]) { lines.append(after) }
-            return lines.joined(separator: "\n")
+            return ([line] + afterLines(result["after"])).joined(separator: "\n")
         }
     }
 
@@ -782,7 +814,7 @@ enum BrowserCommands {
         var params = try baseParams(flags)
         params["ref"] = try requiredRef(flags)
         if let key = flags.string("secret") {
-            params["value"] = try SecretStore.value(forKey: key)
+            try applySecret(key, into: &params, as: "value")
         } else {
             params["value"] = try flags.required("value", hint: "Pass --value V, or --secret KEY with --secrets FILE to fill from a dotenv file.")
         }
@@ -828,9 +860,8 @@ enum BrowserCommands {
         let result = try client.request("key", params: params, timeout: try timeout(flags))
         emit(client, action: "key", result: result) {
             let combination = (modifiers + [result["key"].string ?? ""]).joined(separator: "+")
-            var lines = ["key ok: \(combination)\((result["count"].int ?? 1) > 1 ? " ×\(result["count"].int ?? 1)" : "") to \(tabLine(result["tab"]))"]
-            if let after = afterLine(result["after"]) { lines.append(after) }
-            return lines.joined(separator: "\n")
+            let line = "key ok: \(combination)\((result["count"].int ?? 1) > 1 ? " ×\(result["count"].int ?? 1)" : "") to \(tabLine(result["tab"]))"
+            return ([line] + afterLines(result["after"])).joined(separator: "\n")
         }
     }
 

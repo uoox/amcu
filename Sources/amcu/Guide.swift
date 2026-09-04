@@ -79,6 +79,22 @@ DELIVERY MODES
   reach for it just because a background click seemed to do nothing — check
   the result and the interface state first.
 
+HOW EACH KIND OF INPUT ACTUALLY REACHES THE APPLICATION
+  `click --element N` presses through the accessibility API: no event, no
+  coordinates, cannot activate the application. Coordinate clicks, scroll and
+  drag in the background are real mouse events posted to the target process
+  and routed to its window (`doctor` verifies they land where aimed). `type`,
+  `key` and `paste` are keyboard events posted to the process; they land on
+  that application's own focused element, wherever it is. Chromium/Electron
+  windows accept all of these; a few applications (WeChat) discard every
+  synthesized event, and the result says so.
+  Background delivery does not move the cursor or take focus — but AppKit
+  may activate an application when a mouse-down reaches a window that is not
+  active, exactly as a real click would. When that happens the result carries
+  "warning: the target became the frontmost application". Nothing is
+  undone: putting focus back would be a second disturbance. Tell the user,
+  and prefer `click --element N` for that control next time.
+
 MENUS
   `amcu menu --app <selector>` reads the whole menu bar without opening
   anything, including each item's keyboard shortcut.

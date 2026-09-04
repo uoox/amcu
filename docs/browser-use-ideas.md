@@ -240,3 +240,66 @@ download awareness (session-scoped), element role+name waits, sensitive-target s
 
 **Format discipline:** every snapshot text change (markers, attrs, flags, scroll header) lands as
 one documented format revision, not dribbled across releases — LLM callers parse this text.
+
+---
+
+## Second batch (2026-09-03): browser-use org re-survey, desktop harnesses included
+
+*Sources: browser-use `main` (Python agent + browser-harness pivot), macOS-use, macos-harness,
+windows-harness, workflow-use, desktop, profile-use. Filter unchanged: does it make the mechanism
+better without adding a concept? amcu's concept count stays at five — snapshot, ref, act, verify,
+report — so everything below lands inside existing verbs.*
+
+**Shipped in 0.8.0:**
+
+- **`addEventListener` click handlers → `[clickable]`** (browser-use `has_js_click_listener`). Done
+  through `DOMDebugger.getEventListeners` over the document subtree (one protocol call, ~1 ms) plus
+  a `DOM.getDocument` walk to turn backendNodeIds into DOM-order positions, only while the tab is
+  already attached — a snapshot never attaches on its own, so reading stays infobar-free. Positions
+  travel with a tag|id|class signature and are re-matched in the content script; a mismatch is
+  dropped. Measured on the way: browser-use's route (the command-line API `getEventListeners` via
+  `Runtime.evaluate includeCommandLineAPI`) returns *nothing* inside a chrome.debugger session while
+  a raw CDP session on the same tab lists everything — so the protocol method is not a preference,
+  it is the only one that works from an extension. Delegated handlers (React at the root) are not
+  on the element and are not found — stated, not hidden. Refs that exist only because of the first
+  scan are not marked `[new]`. This supersedes the "main-world addEventListener wrapping" maybe above.
+- **`[covered]`** (browser-use `PaintOrderRemover`, but flag-not-delete as decided above, and via the
+  same `elementFromPoint` hit test the click uses rather than CDP paint order — no debugger needed).
+  Display-only marker like `[new]`: `find`/`--diff` ignore it.
+- **`[scrollable: N px above, M px below]`** on independently scrollable containers, which get a ref
+  so `scroll --ref` works (the "nested-scroller geometry" deferred in batch one).
+- **Opened-tab report + follow** (browser-use `_detect_new_tab_opened`). `click`/`key`/`type --submit`
+  report a tab the action opened; when acting on the session's current tab, the new tab becomes
+  current. Matched by `openerTabId`, never by timing alone.
+- **`KEY__DOMAINS` secret scope** (browser-use domain-scoped `sensitive_data`). Enforced in the
+  extension against the tab host *and* the target frame's host; refusal code `secret_scope`.
+- **Desktop focus guard** (macos-harness `_guard_focus`). Frontmost app read via the system-wide AX
+  element before/after every background pointer/keyboard delivery; a background target that became
+  frontmost is reported as a warning. Nothing is restored — that would be a second disturbance.
+- **Chromium host detection from the bundle** (`Contents/Frameworks` contains Electron/CEF/browser
+  frameworks) alongside the bundle-id whitelist. macos-harness's alternative — set
+  `AXEnhancedUserInterface` on every app — is rejected for the `AXPosition` breakage documented in
+  `ChromiumAccessibility.swift`.
+- **Guide: how each input kind actually reaches the app** (macos-harness issue #6/#7 truth table:
+  PID-posted mouse events are dropped by AppKit unless window-routed; keyboard always lands; AXPress
+  cannot activate). amcu's window-routed path already covers the mouse case; the guide now says so
+  and names the activation side effect.
+
+**Looked at, not adopted (and why):**
+
+- `AXUIElementsForSearchPredicate` for a desktop `find` — real value for Electron/virtualised
+  trees, but a new verb; deferred until a desktop `find` exists for other reasons.
+- Text-input "ladder" with automatic fallback (windows-harness). Would make `set-value` do three
+  things; amcu keeps `set-value`/`replace`/`type` as separate verbs and instead lets the error
+  message name the next verb.
+- Action-proof screenshots and normalised 0..1000 coordinates (windows-harness). Both equip the
+  coordinate path; amcu's centre of gravity is refs.
+- `allowed_domains` navigation policy, agent loop, planner, judge, `--profile` copying, heredoc
+  "agent writes Python" execution model, CDP-port launch mode. Wrong layer or contrary to "the
+  user's own browser".
+- browser-use's `backendNodeId` indices. Large, reload-unstable; amcu's `e12` + role/name
+  re-verification already prevents the Save-vs-Quit class of handle aliasing that macos-harness
+  #11 reports.
+- React controlled-input clearing: already covered — `fill` types through trusted `insertText`
+  over a selected value, and `set-value` uses the native setter + input/change events.
+- `<select>` options inline: already in the snapshot.

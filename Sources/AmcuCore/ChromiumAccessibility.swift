@@ -19,8 +19,32 @@ import Foundation
 ///
 /// This is a whitelist on purpose: `AXManualAccessibility` is a Chromium-ism,
 /// meaningless to native applications, so only bundle ids known to be
-/// Chromium/Electron hosts are touched.
+/// Chromium/Electron hosts are touched — plus any application whose bundle
+/// visibly ships a Chromium engine (`Electron Framework.framework`, CEF), which
+/// is the same fact read from disk instead of from a list that can never be
+/// complete. (macos-harness sets `AXEnhancedUserInterface` on *every* app to
+/// get the same effect; that trades the window-move breakage above for not
+/// having to know which apps are Chromium. Reading the bundle avoids both.)
 public enum ChromiumAccessibility {
+    /// Framework bundles that only a Chromium-engined application carries.
+    public static let chromiumFrameworks: Set<String> = [
+        "Electron Framework.framework",
+        "Chromium Embedded Framework.framework",
+        "Google Chrome Framework.framework",
+        "Microsoft Edge Framework.framework",
+        "Brave Browser Framework.framework",
+        "Chromium Framework.framework"
+    ]
+
+    /// Whether the application bundle at `bundleURL` ships a Chromium engine.
+    /// One directory listing of `Contents/Frameworks`; an unreadable or
+    /// missing directory (a bare executable, a sandboxed path) is a no.
+    public static func looksLikeChromiumHost(bundleURL: URL?) -> Bool {
+        guard let bundleURL else { return false }
+        let frameworks = bundleURL.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: frameworks.path) else { return false }
+        return names.contains { chromiumFrameworks.contains($0) }
+    }
     /// Known Chromium/Electron hosts that need the explicit opt-in.
     public static let bundleIDs: Set<String> = [
         "com.google.Chrome",

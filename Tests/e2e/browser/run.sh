@@ -182,6 +182,27 @@ check "near-zero fonts are flagged" "$(echo "$SNAP2" | grep 'tiny font text')" '
 check "colour-on-colour text is flagged" "$(echo "$SNAP2" | grep 'camouflage text')" '[unseen=contrast]'
 check "the footer names the snapshot number" "$SNAP2" '(snapshot #'
 check "the footer reports scroll context" "$SNAP2" 'the viewport'
+# The debugger is attached by now (clicks above), so the listener scan runs.
+check "an addEventListener-only div gets a ref and [clickable]" "$(echo "$SNAP2" | grep 'Listener-only target')" '[clickable]'
+LSN=$(ref_of "$SNAP2" 'Listener-only target')
+"$AMCU" browser click --ref "$LSN" >/dev/null
+check "the listener-only div's handler fired" "$("$AMCU" browser snapshot --selector '#log')" 'listener-only clicked'
+check "a scroll container is marked with its hidden extent" "$(echo "$SNAP2" | grep -m1 'scrollable:')" 'px below'
+SCR=$(echo "$SNAP2" | grep -m1 'scrollable:' | sed -n 's/.*\[ref=\([fe0-9]*\)\].*/\1/p')
+"$AMCU" browser scroll --ref "$SCR" --dy -40 >/dev/null
+check "scrolling the container moves its extent" "$("$AMCU" browser snapshot | grep -m1 'scrollable:')" 'px above'
+# The overlay from the "obscured" section still covers the top of the page.
+check "an element under the overlay is marked [covered]" "$(echo "$SNAP2" | grep 'heading "amcu test page"')" '[covered]'
+check "find ignores the display-only [covered] marker" "$("$AMCU" browser find --text 'amcu test page' --role heading | grep -c covered)" "0"
+
+echo "new tabs"
+NEWTAB=$(ref_of "$SNAP2" 'button "Open new tab"')
+OUT="$("$AMCU" browser click --ref "$NEWTAB")"
+check "a click that opened a tab reports it" "$OUT" '→ opened tab'
+check "the new tab became current for the session" "$OUT" 'now current for this session'
+check "the session now reads the new tab" "$("$AMCU" browser tabs | grep current)" 'second.html'
+"$AMCU" browser tab --close >/dev/null
+"$AMCU" browser tab --select "$TAB" >/dev/null
 
 echo "action effects and diff"
 APPEAR=$(ref_of "$SNAP2" 'button "Appear"')
@@ -211,6 +232,12 @@ printf 'TESTKEY=supersecretvalue99\n' > "$SEC"
 check "fill --secret fills from the file" "$("$AMCU" browser fill --ref "$NAME" --secrets "$SEC" --secret TESTKEY)" '(verified)'
 check "the page really holds the secret" "$("$AMCU" browser eval --js "document.getElementById('name').value")" 'supersecretvalue99'
 check "loaded secrets are masked in output" "$("$AMCU" browser eval --secrets "$SEC" --js "document.getElementById('name').value")" '[secret:TESTKEY]'
+SCOPED="$WORK/scoped.env"
+printf 'HERE=allowedhere1234\nHERE__DOMAINS=127.0.0.1\nELSEWHERE=refusedvalue5678\nELSEWHERE__DOMAINS=accounts.example.com,*.example.org\n' > "$SCOPED"
+check "a secret scoped to this host fills" "$("$AMCU" browser fill --ref "$NAME" --secrets "$SCOPED" --secret HERE)" '(verified)'
+check "a secret scoped elsewhere is refused" "$("$AMCU" browser fill --ref "$NAME" --secrets "$SCOPED" --secret ELSEWHERE 2>&1)" 'secret_scope'
+check "the refused secret never reached the page" "$("$AMCU" browser eval --js "document.getElementById('name').value")" 'allowedhere1234'
+check "a frame field is checked against the frame's host too" "$("$AMCU" browser fill --ref "$FIN" --secrets "$SCOPED" --secret HERE)" '(verified)'
 
 echo "stale refs"
 "$AMCU" browser eval --js "document.getElementById('confirm-btn').textContent = 'Changed'; return 1" >/dev/null
@@ -225,7 +252,7 @@ check "the page received the file" "$("$AMCU" browser snapshot --selector '#log'
 check "screenshot writes a file" "$("$AMCU" browser screenshot --out "$WORK/shot.png")" 'wrote'
 [ -s "$WORK/shot.png" ] && ok "screenshot is non-empty" || fail "screenshot is empty"
 check "console replays earlier messages" "$("$AMCU" browser console)" 'early warning'
-check "tab --new opens in the background" "$("$AMCU" browser tab --new --url "$BASE/second.html")" 'in the background'
+check "tab --new opens in amcu's background window" "$("$AMCU" browser tab --new --url "$BASE/second.html")" "background window"
 check "wait --text sees late content" "$("$AMCU" browser wait --text 'late content' --timeout 10)" 'wait ok'
 check "tab --close" "$("$AMCU" browser tab --close)" 'closed tab'
 check "detach" "$("$AMCU" browser detach --tab "$TAB")" 'detached from tab'

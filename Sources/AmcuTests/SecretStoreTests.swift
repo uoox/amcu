@@ -66,8 +66,35 @@ func runSecretStoreTests(_ t: Harness) {
         t.expect(false, "loading the JSON-masking fixtures must not throw (\(error))")
     }
 
+    t.suite("secret store: host scope")
+    do {
+        let path = write("scoped.env", """
+        LOGIN_PASSWORD=correct-horse-battery
+        LOGIN_PASSWORD__DOMAINS=accounts.example.com, *.example.org
+        UNSCOPED=another-secret-value
+        ORPHAN__DOMAINS=nowhere.test
+        """)
+        try SecretStore.load(path: path)
+        t.expectEqual(SecretStore.values.count, 2, "scope lines are metadata, not secrets")
+        t.expect(SecretStore.values["LOGIN_PASSWORD__DOMAINS"] == nil, "a scope line is never typed or masked as a value")
+        t.expectEqual(SecretStore.domains(forKey: "LOGIN_PASSWORD"), ["accounts.example.com", "*.example.org"], "a key's domains are parsed, trimmed and lowercased")
+        t.expect(SecretStore.domains(forKey: "UNSCOPED") == nil, "a key without a scope line is unscoped")
+        t.expectEqual(SecretStore.mask("battery correct-horse-battery"), "battery [secret:LOGIN_PASSWORD]", "a scoped secret is still masked")
+        t.expectEqual(SecretStore.mask("goes to accounts.example.com"), "goes to accounts.example.com", "the domain list itself is never masked")
+    } catch {
+        t.expect(false, "loading a scoped secrets file must not throw (\(error))")
+    }
+    t.expect(SecretStore.hostMatches("accounts.example.com", pattern: "accounts.example.com"), "an exact host matches")
+    t.expect(!SecretStore.hostMatches("evil-accounts.example.com", pattern: "accounts.example.com"), "an exact pattern does not match a longer host")
+    t.expect(!SecretStore.hostMatches("accounts.example.com.evil.test", pattern: "accounts.example.com"), "an exact pattern does not match a host that merely starts with it")
+    t.expect(SecretStore.hostMatches("example.org", pattern: "*.example.org"), "a wildcard covers the bare domain")
+    t.expect(SecretStore.hostMatches("login.eu.example.org", pattern: "*.example.org"), "a wildcard covers nested subdomains")
+    t.expect(!SecretStore.hostMatches("notexample.org", pattern: "*.example.org"), "a wildcard needs a dot boundary")
+    t.expect(SecretStore.hostMatches("ACCOUNTS.Example.com", pattern: "accounts.example.com"), "hosts compare case-insensitively")
+    t.expect(!SecretStore.hostMatches("", pattern: "*.example.org"), "an unknown host never matches")
+
     t.expect((try? SecretStore.load(path: dir.appendingPathComponent("missing.env").path)) == nil, "a missing file is an error")
     let emptyPath = write("empty.env", "# only a comment\n")
     t.expect((try? SecretStore.load(path: emptyPath)) == nil, "a file with no entries is an error")
-    t.expectEqual(try? SecretStore.value(forKey: "PIN"), "123456", "a failed load leaves the previous store intact")
+    t.expectEqual(try? SecretStore.value(forKey: "UNSCOPED"), "another-secret-value", "a failed load leaves the previous store intact")
 }

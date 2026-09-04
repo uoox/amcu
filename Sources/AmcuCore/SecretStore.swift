@@ -9,8 +9,18 @@ import Foundation
 /// page re-encodes a value (base64, URL-encoding, JSON escapes inside network
 /// bodies defeat it). It is a redaction aid, not a confidentiality boundary;
 /// the guide says so in the same breath that documents the flag.
+///
+/// A key may be scoped to hosts with a companion line `KEY__DOMAINS=a.com,
+/// *.b.org` — still valid dotenv, so other tools reading the file are not
+/// upset. The browser bridge refuses to type such a key into a tab (or frame)
+/// whose host is not listed: a real password typed into a look-alike page is
+/// the one mistake the redaction layer cannot undo.
 public enum SecretStore {
     public private(set) static var values: [String: String] = [:]
+    /// Host patterns per key, from `KEY__DOMAINS` lines. Absent means unscoped.
+    public private(set) static var scopes: [String: [String]] = [:]
+
+    public static let domainsSuffix = "__DOMAINS"
 
     public static var isEmpty: Bool { values.isEmpty }
 
@@ -24,6 +34,7 @@ public enum SecretStore {
             ])
         }
         var loaded: [String: String] = [:]
+        var loadedScopes: [String: [String]] = [:]
         for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
             var text = line.trimmingCharacters(in: .whitespaces)
             if text.isEmpty || text.hasPrefix("#") { continue }
@@ -36,12 +47,40 @@ public enum SecretStore {
                 value = String(value.dropFirst().dropLast())
             }
             guard !key.isEmpty, !value.isEmpty else { continue }
+            if key.hasSuffix(domainsSuffix), key.count > domainsSuffix.count {
+                // A scope line is metadata about a secret, not a secret: it is
+                // neither typed nor masked.
+                let base = String(key.dropLast(domainsSuffix.count))
+                let patterns = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+                if !patterns.isEmpty { loadedScopes[base] = patterns }
+                continue
+            }
             loaded[key] = value
         }
         guard !loaded.isEmpty else {
             throw AmcuError(.invalidArgument, "no KEY=VALUE entries found in \(path)")
         }
         values = loaded
+        scopes = loadedScopes
+    }
+
+    /// The hosts a key may be typed into, or nil when the file did not scope it.
+    public static func domains(forKey key: String) -> [String]? {
+        scopes[key]
+    }
+
+    /// Whether `host` is covered by one pattern: an exact host, or `*.example.com`
+    /// for the domain and every subdomain. Mirrors the extension's check, which is
+    /// where the refusal actually happens.
+    public static func hostMatches(_ host: String, pattern: String) -> Bool {
+        let host = host.lowercased()
+        let pattern = pattern.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !host.isEmpty, !pattern.isEmpty else { return false }
+        if pattern.hasPrefix("*.") {
+            let base = String(pattern.dropFirst(2))
+            return host == base || host.hasSuffix("." + base)
+        }
+        return host == pattern
     }
 
     public static func value(forKey key: String) throws -> String {

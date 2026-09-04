@@ -51,6 +51,10 @@
     <button id="hidden-toggle" onclick="document.getElementById('secret').classList.toggle('hidden')">Toggle hidden</button>
     <p id="secret" class="hidden">Now you see me</p>
     <div id="js-action" jsaction="click:app.go">JsAction target</div>
+    <div id="listener-only">Listener-only target</div>
+    <div id="scroller" style="height: 60px; overflow-y: auto; border: 1px solid #999;">
+      <p>scroller line 1</p><p>scroller line 2</p><p>scroller line 3</p><p>scroller line 4</p><p>scroller line 5</p><p>scroller line 6</p><p>scroller line 7</p><p>scroller line 8</p>
+    </div>
     <button id="appear-btn">Appear</button>
     <button id="noop-btn">Noop</button>
     <input id="zip" aria-label="Zip" maxlength="5" pattern="[0-9]{5}" inputmode="numeric">
@@ -84,6 +88,7 @@
   document.getElementById('div-btn').addEventListener('click', e => { if (!e.isTrusted) log('UNTRUSTED click'); });
   window.addEventListener('keydown', e => { if (e.metaKey && e.key === 'k') log('cmd+k'); });
   document.getElementById('js-action').addEventListener('click', () => log('jsaction clicked'));
+  document.getElementById('listener-only').addEventListener('click', () => log('listener-only clicked'));
   document.getElementById('appear-btn').addEventListener('click', () => {
     const d = document.createElement('div');
     d.setAttribute('role', 'dialog'); d.setAttribute('aria-label', 'Popup dialog');

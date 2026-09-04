@@ -376,6 +376,16 @@ do {
     t.expect(AmcuError(.timeout, "took too long").description.hasPrefix("timeout:"), "descriptions lead with the machine-readable code")
 }
 
+// MARK: - Focus guard
+
+t.suite("focus guard")
+
+t.expect(FocusGuard.verdict(targetWasFrontmost: false, targetIsFrontmostNow: true) != nil, "a background target that became frontmost is reported")
+t.expect(FocusGuard.verdict(targetWasFrontmost: false, targetIsFrontmostNow: false) == nil, "a background target that stayed in the background is silent")
+t.expect(FocusGuard.verdict(targetWasFrontmost: true, targetIsFrontmostNow: true) == nil, "a target that was already frontmost has nothing to report")
+t.expect(FocusGuard.verdict(targetWasFrontmost: true, targetIsFrontmostNow: false) == nil, "losing the front is the user's doing, not an activation")
+t.expect(FocusGuard.verdict(targetWasFrontmost: false, targetIsFrontmostNow: true)?.contains("warning") == true, "the report is labelled as a warning so it is not read as success detail")
+
 // MARK: - Self-check verdicts
 
 t.suite("self-check verdicts")
