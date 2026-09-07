@@ -111,6 +111,24 @@ public enum BrowserBridge {
 
     // MARK: - Refs
 
+    /// `--ref` is amcu's name for an element address; `--target` is what
+    /// Playwright's MCP tools call the same thing, and a model that learned
+    /// there reaches for it without thinking. Both are accepted. Two values
+    /// that disagree are an error, not a silent pick.
+    public static func address(ref: String?, target: String?) throws -> String? {
+        switch (ref, target) {
+        case (nil, nil): return nil
+        case (let value?, nil), (nil, let value?): return value
+        case (let a?, let b?):
+            guard a.trimmingCharacters(in: .whitespaces) == b.trimmingCharacters(in: .whitespaces) else {
+                throw AmcuError(.invalidArgument, "--ref \(a) and --target \(b) disagree; they are two names for the same flag", nextSteps: [
+                    "Pass one of them."
+                ])
+            }
+            return a
+        }
+    }
+
     /// `e12` addresses the main frame; `f42e12` addresses frame 42. The frame
     /// id is part of the ref so a caller cannot accidentally act in the wrong
     /// document.

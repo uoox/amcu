@@ -1110,7 +1110,82 @@ async function reportObserver(tabId, armed, after) {
 async function handleRequest(method, params) {
   const handler = handlers[method];
   if (!handler) throw new BridgeError('unsupported', `unknown method '${method}'`, ['Update the extension: run `amcu browser install` and reload it.']);
+  if (params && params.expect) await expectElement(params);
   return handler(params);
+}
+
+// `--element "Submit button"` — the caller's own description of what the ref
+// is, in the style Playwright's tools take alongside a ref. It is never used
+// to find the element; it is checked against the live one so that a ref
+// remembered wrongly, or reused after the page changed, is refused before
+// anything is pressed. The comparison is lenient on purpose: role words are
+// optional, and the remaining words need only appear somewhere in the
+// element's role, name, tag or ref.
+async function expectElement(params) {
+  // Insurance that is silently dropped is worse than none: a verb with no
+  // element to check against refuses rather than ignoring the flag. drag
+  // checks its --from element.
+  const ref = params.ref || params.from;
+  if (!ref) {
+    throw new BridgeError('invalid_argument', `--element needs an element to check against; this command has no --ref`, [
+      'Add --ref (or --target) with a ref from `amcu browser snapshot`, or drop --element.'
+    ]);
+  }
+  const tab = await resolveTab(params);
+  requireNoDialog(tab.id);
+  const { frameId, local } = parseRef(ref);
+  const described = await callFrame(tab.id, frameId, 'describe', { ref: local });
+  // Only the role and the name count; the ref and tag the description carries
+  // would let "--element e12" pass on anything.
+  const actual = String(described.description || '').replace(/\s*\[ref=[^\]]*\]/g, '').replace(/\s*<[^>]*>/g, '');
+  if (elementMatches(params.expect, actual)) return;
+  throw new BridgeError('element_mismatch', `element ${ref} is ${actual}, not "${params.expect}"`, [
+    'Re-run `amcu browser snapshot` and use the ref whose role and name match what you mean.',
+    'If the description was merely loosely worded, drop --element; the ref alone addresses the element.'
+  ]);
+}
+
+const STOP_WORDS = new Set(['the', 'a', 'an', 'to', 'of', 'for', 'in', 'on', 'at', 'with', 'this', 'that', 'element', 'control', 'page']);
+
+// Words a caller uses for a role, and the ARIA roles each may stand for.
+const ROLE_SYNONYMS = {
+  button: ['button'], link: ['link'],
+  input: ['textbox', 'searchbox', 'textarea', 'spinbutton', 'combobox'], field: ['textbox', 'searchbox', 'textarea', 'spinbutton', 'combobox'],
+  textbox: ['textbox', 'searchbox', 'textarea'], box: ['textbox', 'searchbox', 'checkbox', 'combobox'], textarea: ['textarea', 'textbox'],
+  text: ['textbox', 'textarea'], checkbox: ['checkbox'], radio: ['radio'],
+  dropdown: ['combobox', 'listbox'], select: ['combobox', 'listbox'], combobox: ['combobox'],
+  menu: ['menu', 'menuitem', 'menubar'], menuitem: ['menuitem'], item: ['menuitem', 'listitem', 'treeitem', 'option'], option: ['option'],
+  tab: ['tab'], image: ['img', 'image'], img: ['img', 'image'], icon: ['img', 'image', 'button'],
+  heading: ['heading'], title: ['heading'], label: ['label'], area: ['textarea'],
+  row: ['row'], cell: ['cell', 'gridcell'], list: ['list', 'listbox'], listbox: ['listbox'],
+  dialog: ['dialog', 'alertdialog'], form: ['form'], search: ['searchbox'], main: ['main']
+};
+
+function elementMatches(expect, actual) {
+  const haystack = String(actual).toLowerCase();
+  // CJK descriptions carry the role word glued to the name ("登录按钮"), so
+  // those are stripped as substrings before the split.
+  const words = String(expect).toLowerCase()
+    .replace(/按钮|链接|输入框|文本框|复选框|单选框|下拉框|下拉|菜单项|菜单|选项卡|选项|图片|图标|标题|字段|元素|控件|文本/g, ' ')
+    .split(/[^\p{L}\p{N}]+/u).filter(word => word && !STOP_WORDS.has(word));
+  if (words.length === 0) return true;
+  // Role words are optional decoration next to a name ("Submit button"). When
+  // they are all there is ("Search input"), each must fit the live role.
+  const specific = words.filter(word => !(word in ROLE_SYNONYMS));
+  if (specific.length > 0) return specific.every(word => wordPresent(word, haystack));
+  return words.every(word => wordPresent(word, haystack) || ROLE_SYNONYMS[word].some(role => wordPresent(role, haystack)));
+}
+
+// Latin words match on word boundaries so "Log in" does not pass on "Logout"
+// and "Save" does not pass on "Don't save"... it does, and should: the name
+// contains the word. What must not pass is a different word that merely
+// contains the letters. CJK has no word boundaries; substring is the only test.
+function wordPresent(word, haystack) {
+  if (/^[\p{Script=Latin}\p{N}]+$/u.test(word)) {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^\\p{Script=Latin}\\p{N}])${escaped}(?=$|[^\\p{Script=Latin}\\p{N}])`, 'u').test(haystack);
+  }
+  return haystack.includes(word);
 }
 
 const handlers = {

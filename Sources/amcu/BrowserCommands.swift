@@ -45,7 +45,8 @@ enum BrowserCommands {
       network     [--clear]                 requests seen since the debugger attached
       wait        --text T | --text-gone T | --url U | --url-matches REGEX | --load | --time S
 
-    ACT (by ref from the last snapshot)
+    ACT (by ref from the last snapshot; --target R is a synonym for --ref R,
+         and --element "what you think it is" is checked before acting)
       click       --ref R [--button right] [--count 2] [--mod cmd] [--force]
       hover       --ref R
       type        --ref R --text T [--submit] [--slowly] [--replace]
@@ -141,6 +142,9 @@ enum BrowserCommands {
         var params: [String: Any] = ["session": flags.string("session") ?? "default"]
         if let tab = try flags.int("tab") { params["tab"] = tab }
         if let seconds = try flags.double("timeout") { params["timeoutMs"] = Int(seconds * 1000) }
+        // `--element "Submit button"`: checked against the addressed element
+        // before the verb runs; a mismatch is refused as element_mismatch.
+        if let expect = flags.string("element"), !expect.trimmingCharacters(in: .whitespaces).isEmpty { params["expect"] = expect }
         return params
     }
 
@@ -148,14 +152,33 @@ enum BrowserCommands {
         try flags.double("timeout") ?? fallback
     }
 
-    static func requiredRef(_ flags: Flags, _ name: String = "ref") throws -> String {
-        let ref = try flags.required(name, hint: "Pass --\(name) with a ref from `amcu browser snapshot`, e.g. --\(name) e12.")
+    /// The element a verb acts on. For the main `ref` flag, `--target` is an
+    /// accepted synonym (see BrowserBridge.address); `--element` is not an
+    /// address at all — it is the caller's description of what the ref is,
+    /// which the bridge checks against the live element before acting.
+    static func optionalRef(_ flags: Flags, _ name: String = "ref") throws -> String? {
+        let raw = name == "ref"
+            ? try BrowserBridge.address(ref: flags.string("ref"), target: flags.string("target"))
+            : flags.string(name)
+        guard let ref = raw else { return nil }
         guard BrowserBridge.parseRef(ref) != nil else {
             throw AmcuError(.invalidArgument, "'\(ref)' is not a ref", nextSteps: [
                 "Refs look like e12 (main frame) or f42e12 (frame 42), exactly as printed by `amcu browser snapshot`."
             ])
         }
         return ref
+    }
+
+    static func requiredRef(_ flags: Flags, _ name: String = "ref") throws -> String {
+        if let ref = try optionalRef(flags, name) { return ref }
+        var steps = ["Pass --\(name) with a ref from `amcu browser snapshot`, e.g. --\(name) e12."]
+        if name == "ref" {
+            steps[0] += " `--target e12` means the same thing."
+            if flags.string("element") != nil {
+                steps.insert("--element describes the element; it does not address it. The address is the ref from the snapshot.", at: 0)
+            }
+        }
+        throw AmcuError(.invalidArgument, "missing required flag --\(name)", nextSteps: steps)
     }
 
     /// `tab 123 "Title" https://…` — every result names the tab it touched.
@@ -637,7 +660,7 @@ enum BrowserCommands {
 
     static func screenshot(_ flags: Flags) throws {
         var params = try baseParams(flags)
-        if flags.string("ref") != nil { params["ref"] = try requiredRef(flags) }
+        if let ref = try optionalRef(flags) { params["ref"] = ref }
         params["full"] = flags.has("full")
         let format = flags.string("format") ?? "png"
         guard format == "png" || format == "jpeg" || format == "jpg" else {
@@ -673,7 +696,7 @@ enum BrowserCommands {
                 "Pass an expression (`document.title`) or a function (`() => location.href`); with --ref, the function receives the element."
             ])
         }
-        if flags.string("ref") != nil { params["ref"] = try requiredRef(flags) }
+        if let ref = try optionalRef(flags) { params["ref"] = ref }
         if let frame = try flags.int("frame") { params["frame"] = frame }
         let client = try client(flags)
         let result = try client.request("evaluate", params: params, timeout: try timeout(flags, default: 40))
@@ -854,7 +877,7 @@ enum BrowserCommands {
         params["key"] = try flags.required("key", hint: "For example --key Enter, --key Escape, --key ArrowDown, --key a --mod cmd.")
         let modifiers = flags.list("mod")
         if !modifiers.isEmpty { params["modifiers"] = modifiers }
-        if flags.string("ref") != nil { params["ref"] = try requiredRef(flags) }
+        if let ref = try optionalRef(flags) { params["ref"] = ref }
         if let count = try flags.boundedInt("count", min: 1, max: 100) { params["count"] = count }
         let client = try client(flags)
         let result = try client.request("key", params: params, timeout: try timeout(flags))
@@ -874,7 +897,7 @@ enum BrowserCommands {
         }
         params["dx"] = Int(dx)
         params["dy"] = Int(dy)
-        if flags.string("ref") != nil { params["ref"] = try requiredRef(flags) }
+        if let ref = try optionalRef(flags) { params["ref"] = ref }
         let client = try client(flags)
         let result = try client.request("scroll", params: params, timeout: try timeout(flags))
         emit(client, action: "scroll", result: result) {

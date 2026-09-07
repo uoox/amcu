@@ -40,6 +40,13 @@ THE NORMAL SEQUENCE
   6. A ref names an element, and the element's role and name are re-checked
      before every action: if they changed you get stale_snapshot, not a click
      on whatever moved there.
+  `--target e12` is accepted everywhere `--ref e12` is; they are the same
+  flag. `--element "Submit button"` may be added to any acting verb: it never
+  selects the element, it states what you believe the ref is, and the action
+  is refused (element_mismatch) when the live element's role or name says
+  otherwise. Cheap insurance when a ref is reused from an earlier snapshot.
+  (On desktop verbs `--element N` is an index; here it is a description —
+  the browser address is always the ref.)
 
 REFS AND FRAMES
   e12 lives in the main document. f42e12 lives in frame 42 (an iframe); the

@@ -250,6 +250,17 @@ windows-harness, workflow-use, desktop, profile-use. Filter unchanged: does it m
 better without adding a concept? amcu's concept count stays at five — snapshot, ref, act, verify,
 report — so everything below lands inside existing verbs.*
 
+**Shipped in 0.8.1:**
+
+- **`--target` as a synonym for `--ref`, and `--element "…"` as a pre-action check.** The names are
+  Playwright MCP's (`target` + `element`), because that is the vocabulary most models were trained
+  on; a model that reaches for them hits first time instead of after an error round-trip. `--element`
+  never selects — it is the caller's belief about what the ref is, compared against the live element's
+  role and name through the content script's `describe` op before the verb runs, refusal code
+  `element_mismatch`. Lenient by design: role words (button, input, 按钮, 输入框 …) are optional, the
+  remaining words need only appear in the element's description. No MCP server: the CLI plus a
+  one-paragraph skill stays cheaper per session than any tool schema, and every host here has a shell.
+
 **Shipped in 0.8.0:**
 
 - **`addEventListener` click handlers → `[clickable]`** (browser-use `has_js_click_listener`). Done

@@ -31,6 +31,13 @@ func runBrowserBridgeTests(_ t: Harness) {
         t.expect(BrowserBridge.parseRef("e12").map { $0.frameID == 0 && $0.index == 12 } == true, "e12 is element 12 of the main frame")
         t.expect(BrowserBridge.parseRef("f42e7").map { $0.frameID == 42 && $0.index == 7 } == true, "f42e7 is element 7 of frame 42")
         t.expect(BrowserBridge.parseRef(" e3 ").map { $0.index == 3 } == true, "surrounding whitespace is tolerated")
+
+    t.suite("browser ref aliases")
+        t.expectEqual(try? BrowserBridge.address(ref: "e12", target: nil), "e12", "--ref alone is the address")
+        t.expectEqual(try? BrowserBridge.address(ref: nil, target: "e12"), "e12", "--target alone is the address (Playwright's name for it)")
+        t.expectEqual(try? BrowserBridge.address(ref: "e12", target: "e12"), "e12", "the same value under both names is fine")
+        t.expectEqual(try? BrowserBridge.address(ref: nil, target: nil), nil, "neither flag gives no address")
+        t.expectThrows("--ref and --target that disagree are refused") { _ = try BrowserBridge.address(ref: "e12", target: "e13") }
         t.expect(BrowserBridge.parseRef("12") == nil, "a bare number is not a ref")
         t.expect(BrowserBridge.parseRef("e") == nil, "e without digits is not a ref")
         t.expect(BrowserBridge.parseRef("f4") == nil, "a frame without an element is not a ref")

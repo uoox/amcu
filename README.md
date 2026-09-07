@@ -181,6 +181,7 @@ WEB PAGES
   amcu browser snapshot --diff               only the lines added/removed since the last snapshot
   amcu browser find --text T                 search the last snapshot (substring or /regex/)
   amcu browser click --ref e12 | fill --ref e7 --value V | type --ref e7 --text T --submit
+  amcu browser click --target e12 --element "Submit button"   --target = --ref; --element is checked first
   amcu browser select-option | key | scroll | drag | hover | upload | dialog
   amcu browser screenshot | eval --js EXPR | console | network | wait --text T | --url-matches RE
   amcu browser fill --ref e7 --secrets .env --secret DB_PASSWORD   type by key, masked in output
