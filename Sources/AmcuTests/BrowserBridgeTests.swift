@@ -38,6 +38,12 @@ func runBrowserBridgeTests(_ t: Harness) {
         t.expectEqual(try? BrowserBridge.address(ref: "e12", target: "e12"), "e12", "the same value under both names is fine")
         t.expectEqual(try? BrowserBridge.address(ref: nil, target: nil), nil, "neither flag gives no address")
         t.expectThrows("--ref and --target that disagree are refused") { _ = try BrowserBridge.address(ref: "e12", target: "e13") }
+
+    t.suite("lab")
+        t.expect(Lab.isBrowserLevel("Target.getTargets") && Lab.isBrowserLevel("Browser.getVersion"), "Target.* and Browser.* go to the browser endpoint")
+        t.expect(!Lab.isBrowserLevel("Runtime.evaluate") && !Lab.isBrowserLevel("Page.navigate"), "page methods go to a page")
+        t.expectEqual(Lab.executableInside("/Applications/Nope.app"), "/Applications/Nope.app", "a missing .app falls through unchanged")
+        t.expect(Lab.status(name: "amcu-tests-never-started") == nil, "an unknown lab has no status")
         t.expect(BrowserBridge.parseRef("12") == nil, "a bare number is not a ref")
         t.expect(BrowserBridge.parseRef("e") == nil, "e without digits is not a ref")
         t.expect(BrowserBridge.parseRef("f4") == nil, "a frame without an element is not a ref")

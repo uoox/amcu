@@ -182,6 +182,8 @@ WEB PAGES
   amcu browser find --text T                 search the last snapshot (substring or /regex/)
   amcu browser click --ref e12 | fill --ref e7 --value V | type --ref e7 --text T --submit
   amcu browser click --target e12 --element "提交按钮"   --target 等同 --ref；--element 在动作前核对
+  amcu lab start | targets | cdp --method Runtime.evaluate --params '{…}' | stop
+                                             一次性的 Chrome，暴露 DevTools 协议，用于扩展开发
   amcu browser select-option | key | scroll | drag | hover | upload | dialog
   amcu browser screenshot | eval --js EXPR | console | network | wait --text T | --url-matches RE
   amcu browser fill --ref e7 --secrets .env --secret DB_PASSWORD   type by key, masked in output

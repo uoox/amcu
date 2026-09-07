@@ -38,6 +38,9 @@ WEB PAGES
   browser      <verb> …                 read and drive tabs in the user's own browser through
                                         the amcu bridge extension — `amcu browser help`
                                         lists the verbs, `amcu browser install` sets it up
+  lab          <verb> …                 a disposable Chrome of amcu's own with the DevTools
+                                        protocol exposed — extension development, traces,
+                                        network interception; `amcu lab help`
 
 SELECTORS
   --app accepts a bundle id (com.apple.finder), pid:1234, or an application name.
@@ -147,6 +150,7 @@ do {
         let data = try JSONEncoder().encode(Permissions.probeNow())
         print(String(decoding: data, as: UTF8.self))
     case "browser": try BrowserCommands.run(flags)
+    case "lab": try LabCommands.run(flags)
     case "guide": print(guideText)
     case "help": print(helpText)
     case "version": print(version)

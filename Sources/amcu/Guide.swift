@@ -150,6 +150,12 @@ WEB PAGES
   being visible. `amcu browser guide` has the conventions; `amcu browser
   doctor` says whether a browser is connected, and `amcu browser install` is
   the user's one-time setup when it is not.
+  What the extension cannot reach — other extensions and their service
+  workers, chrome:// pages, traces, heap snapshots, network interception —
+  is developer work, and `amcu lab` is for it: a throwaway Chrome with the
+  DevTools protocol on localhost, no user data inside. Do not move a page there
+  because it resists automation; use the desktop path on the user's browser
+  instead (`amcu snapshot --app com.google.Chrome`, no debugger attached).
 
 OUTPUT
   Add `--json` to any command for machine-readable output on stdout and
