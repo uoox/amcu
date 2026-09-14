@@ -37,13 +37,21 @@ public enum SessionStore {
         return try decoder.decode(Snapshot.self, from: data)
     }
 
+    /// The previous snapshot when one exists, for index reuse and diffs; a
+    /// missing or unreadable file is simply "no previous".
+    public static func loadIfPresent(session: String) -> Snapshot? {
+        try? load(session: session)
+    }
+
     public static func node(index: Int, session: String) throws -> (Snapshot, SnapshotNode) {
         let snapshot = try load(session: session)
-        guard index >= 0, index < snapshot.nodes.count else {
-            throw AmcuError(.elementNotFound, "element \(index) is outside the recorded snapshot (0..\(snapshot.nodes.count - 1))", nextSteps: [
+        guard let node = snapshot.nodes.first(where: { $0.index == index }) else {
+            let known = snapshot.nodes.map(\.index)
+            let range = known.isEmpty ? "it is empty" : "indices run \(known.min()!)..\(known.max()!), not necessarily contiguous"
+            throw AmcuError(.elementNotFound, "element \(index) is not in the recorded snapshot (\(range))", nextSteps: [
                 "Re-run `amcu snapshot` and read the indices from its output."
             ])
         }
-        return (snapshot, snapshot.nodes[index])
+        return (snapshot, node)
     }
 }

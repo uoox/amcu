@@ -10,16 +10,23 @@ USAGE
   amcu <command> [flags]
 
 INSPECT
-  apps                                  list running applications (pid, bundle id, name)
+  apps         [--recent]               list running applications (pid, bundle id, name);
+                                        --recent adds recently used ones that are not running
   windows      --app S                  list an application's windows with ids and frames
   snapshot     --app S                  capture the accessibility tree as indexed text
+  snapshot     --app S --diff           only what changed since the session's last snapshot
+  snapshot     --app S --query T        only elements matching T (substring or /regex/) + ancestors
   scan         --app S                  optical fallback: recognise text and where it is
   menu         --app S                  read the menu bar without opening it
   focus        --app S                  report what currently has keyboard focus
   doctor                                check permissions (host app and amcu itself) and verify background delivery
+  policy                                show the effective policy file (deny/allow lists, settle timing)
   guide                                 operating instructions for an agent driving this tool
+  skill        [--install [--dir D]]    print the agent skill (SKILL.md); --install writes it to
+                                        ~/.claude/skills/amcu or D so every agent finds amcu
 
 ACT
+  launch       --app S                  start an application without activating it; wait for its window
   click        --app S --element N      press an element by its snapshot index
   click        --app S --at X,Y         click a point (window-relative unless --screen)
   action       --element N --action A   perform any action the element advertises
@@ -33,6 +40,7 @@ ACT
   menu-item    --app S --path "A > B"   invoke a menu command, by shortcut where possible
   screenshot   --app S [--out FILE]     capture one window, occluded or not
   window       --app S --raise|--move X,Y|--resize W,H|--minimize|--restore
+  batch        --app S < steps.jsonl    run several steps in one process; {"cmd":"click","element":3}
 
 WEB PAGES
   browser      <verb> …                 read and drive tabs in the user's own browser through
@@ -53,9 +61,19 @@ DELIVERY
   --mode background  route events to the target window without moving the cursor
   --mode foreground  post to the global event tap — moves the cursor, takes focus
 
+AFTER EVERY ACTION
+  The command waits until the application stops emitting accessibility
+  notifications (policy: min 0.2s, quiet 0.3s, max 5s), then re-captures the
+  session's snapshot and prints only the diff: `~` changed, `+` added,
+  `- [a..b]` removed, or `# no change`. Indices are kept stable across
+  captures, so a diff line's index is directly usable. --no-observe skips the
+  re-capture (settling still happens). Nothing is observed when the session
+  has no snapshot of that application yet.
+
 COMMON FLAGS
   --json             machine-readable output on stdout, structured errors on stderr
   --session NAME     namespace for snapshot state (default: "default")
+  --no-observe       do not re-snapshot and diff after an action
   --no-shaping       snapshot: keep every node — no elision, no offscreen-row
                      culling; the escape hatch when shaping hides too much
   --screen           interpret coordinates as absolute screen coordinates
@@ -123,8 +141,17 @@ do {
         exit(0)
     }
 
+    try dispatch(command, flags)
+} catch {
+    Output.fail(error)
+}
+
+func dispatch(_ command: String, _ flags: Flags) throws {
     switch command {
     case "apps": try Commands.apps(flags)
+    case "launch": try Commands.launch(flags)
+    case "policy": try Commands.policy(flags)
+    case "batch": try Batch.run(flags) { command, stepFlags in try dispatch(command, stepFlags) }
     case "windows": try Commands.windows(flags)
     case "snapshot": try Commands.snapshot(flags)
     case "scan": try Commands.scan(flags)
@@ -152,11 +179,10 @@ do {
     case "browser": try BrowserCommands.run(flags)
     case "lab": try LabCommands.run(flags)
     case "guide": print(guideText)
+    case "skill": try Commands.skill(flags)
     case "help": print(helpText)
     case "version": print(version)
     default:
-        Output.fail(AmcuError(.invalidArgument, "unknown command '\(command)'", nextSteps: ["Run `amcu help` for the command list."]))
+        throw AmcuError(.invalidArgument, "unknown command '\(command)'", nextSteps: ["Run `amcu help` for the command list."])
     }
-} catch {
-    Output.fail(error)
 }

@@ -27,6 +27,8 @@ jobs:
         run: Scripts/package.sh
       # The extension is plain JavaScript with no build step; a syntax check
       # catches the mistakes the Swift suite cannot see.
+      - name: Check skill is in sync
+        run: .build/release/amcu skill | diff - skills/amcu/SKILL.md
       - name: Check extension
         run: |
           for f in extension/*.js; do node --check "$f"; done

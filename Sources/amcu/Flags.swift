@@ -10,7 +10,7 @@ struct Flags {
 
     static let knownBooleans: Set<String> = [
         "json", "force", "request", "no-snapshot", "no-shaping", "screen", "help", "raw", "quiet",
-        "press", "raise", "minimize", "restore", "allow-sensitive",
+        "press", "raise", "minimize", "restore", "allow-sensitive", "recent", "no-observe", "install",
         // browser verbs
         "activate", "new", "close", "no-wait", "all-refs", "interactive", "full", "submit", "slowly",
         "replace", "clear", "load", "hard", "all", "accept", "dismiss", "diff",

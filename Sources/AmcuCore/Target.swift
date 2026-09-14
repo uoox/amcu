@@ -1,4 +1,5 @@
 import AppKit
+import CoreServices
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -209,5 +210,129 @@ public enum Target {
             throw AmcuError(.windowNotFound, "no windows available", nextSteps: ["Open a window in the target application first."])
         }
         return first
+    }
+}
+
+/// An application on disk, whether or not it is running — from Spotlight's
+/// last-used metadata, the way Sky's `list_apps` does it.
+public struct InstalledApp: Codable, Sendable {
+    public let name: String
+    public let bundleID: String?
+    public let path: String
+    public let lastUsed: Date?
+    public let useCount: Int?
+    public let running: Bool
+}
+
+extension Target {
+    /// Applications used within `days`, most recent first.
+    public static func recentApps(days: Int = 14, limit: Int = 60) -> [InstalledApp] {
+        let query = "kMDItemContentType == \"com.apple.application-bundle\" && kMDItemLastUsedDate >= $time.today(-\(days))"
+        guard let q = MDQueryCreate(kCFAllocatorDefault, query as CFString, nil, nil) else { return [] }
+        MDQuerySetMaxCount(q, limit * 3)
+        guard MDQueryExecute(q, CFOptionFlags(kMDQuerySynchronous.rawValue)) else { return [] }
+        let running = NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path }
+        var out: [InstalledApp] = []
+        for i in 0..<MDQueryGetResultCount(q) {
+            let item = unsafeBitCast(MDQueryGetResultAtIndex(q, i), to: MDItem.self)
+            guard let path = MDItemCopyAttribute(item, kMDItemPath) as? String else { continue }
+            let name = (MDItemCopyAttribute(item, kMDItemDisplayName) as? String).map { $0.hasSuffix(".app") ? String($0.dropLast(4)) : $0 }
+                ?? URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            out.append(InstalledApp(
+                name: name,
+                bundleID: MDItemCopyAttribute(item, kMDItemCFBundleIdentifier) as? String,
+                path: path,
+                lastUsed: MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date,
+                useCount: (MDItemCopyAttribute(item, "kMDItemUseCount" as CFString) as? NSNumber)?.intValue,
+                running: running.contains(path)
+            ))
+        }
+        return Array(out.sorted { ($0.lastUsed ?? .distantPast) > ($1.lastUsed ?? .distantPast) }.prefix(limit))
+    }
+
+    /// Finds an application bundle for a selector that names nothing running:
+    /// a bundle id via Launch Services, else a display name via Spotlight.
+    public static func installedApp(_ selector: String) -> URL? {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: selector) { return url }
+        let escaped = selector.replacingOccurrences(of: "\"", with: "\\\"")
+        let query = "kMDItemContentType == \"com.apple.application-bundle\" && (kMDItemDisplayName == \"\(escaped)\"c || kMDItemDisplayName == \"\(escaped).app\"c || kMDItemFSName == \"\(escaped).app\"c)"
+        guard let q = MDQueryCreate(kCFAllocatorDefault, query as CFString, nil, nil) else { return nil }
+        MDQuerySetMaxCount(q, 5)
+        guard MDQueryExecute(q, CFOptionFlags(kMDQuerySynchronous.rawValue)), MDQueryGetResultCount(q) > 0 else { return nil }
+        var candidates: [String] = []
+        for i in 0..<MDQueryGetResultCount(q) {
+            let item = unsafeBitCast(MDQueryGetResultAtIndex(q, i), to: MDItem.self)
+            if let path = MDItemCopyAttribute(item, kMDItemPath) as? String { candidates.append(path) }
+        }
+        // /Applications and /System/Applications before anything in a build
+        // directory or a Time Machine copy.
+        let preferred = candidates.sorted { a, b in
+            func rank(_ p: String) -> Int { p.hasPrefix("/Applications/") ? 0 : p.hasPrefix("/System/Applications/") ? 1 : 2 }
+            return rank(a) < rank(b)
+        }
+        return preferred.first.map { URL(fileURLWithPath: $0) }
+    }
+
+    public struct LaunchOutcome {
+        public let app: NSRunningApplication
+        public let wasRunning: Bool
+        public let ready: Bool
+        public let waited: Double
+    }
+
+    /// Launches without activating (the user's focus stays where it is) and
+    /// waits until the application publishes a real window: one with a
+    /// non-zero size, which is what distinguishes it from the placeholder a
+    /// starting application exposes for its first second or two.
+    public static func launch(_ selector: String, timeout: Double, waitForWindow: Bool) throws -> LaunchOutcome {
+        let start = Date()
+        if let running = try? resolveApp(selector) {
+            let ready = waitForWindow ? waitForRealWindow(running, until: start.addingTimeInterval(timeout)) : true
+            return LaunchOutcome(app: running, wasRunning: true, ready: ready, waited: Date().timeIntervalSince(start))
+        }
+        guard let url = installedApp(selector) else {
+            throw AmcuError(.appNotFound, "no installed application matched '\(selector)'", nextSteps: [
+                "Use a bundle id (com.apple.Notes) or the application's display name.",
+                "`amcu apps --recent` lists recently used applications with their bundle ids."
+            ])
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.addsToRecentItems = false
+        let semaphore = DispatchSemaphore(value: 0)
+        var launched: NSRunningApplication?
+        var failure: Error?
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, error in
+            launched = app
+            failure = error
+            semaphore.signal()
+        }
+        // The completion handler arrives on a private queue; the main run loop
+        // is spun so AppKit can do its own bookkeeping meanwhile.
+        while semaphore.wait(timeout: .now()) != .success {
+            CFRunLoopRunInMode(.defaultMode, 0.05, false)
+            if Date().timeIntervalSince(start) > timeout {
+                throw AmcuError(.timeout, "launching \(url.lastPathComponent) did not complete within \(Int(timeout))s")
+            }
+        }
+        guard let app = launched else {
+            throw AmcuError(.unsupported, "could not launch \(url.lastPathComponent): \(failure?.localizedDescription ?? "unknown error")")
+        }
+        let ready = waitForWindow ? waitForRealWindow(app, until: start.addingTimeInterval(timeout)) : true
+        return LaunchOutcome(app: app, wasRunning: false, ready: ready, waited: Date().timeIntervalSince(start))
+    }
+
+    static func waitForRealWindow(_ app: NSRunningApplication, until deadline: Date) -> Bool {
+        while Date() < deadline {
+            let element = AXUIElementCreateApplication(app.processIdentifier)
+            AX.setMessagingTimeout(element, seconds: 1.0)
+            let real = AX.windows(element).contains { window in
+                guard let frame = AX.frame(window) else { return false }
+                return frame.width > 1 && frame.height > 1
+            }
+            if real { return true }
+            CFRunLoopRunInMode(.defaultMode, 0.1, false)
+        }
+        return false
     }
 }

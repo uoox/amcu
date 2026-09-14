@@ -338,8 +338,8 @@ t.expect(Redaction.holdsSecret(descriptors: ["AXTextField", "", "API token"]), "
 t.expect(!Redaction.holdsSecret(descriptors: ["AXTextField", "", "Search"]), "an ordinary field keeps its value")
 t.expect(!Redaction.holdsSecret(descriptors: []), "an element that describes itself as nothing keeps its value")
 
-t.expect(SensitiveApps.bundleIDs.contains("com.apple.keychainaccess"), "Keychain Access is on the credential-holding list")
-t.expect(SensitiveApps.bundleIDs.contains("com.bitwarden.desktop"), "third-party password managers are on the list too")
+t.expect(SensitiveApps.builtinBundleIDs.contains("com.apple.keychainaccess"), "Keychain Access is on the credential-holding list")
+t.expect(SensitiveApps.builtinBundleIDs.contains("com.bitwarden.desktop"), "third-party password managers are on the list too")
 
 // A number someone can type must never be able to trap the process.
 t.expect(NumericBounds.narrow(99_999_999_999, min: -100_000, max: 100_000) == nil, "a value beyond Int32 is refused rather than trapped")
@@ -434,5 +434,6 @@ runChromiumAccessibilityTests(t)
 runTextInputTests(t)
 runBrowserBridgeTests(t)
 runSecretStoreTests(t)
+runSnapshotDiffTests(t)
 
 t.finish()

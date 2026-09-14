@@ -47,6 +47,9 @@ public struct SnapshotNode: Codable, Sendable {
     /// all accessibility-derived.
     public var origin: NodeOrigin { originRaw ?? .accessibility }
     let originRaw: NodeOrigin?
+    /// Stable identity hash (see `SnapshotIdentity`); nil in snapshots written
+    /// before indices were reused across captures.
+    public var identity: String?
 
     public init(
         index: Int,
@@ -61,8 +64,10 @@ public struct SnapshotNode: Codable, Sendable {
         actions: [String],
         depth: Int,
         path: [Int],
-        origin: NodeOrigin = .accessibility
+        origin: NodeOrigin = .accessibility,
+        identity: String? = nil
     ) {
+        self.identity = identity
         self.index = index
         self.role = role
         self.subrole = subrole
@@ -79,7 +84,7 @@ public struct SnapshotNode: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case index, role, subrole, identifier, label, value, enabled, focused, frame, actions, depth, path
+        case index, role, subrole, identifier, label, value, enabled, focused, frame, actions, depth, path, identity
         case originRaw = "origin"
     }
 }
@@ -102,6 +107,17 @@ public struct Snapshot: Codable, Sendable {
     public var rowsOmitted: Int { rowsOmittedRaw ?? 0 }
     let rowsOmittedRaw: Int?
     public let capturedAt: Date
+    /// Capture settings, so an observation after an action can repeat the
+    /// capture the same way and its diff compares like with like.
+    public var shaped: Bool { shapedRaw ?? true }
+    let shapedRaw: Bool?
+    public var maxNodes: Int { maxNodesRaw ?? SnapshotLimits().maxNodes }
+    let maxNodesRaw: Int?
+    /// True when this snapshot's indices continue the previous snapshot's
+    /// numbering (same window, enough matching elements), so a diff between
+    /// the two is meaningful.
+    public var indicesContinued: Bool { indicesContinuedRaw ?? false }
+    let indicesContinuedRaw: Bool?
 
     public init(
         app: AppInfo,
@@ -113,8 +129,14 @@ public struct Snapshot: Codable, Sendable {
         childrenTruncated: Bool = false,
         elidedCount: Int = 0,
         rowsOmitted: Int = 0,
-        capturedAt: Date
+        capturedAt: Date,
+        shaped: Bool = true,
+        maxNodes: Int = SnapshotLimits().maxNodes,
+        indicesContinued: Bool = false
     ) {
+        self.shapedRaw = shaped
+        self.maxNodesRaw = maxNodes
+        self.indicesContinuedRaw = indicesContinued
         self.app = app
         self.window = window
         self.nodes = nodes
@@ -132,34 +154,42 @@ public struct Snapshot: Codable, Sendable {
         case childrenTruncatedRaw = "childrenTruncated"
         case elidedCountRaw = "elidedCount"
         case rowsOmittedRaw = "rowsOmitted"
+        case shapedRaw = "shaped"
+        case maxNodesRaw = "maxNodes"
+        case indicesContinuedRaw = "indicesContinued"
+    }
+
+    public func renderLine(_ node: SnapshotNode) -> String {
+        var parts: [String] = []
+        parts.append(String(repeating: "  ", count: node.depth) + "\(node.index) \(shortRole(node.role))")
+        if let subrole = node.subrole { parts.append("[\(shortRole(subrole))]") }
+        if let label = node.label, !label.isEmpty { parts.append("\"\(truncate(label))\"") }
+        if let value = node.value, !value.isEmpty { parts.append("= \"\(truncate(value))\"") }
+        if !node.enabled { parts.append("(disabled)") }
+        if node.focused { parts.append("(focused)") }
+        if let frame = node.frame {
+            parts.append("@\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height))")
+        }
+        if node.origin == .vision { parts.append("(text)") }
+        let extraActions = node.actions.filter { $0 != kAXPressAction as String }
+        if !extraActions.isEmpty {
+            parts.append("actions:" + extraActions.map { shortRole($0) }.joined(separator: ","))
+        }
+        return parts.joined(separator: " ")
     }
 
     /// Compact indented text, one line per element, sized for a model's context
-    /// rather than for a human reading a debugger.
-    public func renderText() -> String {
+    /// rather than for a human reading a debugger. `only` restricts the body
+    /// to a subset (see `filtered(query:)`); the footer still describes the
+    /// whole capture.
+    public func renderText(only subset: [SnapshotNode]? = nil, queryNote: String? = nil) -> String {
         var lines: [String] = []
         lines.append("app: \(app.name) [\(app.bundleID ?? "pid:\(app.pid)")]")
         let frame = window.frame
         lines.append("window: \(window.title ?? "(untitled)") id=\(window.windowID.map(String.init) ?? "?") frame=(\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height)))")
         lines.append("coordinates: window-relative")
-        for node in nodes {
-            var parts: [String] = []
-            parts.append(String(repeating: "  ", count: node.depth) + "\(node.index) \(shortRole(node.role))")
-            if let subrole = node.subrole { parts.append("[\(shortRole(subrole))]") }
-            if let label = node.label, !label.isEmpty { parts.append("\"\(truncate(label))\"") }
-            if let value = node.value, !value.isEmpty { parts.append("= \"\(truncate(value))\"") }
-            if !node.enabled { parts.append("(disabled)") }
-            if node.focused { parts.append("(focused)") }
-            if let frame = node.frame {
-                parts.append("@\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height))")
-            }
-            if node.origin == .vision { parts.append("(text)") }
-            let extraActions = node.actions.filter { $0 != kAXPressAction as String }
-            if !extraActions.isEmpty {
-                parts.append("actions:" + extraActions.map { shortRole($0) }.joined(separator: ","))
-            }
-            lines.append(parts.joined(separator: " "))
-        }
+        for node in subset ?? nodes { lines.append(renderLine(node)) }
+        if let queryNote { lines.append(queryNote) }
         if focusedIndex == nil { lines.append("(no element currently focused)") }
         if looksAccessibilityBlind {
             lines.append("(this window exposes no actionable accessibility elements — it may render its own interface; try `amcu scan` for an optical fallback)")
@@ -227,7 +257,8 @@ public enum SnapshotBuilder {
         window: WindowInfo,
         windowElement: AXUIElement,
         limits: SnapshotLimits = SnapshotLimits(),
-        shaping: Bool = true
+        shaping: Bool = true,
+        previous: Snapshot? = nil
     ) -> Snapshot {
         var nodes: [SnapshotNode] = []
         var truncated = false
@@ -389,17 +420,38 @@ public enum SnapshotBuilder {
 
         walk(windowElement, depth: 0, path: [], ancestors: [])
 
+        // Indices were provisional positions during the walk; now they become
+        // identities carried over from the previous capture where possible.
+        let identities = SnapshotIdentity.assign(roles: nodes.map { ($0.role, $0.subrole, $0.identifier, $0.label, $0.depth) })
+        let comparable = previous.map { prior in
+            prior.app.pid == app.pid && prior.window.windowID == window.windowID && prior.window.index == window.index && prior.shaped == shaping
+        } ?? false
+        let (indices, continued) = SnapshotIdentity.reuseIndices(identities: identities, previous: comparable ? previous : nil)
+        var renumbered: [SnapshotNode] = []
+        renumbered.reserveCapacity(nodes.count)
+        for (position, node) in nodes.enumerated() {
+            renumbered.append(SnapshotNode(
+                index: indices[position], role: node.role, subrole: node.subrole, identifier: node.identifier,
+                label: node.label, value: node.value, enabled: node.enabled, focused: node.focused, frame: node.frame,
+                actions: node.actions, depth: node.depth, path: node.path, origin: node.origin, identity: identities[position]
+            ))
+        }
+        let focusedNew = focusedIndex.map { indices[$0] }
+
         return Snapshot(
             app: app,
             window: window,
-            nodes: nodes,
-            focusedIndex: focusedIndex,
+            nodes: renumbered,
+            focusedIndex: focusedNew,
             truncated: truncated,
             maxDepthReached: depthReached,
             childrenTruncated: childrenTruncated,
             elidedCount: elidedCount,
             rowsOmitted: rowsOmitted,
-            capturedAt: Date()
+            capturedAt: Date(),
+            shaped: shaping,
+            maxNodes: limits.maxNodes,
+            indicesContinued: continued
         )
     }
 

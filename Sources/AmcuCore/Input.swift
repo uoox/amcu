@@ -26,6 +26,15 @@ public enum DeliveryMode: String, Codable, Sendable, CaseIterable {
 /// delivered, but always at (0, 0) of the window. Both halves together deliver
 /// an accurate click. `CGEventSetWindowLocation` is not public API, so
 /// `SelfCheck` verifies the whole path at runtime before anything relies on it.
+/// Every event amcu synthesizes carries this in `eventSourceUserData`, so an
+/// event tap (the self-check, or a future intervention monitor) can tell
+/// amcu's own input from the user's.
+public enum EventTag {
+    public static let magic: Int64 = 0x414D_4355 // "AMCU"
+    public static func stamp(_ event: CGEvent) { event.setIntegerValueField(.eventSourceUserData, value: magic) }
+    public static func isOurs(_ event: CGEvent) -> Bool { event.getIntegerValueField(.eventSourceUserData) == magic }
+}
+
 public enum PointerInput {
     static let kMouseEventWindowUnderMousePointer = CGEventField(rawValue: 51)!
     static let kMouseEventWindowUnderMousePointerThatCanHandleThisEvent = CGEventField(rawValue: 52)!
@@ -55,6 +64,7 @@ public enum PointerInput {
             throw AmcuError(.unsupported, "could not construct mouse event", nextSteps: ["Retry; if this persists the process may lack Accessibility rights."])
         }
         event.setIntegerValueField(.mouseEventClickState, value: clickState)
+        EventTag.stamp(event)
         if let routing {
             event.setIntegerValueField(kMouseEventWindowUnderMousePointer, value: Int64(routing.windowID))
             event.setIntegerValueField(kMouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(routing.windowID))
@@ -146,6 +156,7 @@ public enum PointerInput {
             throw AmcuError(.unsupported, "could not construct scroll event")
         }
         event.location = global
+        EventTag.stamp(event)
         if mode == .background {
             guard supportsWindowRouting, let windowID, let windowFrame else {
                 throw AmcuError(.unsupported, "background scrolling needs window routing and a target window", nextSteps: [
@@ -218,6 +229,8 @@ public enum KeyboardInput {
             let utf16 = Array(chunk.utf16)
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+            EventTag.stamp(down)
+            EventTag.stamp(up)
             PointerInput.post(down, to: pid, mode: mode)
             PointerInput.post(up, to: pid, mode: mode)
             usleep(chunkDelay)
@@ -246,6 +259,8 @@ public enum KeyboardInput {
         }
         down.flags = flags
         up.flags = flags
+        EventTag.stamp(down)
+        EventTag.stamp(up)
         PointerInput.post(down, to: pid, mode: mode)
         usleep(15_000)
         PointerInput.post(up, to: pid, mode: mode)

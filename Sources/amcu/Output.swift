@@ -44,17 +44,81 @@ enum Output {
     }
 }
 
+/// What every action reports after it ran: how long the interface took to
+/// settle, whether a background input stole focus, and the diff of the
+/// session's snapshot if one was on record for this application.
+struct Aftermath: Encodable {
+    var settle: SettleReport?
+    var focusNote: String?
+    var observation: SnapshotDiff?
+
+    var lines: [String] {
+        var out: [String] = []
+        if let observation { out.append(observation.text) }
+        return out
+    }
+}
+
 struct ActionResult: Encodable {
     let ok = true
     let action: String
     let mode: String?
     let target: String
-    let detail: String?
+    var detail: String?
+    var settle: SettleReport?
+    var observation: SnapshotDiff?
 
     var text: String {
         var parts = ["\(action) ok on \(target)"]
         if let mode { parts.append("via \(mode)") }
         if let detail { parts.append("(\(detail))") }
-        return parts.joined(separator: " ")
+        if let settle { parts.append("(\(settle.summary))") }
+        var lines = [parts.joined(separator: " ")]
+        if let observation { lines.append(observation.text) }
+        return lines.joined(separator: "\n")
+    }
+
+    mutating func apply(_ aftermath: Aftermath) {
+        settle = aftermath.settle
+        observation = aftermath.observation
+        if let note = aftermath.focusNote {
+            detail = [detail, note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "; ")
+        }
+    }
+}
+
+/// `ActionResult` plus the proof: whether the write was read back intact, and
+/// (for replacements) the full value the element now holds.
+struct VerifiedActionResult: Encodable {
+    let ok = true
+    let action: String
+    let mode: String?
+    let target: String
+    var detail: String?
+    let verification: ActionVerification
+    let resultingValue: String?
+    /// Only `replace` sets this; `set-value` always overwrites by contract.
+    var scope: ReplacementScope? = nil
+    var settle: SettleReport?
+    var observation: SnapshotDiff?
+
+    var text: String {
+        var parts = ["\(action) ok on \(target)"]
+        if let mode { parts.append("via \(mode)") }
+        if let detail { parts.append("(\(detail))") }
+        if let scope { parts.append("(\(scope.label))") }
+        parts.append("(\(verification.summary))")
+        if let settle { parts.append("(\(settle.summary))") }
+        var lines = [parts.joined(separator: " ")]
+        if let observation { lines.append(observation.text) }
+        return lines.joined(separator: "\n")
+    }
+
+    mutating func apply(_ aftermath: Aftermath) {
+        settle = aftermath.settle
+        observation = aftermath.observation
+        if let note = aftermath.focusNote {
+            detail = [detail, note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "; ")
+        }
     }
 }

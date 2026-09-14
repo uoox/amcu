@@ -101,7 +101,7 @@ enum Commands {
         global: CGPoint,
         button: CGMouseButton,
         clickCount: Int
-    ) throws -> (mode: String, note: String?) {
+    ) throws -> (mode: String, guard: FocusGuard?) {
         guard let mode = delivery.pointerMode else {
             let check = SelfCheck.ensure()
             let action = button == .right ? "AXShowMenu" : (kAXPressAction as String)
@@ -129,7 +129,7 @@ enum Commands {
             clickCount: clickCount,
             mode: mode
         ))
-        return (mode.rawValue, focus?.note())
+        return (mode.rawValue, focus)
     }
 
     /// Background delivery promises not to touch the user's focus; AppKit can
@@ -150,8 +150,7 @@ enum Commands {
     /// carries this note so the caller re-checks and reports honestly instead
     /// of retrying forever or silently escalating to the user's cursor.
     static func syntheticInputImmunityNote(_ app: NSRunningApplication) -> String? {
-        let immune: Set<String> = ["com.tencent.xinwechat", "com.tencent.flue.wechatappex"]
-        guard let id = app.bundleIdentifier?.lowercased(), immune.contains(id) else { return nil }
+        guard SensitiveApps.isImmune(app) else { return nil }
         return "warning: this application is known to discard synthesized input; verify with a re-scan, and if nothing changed only --mode foreground (visible, moves the cursor) reaches it — ask the user first"
     }
 
@@ -187,7 +186,7 @@ enum Commands {
     /// resolves cleanly onto a control in the *wrong* window and reports
     /// success, so the fallback instead pins the window by its recorded index
     /// and cross-checks the title before any path is replayed.
-    private static func snapshotWindow(
+    static func snapshotWindow(
         for snapshot: Snapshot,
         app: NSRunningApplication
     ) throws -> (element: AXUIElement, info: WindowInfo) {
@@ -242,14 +241,70 @@ enum Commands {
 
     static func apps(_ flags: Flags) throws {
         let list = Target.runningApps()
-        struct Payload: Encodable { let ok = true; let apps: [AppInfo] }
-        Output.emit(Payload(apps: list)) {
-            list.map { app in
+        let recent: [InstalledApp]? = flags.has("recent")
+            ? Target.recentApps(days: try flags.boundedInt("days", min: 1, max: 365) ?? 14).filter { !$0.running }
+            : nil
+        struct Payload: Encodable { let ok = true; let apps: [AppInfo]; let recent: [InstalledApp]? }
+        Output.emit(Payload(apps: list, recent: recent)) {
+            var lines = list.map { app in
                 let marks = [app.active ? "active" : nil, app.hasWindows ? nil : "no-windows"].compactMap { $0 }
                 let suffix = marks.isEmpty ? "" : "  (\(marks.joined(separator: ", ")))"
                 return "\(app.pid)\t\(app.bundleID ?? "-")\t\(app.name)\(suffix)"
-            }.joined(separator: "\n")
+            }
+            if let recent {
+                lines.append("")
+                lines.append(recent.isEmpty ? "recently used, not running: none" : "recently used, not running (`amcu launch --app <bundle id>` starts one without activating it):")
+                let formatter = RelativeDateTimeFormatter()
+                for app in recent {
+                    let when = app.lastUsed.map { formatter.localizedString(for: $0, relativeTo: Date()) } ?? "?"
+                    lines.append("-\t\(app.bundleID ?? "-")\t\(app.name)  (last used \(when))")
+                }
+            }
+            return lines.joined(separator: "\n")
         }
+    }
+
+    /// Starts an application without activating it and waits for its first
+    /// real window, so the next `snapshot` sees the interface rather than the
+    /// placeholder a starting application publishes.
+    static func launch(_ flags: Flags) throws {
+        try Permissions.requireAccessibility()
+        let selector = try flags.required("app", hint: "Pass --app with a bundle id or display name; `amcu apps --recent` lists installed applications.")
+        let timeout = try flags.double("timeout") ?? 15
+        let outcome = try Target.launch(selector, timeout: timeout, waitForWindow: !flags.has("no-wait"))
+        try SensitiveApps.guardAgainst(outcome.app, allowed: flags.has("allow-sensitive"))
+        struct Payload: Encodable {
+            let ok = true
+            let app: AppInfo
+            let wasRunning: Bool
+            let ready: Bool
+            let waited: Double
+        }
+        let app = outcome.app
+        let info = AppInfo(pid: app.processIdentifier, name: app.localizedName ?? "(unnamed)", bundleID: app.bundleIdentifier, active: app.isActive, hasWindows: outcome.ready)
+        Output.emit(Payload(app: info, wasRunning: outcome.wasRunning, ready: outcome.ready, waited: outcome.waited)) {
+            var line = "\(outcome.wasRunning ? "already running" : "launched") \(info.name) [\(info.bundleID ?? "pid:\(info.pid)")] pid \(info.pid)"
+            line += outcome.ready ? String(format: ", window ready after %.1fs", outcome.waited) : String(format: ", no window after %.1fs — snapshot may show a placeholder; wait and retry", outcome.waited)
+            return line
+        }
+    }
+
+    static func skill(_ flags: Flags) throws {
+        guard flags.has("install") else { print(skillText); return }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let directory = flags.string("dir").map { URL(fileURLWithPath: $0) }
+            ?? home.appendingPathComponent(".claude/skills/amcu", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("SKILL.md")
+        try Data((skillText + "\n").utf8).write(to: file, options: .atomic)
+        struct Payload: Encodable { let ok = true; let path: String }
+        Output.emit(Payload(path: file.path)) { "wrote \(file.path)" }
+    }
+
+    static func policy(_ flags: Flags) throws {
+        let effective = Policy.current.effective
+        let data = try JSONSerialization.data(withJSONObject: effective, options: [.prettyPrinted, .sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
     }
 
     static func windows(_ flags: Flags) throws {
@@ -276,6 +331,7 @@ enum Commands {
         if let maxDepth = try flags.boundedInt("max-depth", min: 1, max: 200) { limits.maxDepth = maxDepth }
         if let maxChildren = try flags.boundedInt("max-children", min: 1, max: 5_000) { limits.maxChildrenPerNode = maxChildren }
 
+        let previous = SessionStore.loadIfPresent(session: session(flags))
         let snapshot = SnapshotBuilder.capture(
             app: target.appInfo,
             window: target.windowInfo,
@@ -283,9 +339,30 @@ enum Commands {
             limits: limits,
             // The escape hatch for when shaping guesses wrong: every node,
             // every row, no elision — at full token cost.
-            shaping: !flags.has("no-shaping")
+            shaping: !flags.has("no-shaping"),
+            previous: previous
         )
         try SessionStore.save(snapshot, session: session(flags))
+
+        if let query = flags.string("query") {
+            let (kept, matches) = try snapshot.filtered(query: query)
+            struct Payload: Encodable { let ok = true; let query: String; let matches: Int; let nodes: [SnapshotNode]; let snapshot: Snapshot }
+            Output.emit(Payload(query: query, matches: matches, nodes: kept, snapshot: snapshot)) {
+                snapshot.renderText(only: kept, queryNote: "(query \"\(query)\": \(matches) of \(snapshot.nodes.count) elements match; ancestors kept; every index is still valid)")
+            }
+            return
+        }
+        if flags.has("diff") {
+            guard let previous, snapshot.isComparable(with: previous) else {
+                struct Payload: Encodable { let ok = true; let diff: Bool; let snapshot: Snapshot }
+                Output.emit(Payload(diff: false, snapshot: snapshot)) { snapshot.renderText() + "\n(no comparable earlier snapshot in this session — full snapshot shown)" }
+                return
+            }
+            let diff = snapshot.diff(from: previous)
+            struct Payload: Encodable { let ok = true; let diff: SnapshotDiff; let snapshot: Snapshot }
+            Output.emit(Payload(diff: diff, snapshot: snapshot)) { diff.text }
+            return
+        }
         Output.emit(snapshot) { snapshot.renderText() }
     }
 
@@ -334,7 +411,8 @@ enum Commands {
                 let center = globalPoint(CGPoint(x: frame.midX, y: frame.midY), window: window.info, isScreenSpace: false)
                 let delivered = try deliverClick(mode, app: app, windowInfo: window.info, global: center, button: button, clickCount: clickCount)
                 let immunityNote = mode == .foreground ? nil : syntheticInputImmunityNote(app)
-                let result = ActionResult(action: "click", mode: delivered.mode, target: "text \(elementIndex)", detail: combinedDetail(node.label.map { "\"\($0)\"" }, immunityNote, delivered.note))
+                var result = ActionResult(action: "click", mode: delivered.mode, target: "text \(elementIndex)", detail: combinedDetail(node.label.map { "\"\($0)\"" }, immunityNote))
+                result.apply(AfterAction.run(flags: flags, app: app, guarded: delivered.guard))
                 Output.emit(result) { result.text }
                 return
             }
@@ -346,7 +424,8 @@ enum Commands {
             let action = button == .right ? "AXShowMenu" : (kAXPressAction as String)
             if !wantsCoordinates, node.actions.contains(action) {
                 try AX.perform(element, action)
-                let result = ActionResult(action: "click", mode: "ax:\(action)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
+                var result = ActionResult(action: "click", mode: "ax:\(action)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
+                result.apply(AfterAction.run(flags: flags, app: app, guarded: nil))
                 Output.emit(result) { result.text }
                 return
             }
@@ -369,17 +448,17 @@ enum Commands {
             try assertForegroundIsSafe(mode, app: app)
             let global = CGPoint(x: target.midX, y: target.midY)
             let delivered = try deliverClick(mode, app: app, windowInfo: window.info, global: global, button: button, clickCount: clickCount)
-            let result = ActionResult(
+            var result = ActionResult(
                 action: "click",
                 mode: delivered.mode,
                 target: "element \(elementIndex)",
                 detail: combinedDetail(
                     liveFrame == nil ? "coordinate fallback (recorded frame)" : "coordinate fallback (live frame)",
                     forcedNote,
-                    mode == .foreground ? nil : syntheticInputImmunityNote(app),
-                    delivered.note
+                    mode == .foreground ? nil : syntheticInputImmunityNote(app)
                 )
             )
+            result.apply(AfterAction.run(flags: flags, app: app, guarded: delivered.guard))
             Output.emit(result) { result.text }
             return
         }
@@ -396,7 +475,8 @@ enum Commands {
         try assertForegroundIsSafe(mode, app: target.app)
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
         let delivered = try deliverClick(mode, app: target.app, windowInfo: target.windowInfo, global: global, button: button, clickCount: clickCount)
-        let result = ActionResult(action: "click", mode: delivered.mode, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail(mode == .foreground ? nil : syntheticInputImmunityNote(target.app), delivered.note))
+        var result = ActionResult(action: "click", mode: delivered.mode, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail(mode == .foreground ? nil : syntheticInputImmunityNote(target.app)))
+        result.apply(AfterAction.run(flags: flags, app: target.app, guarded: delivered.guard))
         Output.emit(result) { result.text }
     }
 
@@ -412,7 +492,8 @@ enum Commands {
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
         try AX.perform(element, name)
-        let result = ActionResult(action: "action", mode: "ax:\(name)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
+        var result = ActionResult(action: "action", mode: "ax:\(name)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
+        result.apply(AfterAction.run(flags: flags, app: app, guarded: nil))
         Output.emit(result) { result.text }
     }
 
@@ -435,7 +516,7 @@ enum Commands {
         }
         let verification = try TextInput.setValue(value, on: element)
         try requireNoMismatch(verification, elementIndex: elementIndex)
-        let result = VerifiedActionResult(
+        var result = VerifiedActionResult(
             action: "set-value",
             mode: "ax:AXValue",
             target: "element \(elementIndex)",
@@ -443,6 +524,7 @@ enum Commands {
             verification: verification,
             resultingValue: nil
         )
+        result.apply(AfterAction.run(flags: flags, app: app, guarded: nil))
         Output.emit(result) { result.text }
     }
 
@@ -468,7 +550,7 @@ enum Commands {
         }
         let (verification, resultingValue, scope) = try TextInput.replaceSelection(with: text, on: element)
         try requireNoMismatch(verification, elementIndex: elementIndex)
-        let result = VerifiedActionResult(
+        var result = VerifiedActionResult(
             action: "replace",
             mode: "ax:AXValue",
             target: "element \(elementIndex)",
@@ -479,6 +561,7 @@ enum Commands {
             // caller must hear that from the result, not discover it later.
             scope: scope
         )
+        result.apply(AfterAction.run(flags: flags, app: app, guarded: nil))
         Output.emit(result) { result.text }
     }
 
@@ -518,7 +601,8 @@ enum Commands {
         let focus = try focusForTyping(flags, app: app)
         let guarded = focusGuard(app, mode: mode)
         try KeyboardInput.type(text: text, pid: app.processIdentifier, mode: mode)
-        let result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combinedDetail("\(text.count) characters into \(focus.summary)", guarded?.note()))
+        var result = ActionResult(action: "type", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters into \(focus.summary)")
+        result.apply(AfterAction.run(flags: flags, app: app, guarded: guarded))
         Output.emit(result) { result.text }
     }
 
@@ -572,8 +656,10 @@ enum Commands {
             let parts = shortcut.split(separator: "+").map(String.init)
             let key = parts.last ?? ""
             let modifiers = Array(parts.dropLast())
+            let guarded = FocusGuard(targetPID: app.processIdentifier)
             try KeyboardInput.press(key: key, modifiers: modifiers, pid: app.processIdentifier, mode: .background)
-            let result = ActionResult(action: "menu-item", mode: "shortcut:\(shortcut)", target: item.displayPath, detail: nil)
+            var result = ActionResult(action: "menu-item", mode: "shortcut:\(shortcut)", target: item.displayPath, detail: nil)
+            result.apply(AfterAction.run(flags: flags, app: app, guarded: guarded))
             Output.emit(result) { result.text }
             return
         }
@@ -582,7 +668,8 @@ enum Commands {
         // appear on screen — the reason the shortcut route is preferred.
         let element = try Menus.resolve(item, in: app)
         try AX.perform(element, kAXPressAction as String)
-        let result = ActionResult(action: "menu-item", mode: "ax:AXPress", target: item.displayPath, detail: "no keyboard equivalent; the menu may have shown briefly")
+        var result = ActionResult(action: "menu-item", mode: "ax:AXPress", target: item.displayPath, detail: "no keyboard equivalent; the menu may have shown briefly")
+        result.apply(AfterAction.run(flags: flags, app: app, guarded: nil))
         Output.emit(result) { result.text }
     }
 
@@ -675,7 +762,8 @@ enum Commands {
         let guarded = focusGuard(app, mode: mode)
         try KeyboardInput.press(key: key, modifiers: modifiers, pid: app.processIdentifier, mode: mode)
         let combination = (modifiers + [key]).joined(separator: "+")
-        let result = ActionResult(action: "key", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combinedDetail("\(combination) to \(focus.summary)", guarded?.note()))
+        var result = ActionResult(action: "key", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(combination) to \(focus.summary)")
+        result.apply(AfterAction.run(flags: flags, app: app, guarded: guarded))
         Output.emit(result) { result.text }
     }
 
@@ -695,15 +783,15 @@ enum Commands {
         let previous = pasteboard.string(forType: .string)
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        defer {
-            pasteboard.clearContents()
-            if let previous { pasteboard.setString(previous, forType: .string) }
-        }
         let guarded = focusGuard(app, mode: mode)
         try KeyboardInput.press(key: "v", modifiers: ["cmd"], pid: app.processIdentifier, mode: mode)
-        // Give the target a moment to read the pasteboard before it is restored.
-        usleep(120_000)
-        let result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: combinedDetail("\(text.count) characters via pasteboard into \(focus.summary)", guarded?.note()))
+        // Settling doubles as the grace period the target needs to read the
+        // pasteboard before it is handed back.
+        let aftermath = AfterAction.run(flags: flags, app: app, guarded: guarded)
+        pasteboard.clearContents()
+        if let previous { pasteboard.setString(previous, forType: .string) }
+        var result = ActionResult(action: "paste", mode: mode.rawValue, target: app.localizedName ?? "pid:\(app.processIdentifier)", detail: "\(text.count) characters via pasteboard into \(focus.summary)")
+        result.apply(aftermath)
         Output.emit(result) { result.text }
     }
 
@@ -736,7 +824,8 @@ enum Commands {
             deltaY: deltaY,
             mode: mode
         )
-        let result = ActionResult(action: "scroll", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail("dx=\(deltaX) dy=\(deltaY)", mode == .foreground ? nil : syntheticInputImmunityNote(target.app), guarded?.note()))
+        var result = ActionResult(action: "scroll", mode: mode.rawValue, target: "\(Int(global.x)),\(Int(global.y))", detail: combinedDetail("dx=\(deltaX) dy=\(deltaY)", mode == .foreground ? nil : syntheticInputImmunityNote(target.app)))
+        result.apply(AfterAction.run(flags: flags, app: target.app, guarded: guarded))
         Output.emit(result) { result.text }
     }
 
@@ -764,7 +853,8 @@ enum Commands {
             steps: try flags.boundedInt("steps", min: 1, max: 500) ?? 12,
             mode: mode
         )
-        let result = ActionResult(action: "drag", mode: mode.rawValue, target: target.appInfo.name, detail: guarded?.note())
+        var result = ActionResult(action: "drag", mode: mode.rawValue, target: target.appInfo.name, detail: nil)
+        result.apply(AfterAction.run(flags: flags, app: target.app, guarded: guarded))
         Output.emit(result) { result.text }
     }
 
@@ -879,31 +969,5 @@ enum Commands {
             }
             return lines.joined(separator: "\n")
         }
-    }
-}
-
-/// `ActionResult` plus the proof: whether the write was read back intact, and
-/// (for replacements) the full value the element now holds. Lives beside the
-/// commands that produce it rather than in Output.swift because only the
-/// value-writing commands can offer verification.
-struct VerifiedActionResult: Encodable {
-    let ok = true
-    let action: String
-    let mode: String?
-    let target: String
-    let detail: String?
-    let verification: ActionVerification
-    let resultingValue: String?
-    /// Only `replace` sets this; `set-value` always overwrites by contract, so
-    /// there is nothing to disclose there.
-    var scope: ReplacementScope? = nil
-
-    var text: String {
-        var parts = ["\(action) ok on \(target)"]
-        if let mode { parts.append("via \(mode)") }
-        if let detail { parts.append("(\(detail))") }
-        if let scope { parts.append("(\(scope.label))") }
-        parts.append("(\(verification.summary))")
-        return parts.joined(separator: " ")
     }
 }
