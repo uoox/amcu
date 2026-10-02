@@ -55,7 +55,10 @@ enum BrowserCommands {
       select-option --ref R --value V | --values A,B
       key         --key K [--mod cmd,shift] [--ref R] [--count N]
       scroll      [--dy N] [--dx N] [--ref R]
-      drag        --from R --to R
+      drag        --from R --to R [--edge right] | --from R --by DX[,DY]
+                  [--human] [--steps N] [--duration S]
+                                            --human: hover, ease-out path with jitter and
+                                            uneven timing (~0.6-1.4 s), for slider checks
       upload      --ref R --file F[,F2]
       dialog      [--accept [--text T] | --dismiss]
       resize      --width W --height H
@@ -908,12 +911,40 @@ enum BrowserCommands {
     static func drag(_ flags: Flags) throws {
         var params = try baseParams(flags)
         params["from"] = try requiredRef(flags, "from")
-        params["to"] = try requiredRef(flags, "to")
+        let by = flags.list("by")
+        if !by.isEmpty {
+            guard flags.string("to") == nil, flags.string("edge") == nil else {
+                throw AmcuError(.invalidArgument, "drag takes either --to R [--edge E] or --by DX[,DY], not both")
+            }
+            guard by.count <= 2, let dx = Double(by[0]), let dy = by.count == 2 ? Double(by[1]) : 0 else {
+                throw AmcuError(.invalidArgument, "--by expects DX or DX,DY in CSS pixels, got '\(flags.string("by") ?? "")'")
+            }
+            params["by"] = ["x": dx, "y": dy]
+        } else {
+            params["to"] = try requiredRef(flags, "to")
+            if let edge = flags.string("edge") {
+                guard ["left", "right", "top", "bottom"].contains(edge) else {
+                    throw AmcuError(.invalidArgument, "--edge must be left, right, top or bottom, got '\(edge)'")
+                }
+                params["edge"] = edge
+            }
+        }
+        if flags.has("human") { params["human"] = true }
         if let steps = try flags.boundedInt("steps", min: 2, max: 200) { params["steps"] = steps }
+        if let seconds = try flags.double("duration") {
+            params["durationMs"] = Int(Swift.max(0.05, Swift.min(10, seconds)) * 1000)
+        }
         let client = try client(flags)
         let result = try client.request("drag", params: params, timeout: try timeout(flags))
         emit(client, action: "drag", result: result) {
-            "drag ok from \(result["from"].string ?? "") to \(result["to"].string ?? "")"
+            var line = "drag ok from \(result["from"].string ?? "") to \(result["to"].string ?? "")"
+            if let mode = result["mode"].string, let moves = result["moves"].int, let ms = result["durationMs"].int {
+                line += " (\(mode): \(moves) moves over \(ms) ms"
+                if mode == "human", let hover = result["hoverMs"].int { line += ", hover \(hover) ms" }
+                if let over = result["overshootPx"].double, over > 0 { line += ", overshoot \(over) px" }
+                line += ")"
+            }
+            return line
         }
     }
 

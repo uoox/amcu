@@ -125,6 +125,17 @@ ACTING
   you were acting on the session's current tab, the new tab is now current
   — your next snapshot reads it, and `tab --select` takes you back. With an
   explicit --tab nothing moves; the line tells you how to reach the new one.
+  `drag --from R --to R` presses on R, moves in a straight line at constant
+  speed (12 moves) and releases. `--edge right` ends at that edge of the
+  --to element (a slider's track) instead of its centre; `--by DX[,DY]` ends
+  at an offset from the press point. Slider checks ("drag the slider to
+  verify") reject that mechanical gesture: add `--human` to hover, pause,
+  then move with ease-out speed, uneven event spacing, a slight sideways
+  wobble and an occasional small overshoot, over 0.6-1.4 s. `--duration S`
+  and `--steps N` override the time and the number of moves in either mode.
+  The result line reports the moves and time actually used. Re-snapshot
+  afterwards: a check that still refuses usually wants a page reload, not a
+  faster retry.
   Before any pointer event the target must hold still for two animation
   frames; "(target was still moving when clicked)" flags the click that
   proceeded after the wait ran out.

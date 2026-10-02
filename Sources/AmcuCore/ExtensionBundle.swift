@@ -6,7 +6,7 @@
 import Foundation
 
 public enum ExtensionBundle {
-    public static let version = "0.9.0"
+    public static let version = "0.9.1"
     public static let id = "cgpbockoghamineoofoonidkickapbok"
     public static let name = "amcu bridge"
 
@@ -1006,7 +1006,114 @@ async function locate(tabId, ref, options = {}) {
     }
   }
   const description = frameId === 0 ? measured.description : String(measured.description || '').replace(/\[ref=e(\d+)\]/g, `[ref=f${frameId}e$1]`);
-  return Object.assign({}, measured, { frameId, local, x: point.x, y: point.y, description });
+  return Object.assign({}, measured, { frameId, local, x: point.x, y: point.y, measuredX: measured.x, measuredY: measured.y, description });
+}
+
+// Where a drag ends: the --to element's point, an edge of it (a slider's
+// track end), or --by an offset from the press point.
+function dragTarget(from, to, params) {
+  if (params.by) return { x: from.x + params.by.x, y: from.y + params.by.y };
+  if (!params.edge || !to.rect) return { x: to.x, y: to.y };
+  // rect and the measured point share the element's frame coordinates, so
+  // their difference carries over to the translated point.
+  const r = to.rect;
+  const inset = 2;
+  const local = {
+    left: { x: r.x + inset, y: r.y + r.height / 2 },
+    right: { x: r.x + r.width - inset, y: r.y + r.height / 2 },
+    top: { x: r.x + r.width / 2, y: r.y + inset },
+    bottom: { x: r.x + r.width / 2, y: r.y + r.height - inset }
+  }[params.edge];
+  if (!local) throw new BridgeError('invalid_argument', `--edge must be left, right, top or bottom, not '${params.edge}'`);
+  const mx = to.measuredX === undefined ? r.x + r.width / 2 : to.measuredX;
+  const my = to.measuredY === undefined ? r.y + r.height / 2 : to.measuredY;
+  return { x: to.x + local.x - mx, y: to.y + local.y - my };
+}
+
+// setTimeout in the extension's service worker was measured waking up to
+// ~90 ms late for 10 ms waits, which turns a gesture into bursts. A
+// MessageChannel round trip yields to other tasks (debugger replies) without
+// going through the throttled timer queue; it spins, so it is only for the
+// second or so a human drag lasts.
+async function sleepUntil(deadline) {
+  const channel = new MessageChannel();
+  while (Date.now() < deadline) {
+    await new Promise(resolve => { channel.port1.onmessage = resolve; channel.port2.postMessage(0); });
+  }
+  channel.port1.close();
+}
+
+const rand = (lo, hi) => lo + Math.random() * (hi - lo);
+
+// A pointer path shaped like a hand's: a short approach and a hover before
+// the press, ease-out travel (fast start, slow finish) with uneven event
+// spacing, a smooth sideways wobble that dies out at both ends, sometimes an
+// overshoot that is pulled back, and a rest before the release. Bot checks on
+// slider captchas look for constant speed, a straight line and a
+// millisecond-long gesture; this avoids all three.
+function humanDragPlan(press, target, params) {
+  const dx = target.x - press.x;
+  const dy = target.y - press.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const ux = dx / length, uy = dy / length;
+  const nx = -uy, ny = ux;
+  // --duration is the whole press-to-release time; the rest before release
+  // comes out of it.
+  const total = params.durationMs || Math.round(rand(650, 1350));
+  const releaseMs = Math.round(Math.min(total * 0.2, rand(60, 160)));
+  const duration = total - releaseMs;
+  const count = params.steps || Math.max(25, Math.min(60, Math.round(duration / rand(18, 28))));
+
+  const approach = [];
+  const ax = rand(-40, -15), ay = rand(10, 30);
+  const approachSteps = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < approachSteps; i++) {
+    const t = i / approachSteps;
+    const e = 1 - (1 - t) * (1 - t);
+    approach.push({ x: press.x + ax * (1 - e), y: press.y + ay * (1 - e), wait: Math.round(rand(12, 30)) });
+  }
+
+  const overshoot = length > 40 && Math.random() < 0.6 ? rand(3, 8) : 0;
+  const correction = overshoot ? 3 + Math.floor(Math.random() * 3) : 0;
+  const travel = Math.max(2, count - correction);
+
+  const gaps = [];
+  for (let i = 0; i < count; i++) gaps.push(rand(0.55, 1.45));
+  const scale = duration / gaps.reduce((a, b) => a + b, 0);
+  let at = 0;
+  const times = gaps.map(g => (at += g * scale));
+
+  const amplitude = rand(1, 3);
+  const f1 = rand(0.6, 1.4), f2 = rand(1.8, 3.2);
+  const p1 = rand(0, Math.PI * 2), p2 = rand(0, Math.PI * 2);
+  const wobble = t => amplitude * Math.sin(Math.PI * t) * (0.7 * Math.sin(2 * Math.PI * f1 * t + p1) + 0.3 * Math.sin(2 * Math.PI * f2 * t + p2));
+  const reach = length + overshoot;
+  const moves = [];
+  const travelEnd = times[travel - 1];
+  for (let i = 0; i < count; i++) {
+    let along, side;
+    if (i < travel) {
+      const t = times[i] / travelEnd;
+      // Ease-out (fast start, slow finish) with a little ease-in at the very
+      // start: a hand needs a few milliseconds to get going.
+      const e = 1 - Math.pow(1 - t, 2);
+      along = reach * (e * (1 - 0.15 * (1 - t) * (1 - t) * (1 - t) * (1 - t)));
+      side = wobble(t);
+    } else {
+      const k = (i - travel + 1) / correction;
+      along = reach - overshoot * (1 - Math.pow(1 - k, 2));
+      side = 0;
+    }
+    if (i === count - 1) { along = length; side = 0; }
+    moves.push({ at: Math.round(times[i]), x: press.x + ux * along + nx * side, y: press.y + uy * along + ny * side });
+  }
+  return {
+    approach,
+    hoverMs: Math.round(rand(150, 400)),
+    moves,
+    overshoot: Math.round(overshoot * 10) / 10,
+    releaseMs
+  };
 }
 
 async function pointInTopViewport(tabId, point) {
@@ -1507,18 +1614,60 @@ const handlers = {
     requireNoDialog(tab.id);
     await ensureAttached(tab.id);
     const from = await locate(tab.id, params.from);
-    const to = await locate(tab.id, params.to, { scroll: false });
-    await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y, button: 'none' });
-    await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: from.x, y: from.y, button: 'left', clickCount: 1 });
-    const steps = Math.max(2, params.steps || 12);
-    for (let i = 1; i <= steps; i++) {
-      const x = from.x + (to.x - from.x) * i / steps;
-      const y = from.y + (to.y - from.y) * i / steps;
-      await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 });
-      await sleep(10);
+    const to = params.by ? null : await locate(tab.id, params.to, { scroll: false });
+    const target = dragTarget(from, to, params);
+    const press = { x: from.x, y: from.y };
+    const result = { tab: tabSummary(tab), from: from.description, to: to ? to.description : `offset ${Math.round(target.x - from.x)},${Math.round(target.y - from.y)}` };
+    if (!params.human) {
+      await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: press.x, y: press.y, button: 'none' });
+      await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: press.x, y: press.y, button: 'left', buttons: 1, clickCount: 1 });
+      const steps = Math.max(2, params.steps || 12);
+      const startedAt = Date.now();
+      for (let i = 1; i <= steps; i++) {
+        const x = press.x + (target.x - press.x) * i / steps;
+        const y = press.y + (target.y - press.y) * i / steps;
+        await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 });
+        await sleep(params.durationMs ? params.durationMs / steps : 10);
+      }
+      await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: 'left', buttons: 0, clickCount: 1 });
+      return Object.assign(result, { mode: 'linear', moves: steps, durationMs: Date.now() - startedAt });
     }
-    await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', clickCount: 1 });
-    return { tab: tabSummary(tab), from: from.description, to: to.description };
+    const plan = humanDragPlan(press, target, params);
+    for (const move of plan.approach) {
+      await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: move.x, y: move.y, button: 'none', buttons: 0 });
+      await sleep(move.wait);
+    }
+    await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: press.x, y: press.y, button: 'none', buttons: 0 });
+    await sleep(plan.hoverMs);
+    await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: press.x, y: press.y, button: 'left', buttons: 1, clickCount: 1 });
+    // Scheduled against the press time rather than slept step by step, so the
+    // debugger round trip does not stretch the gesture beyond its duration.
+    // Moves are not awaited one by one: Chrome acknowledges a mouseMoved only
+    // when the renderer has handled it, which in an occluded or background
+    // window waits for a throttled frame and would bunch the gesture into
+    // bursts. Each event carries the time it was sent, which is what the page
+    // sees as its timeStamp.
+    const pressedAt = Date.now();
+    const pending = [];
+    let lagMs = 0;
+    for (const move of plan.moves) {
+      await sleepUntil(pressedAt + move.at);
+      lagMs = Math.max(lagMs, Date.now() - pressedAt - move.at);
+      pending.push(cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: move.x, y: move.y, button: 'left', buttons: 1, timestamp: Date.now() / 1000 }));
+    }
+    const sent = await Promise.all(pending);
+    const dialog = sent.find(entry => entry && entry.dialog);
+    if (dialog) return Object.assign(result, { mode: 'human', after: { dialog: dialog.dialog } });
+    await sleepUntil(pressedAt + plan.moves[plan.moves.length - 1].at + plan.releaseMs);
+    await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: target.x, y: target.y, button: 'left', buttons: 0, clickCount: 1 });
+    return Object.assign(result, {
+      mode: 'human',
+      moves: plan.moves.length,
+      durationMs: Date.now() - pressedAt,
+      hoverMs: plan.hoverMs,
+      overshootPx: plan.overshoot,
+      lateMs: lagMs
+    });
   },
 
   async type(params) {
@@ -3619,7 +3768,7 @@ async function executionContextFor(tabId, frameId) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Lets the amcu command-line tool read and drive this browser's tabs through Chrome's native messaging — no tokens, no ports, no remote debugging flags.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArmpx4zHfPTZaX0C1oQHsEwRhOJ1PEm8uvGNFqhBJusjvVOX0qrpGG238e6vRfynnw6Ts84Y6HBBf+DIy7ZHtcPal+i47er2WWntRVqDq9tVH+nc+YaASsp8TGhCH3CwOmSjGvdKv5s8VbKeYCJai9y+exmK+2xcmLq8rMLtpb0vfOyta36JH9fZKydCR6fN2oawIY3+swNfPKO5fTogKJotNJgCoo3igslliULHUNTu4mLUwz4gBy39O0h40HJc3o6CNDjmQKU8AWv3W0cupXt8OKSfwx0pVl6e189TGbhyC0nu6G3QgkM4QpYZgGCexar2GvYcR16tJrSdATb3slQIDAQAB",
   "minimum_chrome_version": "116",

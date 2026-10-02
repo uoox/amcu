@@ -14,7 +14,7 @@ struct Flags {
         // browser verbs
         "activate", "new", "close", "no-wait", "all-refs", "interactive", "full", "submit", "slowly",
         "replace", "clear", "load", "hard", "all", "accept", "dismiss", "diff",
-        "show", "hide", "user-window",
+        "show", "hide", "user-window", "human",
         // lab verbs
         "headless", "keep-profile"
     ]
