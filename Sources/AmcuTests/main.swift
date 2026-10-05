@@ -435,5 +435,6 @@ runTextInputTests(t)
 runBrowserBridgeTests(t)
 runSecretStoreTests(t)
 runSnapshotDiffTests(t)
+runSafariBridgeTests(t)
 
 t.finish()

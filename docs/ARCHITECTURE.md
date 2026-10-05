@@ -48,19 +48,24 @@ Commands.<verb>       Permissions.requireAccessibility → resolveTarget / Sessi
 | `BrowserClient.swift` | CLI side: discover sockets, send a request, wait for the reply. | `BrowserEndpoint`, `BrowserClient.discover/select/request` |
 | `BrowserInstall.swift` | Writes native-messaging manifests for known browsers and the unpacked extension to disk. | `install`, `manifestStatuses`, `extensionOnDiskMatches` |
 | `ExtensionBundle.swift` | Generated: the extension files as strings. Do not edit; run `Scripts/embed-extension.py`. | `ExtensionBundle.version/id/files` |
+| `SafariBridge.swift` | Safari constants, the appex⇄relay wire (port/token from the appex Info.plist, constant-time token check), verbs refused up front, upload payloads, and `SafariRelayCore` — the socket-free queue of CLI requests, extension polls and responses (profile pinning, readiness, fast failure when nothing polls). | `SafariBridge.relayConfig/unsupportedError/isSafariSelector/uploadPayload`, `SafariRelayCore.submit/notePoll/poll/requeue/respond` |
+| `SafariRelay.swift` | The relay process: Unix socket `safari-<pid>.sock` speaking the native-host protocol to the CLI, 127.0.0.1:<port> for the appex; exits after 30 idle minutes. `ensureRunning` spawns it detached from the installed app. | `SafariRelay.run/ensureRunning/runningEndpoint`, `RelaySockets` |
+| `SafariExtensionHost.swift` | The appex: when the binary runs from an `.appex` it calls `NSExtensionMain` (dlsym); `AmcuSafariWebExtensionHandler` forwards each native message to the relay. | `SafariExtensionHost.isRunningAsAppex/main/forward`, `AmcuSafariWebExtensionHandler` |
+| `SafariInstall.swift` | Assembles `~/Applications/amcu Safari Bridge.app` from the running binary (two copies: app = relay, appex = handler), plists, embedded extension files; signs (Developer ID > AMCU_SIGN_IDENTITY > ad-hoc), registers (lsregister, pluginkit); status + pure `diagnose` for doctor. | `install`, `uninstall`, `status`, `diagnose`, `chooseSigner`, `ownerSteps`, `appInfo/appexInfo` |
+| `SafariExtensionBundle.swift` | Generated from `safari/extension/`; content script and icons come from `ExtensionBundle` (`sharedWithChrome`). | `SafariExtensionBundle.files/sharedWithChrome` |
 | `Lab.swift` | Disposable Chrome with `--remote-debugging-port`, own profile. | `Lab.start/stop/status`, `findBrowser`, `State` |
 
 ## CLI modules
 
 | File | Purpose |
 |---|---|
-| `main.swift` | `helpText`, native-host detection (argv[1] is `chrome-extension://…`), `dispatch(command, flags)` switch used by both the top level and `batch`. |
+| `main.swift` | appex detection (→ `SafariExtensionHost.main`) and the container app's no-op launch, `helpText`, native-host detection (argv[1] is `chrome-extension://…`), `dispatch(command, flags)` switch used by both the top level and `batch`. |
 | `Flags.swift` | Dependency-free parser. `knownBooleans` is the list of value-less flags. Helpers: `required`, `int`, `int32`, `boundedInt`, `double`, `point`, `list`. |
 | `Output.swift` | `Output.emit` (JSON or text, secrets masked), `Output.fail` (structured stderr, exit 1), `ActionResult`, `VerifiedActionResult`, `Aftermath`. |
 | `AfterAction.swift` | `AfterAction.run(flags,app,guarded)`: settle → focus verdict → `observe` (re-capture the session's snapshot with the same shaping/limits, save, diff). Observation is skipped with `--no-observe` or when the session has no accessibility snapshot of that pid. |
 | `Commands.swift` | Desktop verbs. Shared: `resolveTarget`, `resolveApp`, `deliveryMode` (auto never falls back to foreground), `deliverClick`, `focusGuard`, `assertForegroundIsSafe`, `snapshotWindow` (re-identify the snapshot's window), `requireEnabled`. Verbs: apps, launch, policy, windows, snapshot (`--diff`, `--query`), click, action, set-value, replace, type, focus, menu, menu-item, scan, window, key, paste, scroll, drag, screenshot, doctor. |
 | `Batch.swift` | JSONL steps → `Flags` → `dispatch`. Inherits app/session/mode/window flags and json/no-observe/allow-sensitive/force/screen booleans from the batch invocation. Stops at first failure. |
-| `BrowserCommands.swift` | `amcu browser` verbs, all thin: build params, `client.request(method)`, render `after`/`effect` lines. |
+| `BrowserCommands.swift` | `amcu browser` verbs, all thin: build params, `client.request(method)`, render `after`/`effect` lines. `install/doctor/uninstall --browser safari` and the hidden `safari-relay` verb route to the Safari modules; `upload` attaches file bytes for Safari. |
 | `LabCommands.swift` | `amcu lab start/status/targets/cdp/stop`. |
 | `Guide.swift`, `BrowserGuide.swift` | The agent-facing manuals printed by `amcu guide` / `amcu browser guide`. Keep in sync with behaviour. |
 | `Skill.swift` | The SKILL.md text: positions amcu as the computer-use/browser-use tool, points to the guides. `amcu skill` prints it, `amcu skill --install [--dir D]` writes it; `skills/amcu/SKILL.md` is generated from it. |
@@ -70,6 +75,16 @@ Commands.<verb>       Permissions.requireAccessibility → resolveTarget / Sessi
 - `background.js` (service worker): connects to the native host (`chrome.runtime.connectNative`), receives JSON-RPC requests, resolves tabs (amcu's own background window vs a user tab pinned with `tab --select`), attaches `chrome.debugger` for input/screenshot/eval/console/network, calls the content script for reading, and reports what an action caused (`settle`, `waitForNavigation`, `armObserver/reportObserver`).
 - `content.js`: computes the accessibility outline in-page (roles, names, states, visibility, refs `eN`, frames `fNeN`), `measure` (click geometry), `value`, `focus`, `find`. No debugger needed for reading.
 - `manifest.json` version must match `Version.swift`.
+
+## Safari extension (`safari/extension/`)
+
+- `background.js` (non-persistent background page): long-polls the relay with `browser.runtime.sendNativeMessage({type:"poll"})` (the appex holds each poll up to 15 s), answers with `{type:"response"}`; restarts the loop from alarms (1 min), tab events and startup. Implements the verbs with tabs/scripting/webNavigation/captureVisibleTab and the shared content script; refuses console/network/dialog/drag/resize/window.
+- `content.js` is not copied: the installer writes the Chrome extension's (`extension/content.js`), whose synthetic-input ops (`synthetic-click/hover/key`, `insert-text`, `scroll-by`, `set-files`) exist for Safari.
+- `manifest.json` (MV3) version must match `Version.swift`; `Scripts/embed-extension.py` refuses a mismatch.
+
+```
+CLI ─unix socket (native-host protocol)─▶ relay (app executable) ◀─TCP 127.0.0.1 + token─ appex ◀─sendNativeMessage─ background.js ─tabs.sendMessage─▶ content.js
+```
 
 ## Data on disk
 
@@ -81,3 +96,6 @@ Commands.<verb>       Permissions.requireAccessibility → resolveTarget / Sessi
 | `~/Library/Application Support/amcu/lab/` | Lab Chrome state and profiles. |
 | `~/.config/amcu/policy.json` | User policy. |
 | `~/Library/Application Support/amcu/extension/` | Unpacked extension written by `browser install`. |
+| `~/Applications/amcu Safari Bridge.app` | Safari container app (`AMCU_SAFARI_APP` relocates it); the appex Info.plist holds the relay port and token. |
+| `~/Library/Caches/amcu/browser/safari-<pid>.sock` | Safari relay socket. |
+| `~/Library/Logs/amcu/safari-relay.log` | Relay stderr. |

@@ -17,6 +17,7 @@ FIRST CONTACT
   `amcu browser doctor` tells you whether a browser is connected. If not, the
   user has a one-time setup: `amcu browser install`, then Load unpacked in
   chrome://extensions. Say so and stop; you cannot do that part for them.
+  Safari is separate and opt-in: see SAFARI below.
 
 THE NORMAL SEQUENCE
   1. `amcu browser tabs` — see what is open. Every tab has an id.
@@ -167,6 +168,44 @@ TABS, WINDOWS AND VISIBILITY
   Concurrent agents: use `--session NAME`; each session has its own current
   tab (they share the one amcu window). Several browsers or profiles:
   `--browser chrome|edge|…`.
+
+SAFARI (--browser safari)
+  Safari has no debugger API and no stdio native messaging, so it has its own
+  bridge: a small container app (`amcu browser install --browser safari`
+  builds it into ~/Applications/amcu Safari Bridge.app) whose extension
+  long-polls a relay that amcu starts on demand. Safari is used only when you
+  name it: `--browser safari` on every command, or AMCU_BROWSER=safari.
+  One-time setup needs the user (you cannot do it for them; say so and stop):
+  Safari Settings → Developer → "Allow unsigned extensions" (password; Safari
+  clears it every time it quits), Settings → Extensions → turn on amcu bridge
+  and allow it on all websites. `amcu browser doctor --browser safari` names
+  the step that is missing. A bridge_unavailable right after the user
+  restarted Safari almost always means "Allow unsigned extensions" is off again.
+  What differs from Chrome — the result lines say which path was taken:
+  - Input is synthetic: click/hover/key/type/fill dispatch DOM events
+    (isTrusted=false) and say "synthetic". Most pages react; pages that check
+    isTrusted, CSS :hover, and browser-level shortcuts (cmd+L, cmd+T) do not.
+    `key` reports the default action it reproduced (text, Enter submitting a
+    form or breaking a line, Backspace, Tab focus, cmd+A) or that it
+    reproduced none — then only page handlers saw the key.
+    `type` and `fill` go through the browser's editing command, so frameworks
+    see real input events; `fill` still reads the value back.
+  - `tab --new` opens an unselected tab in the user's front window: Safari
+    cannot open a window without bringing it and Safari to the front. There
+    is no amcu window; `window --show/--hide/--close` and `resize` refuse.
+  - `screenshot` captures only the selected tab's visible area. A background
+    tab is refused (capture_failure) — read it with `snapshot` instead, or
+    make it visible with `tab --select ID --activate` only if the user agreed.
+    `--full` is refused; `--ref` crops the visible capture (main frame only).
+  - `eval` runs in the page's own world. Pages whose Content-Security-Policy
+    forbids compiling strings refuse it (unsupported) — use snapshot/find.
+  - `upload` sends the file bytes (25 MB total) and assigns them through a
+    DataTransfer — programmatic, reported as such.
+  - Refused with unsupported: console, network, dialog, drag. A JavaScript
+    dialog blocks the page and Safari gives extensions no handle on it; desktop
+    amcu can press its button (`amcu snapshot --app com.apple.Safari`).
+  - Safari may put the extension's background page to sleep; it wakes on its
+    one-minute alarm or when any tab loads. A first command can take that long.
 
 WHEN THINGS STOP RESPONDING
   A blocked page usually means an alert/confirm/prompt is open:

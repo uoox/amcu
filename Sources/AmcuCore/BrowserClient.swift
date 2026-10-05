@@ -8,6 +8,10 @@ public struct BrowserEndpoint: Encodable {
     public let extensionVersion: String?
     public let hostVersion: String?
     public let since: String?
+    /// False for a relay whose extension has not checked in lately (Safari):
+    /// it exists, but a request would only wait. Chrome hosts are always
+    /// ready — the browser spawns them for a live extension.
+    public var ready: Bool = true
 
     public var label: String { "\(browser) (pid \(pid))" }
 }
@@ -44,7 +48,8 @@ public final class BrowserClient {
                 socket: path,
                 extensionVersion: result["extensionVersion"] as? String,
                 hostVersion: result["hostVersion"] as? String,
-                since: result["since"] as? String
+                since: result["since"] as? String,
+                ready: result["ready"] as? Bool ?? true
             ))
         }
         return endpoints
@@ -54,6 +59,10 @@ public final class BrowserClient {
     /// `edge`, …) or `name:pid`; without one, a lone host is used, otherwise
     /// Chrome is preferred and the choice is reported in the result.
     public static func select(_ selector: String?) throws -> BrowserClient {
+        // Safari's relay is started on demand, by the first command that asks for Safari.
+        if SafariBridge.isSafariSelector(selector) && !discover().contains(where: { $0.browser == SafariBridge.browserName }) {
+            try SafariRelay.ensureRunning()
+        }
         let endpoints = discover()
         guard !endpoints.isEmpty else {
             throw AmcuError(.bridgeUnavailable, "no browser is connected to amcu", nextSteps: [
@@ -76,7 +85,11 @@ public final class BrowserClient {
             return BrowserClient(endpoint: match)
         }
         if endpoints.count == 1 { return BrowserClient(endpoint: endpoints[0]) }
-        let preferred = endpoints.first { $0.browser == "chrome" } ?? endpoints[0]
+        // A Safari relay whose extension is not polling would only time out;
+        // without an explicit --browser, a live browser wins.
+        let live = endpoints.filter(\.ready)
+        let pool = live.isEmpty ? endpoints : live
+        let preferred = pool.first { $0.browser == "chrome" } ?? pool[0]
         return BrowserClient(endpoint: preferred)
     }
 

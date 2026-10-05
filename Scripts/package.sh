@@ -23,7 +23,7 @@ binary="$bin_dir/amcu"
 
 version="$("$binary" --version)"
 if [ -n "$expected_tag" ] && [ "$expected_tag" != "v$version" ]; then
-    echo "error: tag $expected_tag but the binary reports $version — bump Sources/AmcuCore/Version.swift (and extension/manifest.json) first" >&2
+    echo "error: tag $expected_tag but the binary reports $version — bump Sources/AmcuCore/Version.swift (and both extension manifests) first" >&2
     exit 1
 fi
 

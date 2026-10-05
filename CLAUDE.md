@@ -21,6 +21,8 @@ skills/amcu/        SKILL.md generated from Skill.swift; what `amcu skill --inst
 Sources/AmcuTests/  plain executable test runner (no XCTest): swift run -c release amcu-tests
 Tests/e2e/          live AppKit probes + run.sh (AMCU_E2E=1), needs a logged-in session
 extension/          Chrome extension source; embedded into ExtensionBundle.swift by Scripts/embed-extension.py
+safari/extension/   Safari Web Extension (own background.js; content.js/icons shared from extension/);
+                    embedded into SafariExtensionBundle.swift by the same script
 Scripts/            install.sh, package.sh, embed-extension.py
 docs/               ARCHITECTURE.md, DESIGN.md, browser-use-ideas.md (backlog of browser ideas with verdicts)
 ```
@@ -28,9 +30,9 @@ docs/               ARCHITECTURE.md, DESIGN.md, browser-use-ideas.md (backlog of
 ## Workflow
 
 - Build: `swift build -c release`. Test: `swift run -c release amcu-tests` (must stay green; add cases to `Sources/AmcuTests/*Tests.swift`, wire new files in `main.swift`). Live check: `AMCU_E2E=1 Tests/e2e/run.sh`.
-- Changing `extension/*`: run `python3 Scripts/embed-extension.py` afterwards; CI diffs the generated file.
+- Changing `extension/*` or `safari/extension/*`: run `python3 Scripts/embed-extension.py` afterwards; CI diffs the generated files.
 - Changing `Sources/amcu/Skill.swift`: run `.build/release/amcu skill > skills/amcu/SKILL.md`; CI diffs it.
-- Version: bump `Sources/AmcuCore/Version.swift` **and** `extension/manifest.json`, then re-embed. Tags are `vX.Y.Z`; `Scripts/package.sh` refuses a mismatch.
+- Version: bump `Sources/AmcuCore/Version.swift`, `extension/manifest.json` **and** `safari/extension/manifest.json`, then re-embed. Tags are `vX.Y.Z`; `Scripts/package.sh` refuses a mismatch.
 - Quick live verification against TextEdit: `amcu launch --app com.apple.TextEdit`, `amcu key --app com.apple.TextEdit --key n --mod cmd`, then `snapshot`, `set-value --element N`, and read the printed diff.
 - Commit messages describe behaviour from the agent-user's point of view (see `git log`).
 

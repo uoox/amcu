@@ -115,7 +115,19 @@ NOTES
   snapshot instead of clicking the wrong control.
 """
 
+// Inside the Safari container app, this binary is also the app extension:
+// Safari launches it from the .appex bundle and expects NSExtensionMain.
+if SafariExtensionHost.isRunningAsAppex {
+    SafariExtensionHost.main()
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
+
+// Opened from Finder or Launch Services, the container app has nothing to
+// show: it exists to carry the extension and to run the relay.
+if Bundle.main.bundleIdentifier == SafariBridge.appBundleID && arguments.allSatisfy({ $0.hasPrefix("-psn") || $0 == "-NSDocumentRevisionsDebugMode" }) {
+    exit(0)
+}
 
 // The browser launches this binary as the extension's native messaging host
 // with the extension origin as the only argument. Nothing else looks like that.
