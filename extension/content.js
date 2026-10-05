@@ -1405,6 +1405,228 @@
     return { fromEarlierSnapshot, description: describeElement(el) };
   }
 
+  // ---------------------------------------------------------------------------
+  // Synthetic input, for browsers whose extensions have no trusted input path
+  // (Safari: no debugger API). Events dispatched here carry isTrusted=false;
+  // the background reports every result that used them as synthetic. Chrome
+  // never calls these — it delivers real input through the debugger.
+
+  function deepActiveElement() {
+    let active = document.activeElement;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+    return active || document.body;
+  }
+
+  function eventInit(params, x, y) {
+    const mods = params.modifiers || {};
+    return {
+      bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: x, clientY: y, screenX: x + (window.screenX || 0), screenY: y + (window.screenY || 0),
+      ctrlKey: !!mods.ctrl, altKey: !!mods.alt, shiftKey: !!mods.shift, metaKey: !!mods.meta
+    };
+  }
+
+  // The element a pointer at (x, y) would hit, if it is the ref or inside it;
+  // otherwise the ref itself (measure already refused covered targets).
+  function pointerTarget(el, x, y) {
+    const hit = typeof x === 'number' ? document.elementFromPoint(x, y) : null;
+    return hit && (hit === el || el.contains(hit)) ? hit : el;
+  }
+
+  function syntheticHover(params) {
+    const { el, fromEarlierSnapshot } = resolveRef(params.ref);
+    const target = pointerTarget(el, params.x, params.y);
+    const init = eventInit(params, params.x, params.y);
+    const pointer = Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, init);
+    target.dispatchEvent(new PointerEvent('pointerover', pointer));
+    target.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, pointer, { bubbles: false })));
+    target.dispatchEvent(new MouseEvent('mouseover', init));
+    target.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, init, { bubbles: false })));
+    target.dispatchEvent(new PointerEvent('pointermove', pointer));
+    target.dispatchEvent(new MouseEvent('mousemove', init));
+    return { fromEarlierSnapshot, description: describeElement(el) };
+  }
+
+  function syntheticClick(params) {
+    const { el, fromEarlierSnapshot } = resolveRef(params.ref);
+    const x = params.x, y = params.y;
+    const target = pointerTarget(el, x, y);
+    const button = params.button === 'right' ? 2 : params.button === 'middle' ? 1 : 0;
+    const buttons = button === 2 ? 2 : button === 1 ? 4 : 1;
+    const init = Object.assign(eventInit(params, x, y), { button });
+    const pointer = Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, init);
+    syntheticHover(params);
+    const count = Math.max(1, params.count || 1);
+    let clickDispatched = 0;
+    for (let i = 1; i <= count; i++) {
+      target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, pointer, { buttons, detail: i })));
+      const proceed = target.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, init, { buttons, detail: i })));
+      if (proceed && i === 1 && button === 0) {
+        // A real press focuses the nearest focusable ancestor (or blurs).
+        const focusable = target.closest && target.closest('a[href], button, input, select, textarea, summary, [tabindex], [contenteditable=""], [contenteditable="true"]');
+        if (focusable && !isDisabled(focusable)) {
+          try { focusable.focus({ preventScroll: true }); } catch (_) { /* not focusable after all */ }
+        } else if (document.activeElement && document.activeElement !== document.body) {
+          try { document.activeElement.blur(); } catch (_) { /* nothing to blur */ }
+        }
+      }
+      target.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, pointer, { buttons: 0, detail: i })));
+      target.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, init, { buttons: 0, detail: i })));
+      if (button === 0) {
+        // dispatchEvent of a click runs the element's activation behaviour
+        // (follow a link, toggle a checkbox, submit a form) like a real one.
+        target.dispatchEvent(new MouseEvent('click', Object.assign({}, init, { detail: i })));
+        clickDispatched += 1;
+      } else if (button === 1) {
+        target.dispatchEvent(new MouseEvent('auxclick', Object.assign({}, init, { detail: i })));
+      } else {
+        target.dispatchEvent(new MouseEvent('contextmenu', Object.assign({}, init, { detail: i })));
+      }
+    }
+    if (count >= 2 && button === 0) target.dispatchEvent(new MouseEvent('dblclick', Object.assign({}, init, { detail: 2 })));
+    return { fromEarlierSnapshot, description: describeElement(el), clicks: clickDispatched, target: target === el ? null : describeElement(target) };
+  }
+
+  // Text into the focused field. execCommand goes through the browser's own
+  // editing machinery (beforeinput/input fire, frameworks and undo see it);
+  // the value setter is the fallback for fields execCommand will not touch.
+  function insertText(params) {
+    const el = deepActiveElement();
+    const text = String(params.text === undefined ? '' : params.text);
+    const before = readValue(el);
+    let mode = null;
+    try {
+      if (document.execCommand('insertText', false, text)) mode = 'execCommand';
+    } catch (_) { /* fall through */ }
+    if (mode && readValue(el) === before && text.length) mode = null;
+    if (!mode && isTextInput(el)) {
+      const value = el.value || '';
+      let start = value.length, end = value.length;
+      try { start = el.selectionStart ?? start; end = el.selectionEnd ?? end; } catch (_) { /* no selection API */ }
+      const proto = tagOf(el) === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      el.dispatchEvent(new InputEvent('beforeinput', { inputType: 'insertText', data: text, bubbles: true, cancelable: true, composed: true }));
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value.slice(0, start) + text + value.slice(end));
+      try { el.setSelectionRange(start + text.length, start + text.length); } catch (_) { /* not selectable */ }
+      el.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: text, bubbles: true, composed: true }));
+      mode = 'js:setter';
+    }
+    if (!mode) {
+      throw new BridgeError('unsupported', `the focused element (${describeElement(el)}) did not accept text`, [
+        'Focus a text field first (type/fill do this from --ref), or use desktop amcu to type into the Safari window.'
+      ]);
+    }
+    return { mode, value: readValue(el) };
+  }
+
+  function editableFocused(el) {
+    return isTextInput(el) || (el && el.isContentEditable);
+  }
+
+  function focusables() {
+    return Array.from(document.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex], [contenteditable=""], [contenteditable="true"]'))
+      .filter(el => !isDisabled(el) && el.tabIndex >= 0 && hasBox(el));
+  }
+
+  // One key press: keydown, keypress for characters, keyup — and, unless the
+  // page cancels the keydown, the default action a person's key would have
+  // had, as far as it can be reproduced: text insertion, deletion, Enter
+  // submitting a form or breaking a line, Tab moving focus, select-all.
+  function syntheticKey(params) {
+    const el = deepActiveElement();
+    const mods = params.modifiers || {};
+    const init = {
+      key: params.key, code: params.code || '', keyCode: params.keyCode || 0, which: params.keyCode || 0,
+      bubbles: true, cancelable: true, composed: true,
+      ctrlKey: !!mods.ctrl, altKey: !!mods.alt, shiftKey: !!mods.shift, metaKey: !!mods.meta
+    };
+    const proceed = el.dispatchEvent(new KeyboardEvent('keydown', init));
+    let action = null;
+    const chord = mods.ctrl || mods.meta || mods.alt;
+    if (proceed) {
+      if (params.text && !chord) {
+        el.dispatchEvent(new KeyboardEvent('keypress', Object.assign({}, init, { charCode: params.text.charCodeAt(0) })));
+      }
+      if (params.key === 'Enter' && !chord) {
+        if (tagOf(el) === 'textarea' || (el.isContentEditable)) {
+          try { document.execCommand(el.isContentEditable ? 'insertParagraph' : 'insertLineBreak'); action = 'newline'; } catch (_) { /* ignored */ }
+        } else if (el.form) {
+          if (typeof el.form.requestSubmit === 'function') el.form.requestSubmit(); else el.form.submit();
+          action = 'submit';
+        } else if (tagOf(el) === 'a' || tagOf(el) === 'button') {
+          el.click();
+          action = 'activate';
+        }
+      } else if (params.key === 'Backspace' && editableFocused(el)) {
+        try { document.execCommand('delete'); action = 'delete'; } catch (_) { /* ignored */ }
+      } else if (params.key === 'Delete' && editableFocused(el)) {
+        try { document.execCommand('forwardDelete'); action = 'delete'; } catch (_) { /* ignored */ }
+      } else if (params.key === 'Tab' && !chord) {
+        const list = focusables();
+        const index = list.indexOf(el);
+        const next = list[(index + (mods.shift ? -1 : 1) + list.length) % list.length];
+        if (next) { next.focus(); action = 'focus'; }
+      } else if (params.key === ' ' && !chord && !editableFocused(el) && (tagOf(el) === 'button' || (tagOf(el) === 'input' && ['checkbox', 'radio', 'button', 'submit'].includes((el.type || '').toLowerCase())))) {
+        el.click();
+        action = 'activate';
+      } else if ((params.key === 'a' || params.key === 'A') && (mods.meta || mods.ctrl) && !mods.alt) {
+        try { document.execCommand('selectAll'); action = 'select-all'; } catch (_) { /* ignored */ }
+      } else if (params.text && !chord && editableFocused(el)) {
+        try { if (document.execCommand('insertText', false, params.text)) action = 'insert'; } catch (_) { /* ignored */ }
+      }
+    }
+    el.dispatchEvent(new KeyboardEvent('keyup', init));
+    return { cancelled: !proceed, action, target: describeElement(el) };
+  }
+
+  function scrollBy(params) {
+    let target = null;
+    let description = 'viewport';
+    if (params.ref) {
+      const { el } = resolveRef(params.ref);
+      description = describeElement(el);
+      target = el;
+      while (target && target !== document.body && target !== document.documentElement) {
+        const style = getComputedStyle(target);
+        if (/(auto|scroll|overlay)/.test(style.overflowY + style.overflowX) && (target.scrollHeight > target.clientHeight || target.scrollWidth > target.clientWidth)) break;
+        target = target.parentElement;
+      }
+      if (target === document.body || target === document.documentElement) target = null;
+    }
+    const scroller = target || document.scrollingElement || document.documentElement;
+    const before = { x: scroller.scrollLeft, y: scroller.scrollTop };
+    // amcu convention: positive dy scrolls up (content moves down).
+    const dx = -(params.dx || 0), dy = -(params.dy || 0);
+    if (target) target.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    else window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    const after = { x: scroller.scrollLeft, y: scroller.scrollTop };
+    return { at: description, moved: before.x !== after.x || before.y !== after.y, before, after };
+  }
+
+  function setFiles(params) {
+    const { el, fromEarlierSnapshot } = resolveRef(params.ref);
+    if (tagOf(el) !== 'input' || (el.getAttribute('type') || '').toLowerCase() !== 'file') {
+      throw new BridgeError('unsupported', `element ${params.ref} (${describeElement(el)}) is not an <input type="file">`, [
+        'Find the file input in the snapshot (it may be hidden; use --all-refs or --selector input[type=file]).'
+      ]);
+    }
+    const files = params.files || [];
+    if (files.length > 1 && !el.multiple) {
+      throw new BridgeError('invalid_argument', `element ${params.ref} accepts a single file; ${files.length} were given`);
+    }
+    const transfer = new DataTransfer();
+    for (const f of files) {
+      const binary = atob(f.data || '');
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      transfer.items.add(new File([bytes], f.name, { type: f.type || '', lastModified: f.lastModified || Date.now() }));
+    }
+    el.files = transfer.files;
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    const names = Array.from(el.files || []).map(f => f.name);
+    return { fromEarlierSnapshot, description: describeElement(el), names, verified: names.length === files.length };
+  }
+
   function tagElement(params) {
     const { el } = resolveRef(params.ref);
     if (params.nonce) el.setAttribute('data-amcu-target', params.nonce);
@@ -1575,6 +1797,18 @@
         return { ok: true };
       case 'observe-report':
         return observeReport(message.params || {});
+      case 'synthetic-click':
+        return syntheticClick(message.params);
+      case 'synthetic-hover':
+        return syntheticHover(message.params);
+      case 'insert-text':
+        return insertText(message.params);
+      case 'synthetic-key':
+        return syntheticKey(message.params);
+      case 'scroll-by':
+        return scrollBy(message.params);
+      case 'set-files':
+        return setFiles(message.params);
       case 'describe': {
         const { el, fromEarlierSnapshot } = resolveRef(message.params.ref);
         return { description: describeElement(el), fromEarlierSnapshot };

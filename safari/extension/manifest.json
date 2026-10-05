@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "amcu bridge",
+  "version": "0.10.0",
+  "description": "Lets the amcu command-line tool read and drive Safari tabs. Talks only to the amcu relay on this Mac, through the app that carries the extension.",
+  "permissions": [
+    "nativeMessaging",
+    "tabs",
+    "scripting",
+    "webNavigation",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": { "scripts": ["background.js"] },
+  "action": {
+    "default_title": "amcu bridge",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  },
+  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+}

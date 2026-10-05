@@ -17,7 +17,10 @@ enum BrowserCommands {
       install     [--browser chrome,edge]   register the native host and write the extension folder
                   [--extension-dir D] [--manifest-dir D]   (a browser run with --user-data-dir reads
                                         <that dir>/NativeMessagingHosts; point --manifest-dir there)
-      doctor                                check registration, extension, connection
+                  --browser safari          build and register the Safari container app (~/Applications/
+                                            amcu Safari Bridge.app) and print the one-time Safari steps
+      uninstall   --browser safari          remove the Safari container app
+      doctor      [--browser safari]        check registration, extension, connection
       status                                what is connected, attached, and current
       guide                                 operating instructions for an agent
 
@@ -67,13 +70,24 @@ enum BrowserCommands {
     COMMON FLAGS
       --tab ID          act on a specific tab instead of the session's current one
       --session NAME    keep a separate current tab per agent (default: "default")
-      --browser NAME    chrome, edge, brave, … or NAME:PID when several are connected
+      --browser NAME    chrome, edge, brave, safari, … or NAME:PID when several are connected
+                        (Safari is used only when named; see SAFARI below)
       --timeout S       per-command limit in seconds (default 30; navigation and wait honour it)
       --secrets FILE    dotenv KEY=VALUE file (or $AMCU_SECRETS): enables --secret KEY and masks
                         the values in all output (snapshots/echoes reliably; network/console
                         best-effort — re-encoded copies are not caught); a KEY__DOMAINS=a.com,*.b.org
                         line restricts where KEY may be typed (refused elsewhere: secret_scope)
       --json            machine-readable output
+
+    SAFARI (--browser safari)
+      Works: tabs, frames, tab --new/--select/--close, navigate, back, forward,
+      reload, snapshot, find, wait, eval (page world; strict-CSP pages refuse),
+      click, hover, type, fill, select-option, key, scroll, upload, screenshot.
+      Input is synthetic (DOM events, isTrusted=false) and results say so.
+      tab --new opens an unselected tab in the user's front window (Safari
+      cannot open a window without focusing it). screenshot captures only the
+      selected tab's visible area (no --full). Refused: console, network,
+      dialog, drag, resize, window --show/--hide/--close.
 
     Refs look like e12 (main frame) or f42e12 (frame 42). They are re-verified
     against the element's role and name before use; a changed page yields a
@@ -98,7 +112,9 @@ enum BrowserCommands {
         }
         switch verb {
         case "install": try install(flags)
+        case "uninstall": try uninstall(flags)
         case "doctor": try doctor(flags)
+        case "safari-relay": try safariRelay(flags)
         case "status": try status(flags)
         case "guide": print(browserGuideText)
         case "help": print(helpText)
@@ -276,13 +292,18 @@ enum BrowserCommands {
     // MARK: - Setup
 
     static func install(_ flags: Flags) throws {
-        let browsers = flags.list("browser")
+        var browsers = flags.list("browser")
+        if browsers.contains(where: { $0.lowercased() == SafariBridge.browserName }) {
+            try installSafari(flags)
+            browsers.removeAll { $0.lowercased() == SafariBridge.browserName }
+            if browsers.isEmpty { return }
+        }
         let directory = flags.string("extension-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
         let manifestDirectory = flags.string("manifest-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
         let report = try BrowserInstall.install(browsers: browsers, extensionDirectory: directory, manifestDirectory: manifestDirectory)
         // A running extension can reload itself to pick up the new files.
         var reloaded: [String] = []
-        for endpoint in BrowserClient.discover() {
+        for endpoint in BrowserClient.discover() where endpoint.browser != SafariBridge.browserName {
             if let client = try? BrowserClient.select("\(endpoint.browser):\(endpoint.pid)"),
                (try? client.request("extension.reload", timeout: 5)) != nil {
                 reloaded.append(endpoint.label)
@@ -317,7 +338,78 @@ enum BrowserCommands {
         }
     }
 
+    static func installSafari(_ flags: Flags) throws {
+        let report = try SafariInstall.install()
+        struct Payload: Encodable {
+            let ok = true
+            let safari: SafariInstall.InstallReport
+        }
+        Output.emit(Payload(safari: report)) {
+            var lines = ["built \(report.app) (\(report.version)), signed \(report.signer)"]
+            lines.append(report.registered
+                ? "registered the extension with the system (LaunchServices + pluginkit)"
+                : "warning: the system does not list the extension yet — run `amcu browser doctor --browser safari`")
+            lines.append("relay: starts on demand on 127.0.0.1:\(report.relayPort) (logs: \(SafariInstall.logURL.path))\(report.relayRestarted ? "; the old relay was stopped" : "")")
+            lines.append("")
+            lines.append("once, in Safari (a person has to do these):")
+            for (index, step) in report.steps.enumerated() { lines.append("  \(index + 1). \(step)") }
+            lines.append("then: amcu browser doctor --browser safari")
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    static func uninstall(_ flags: Flags) throws {
+        guard flags.list("browser").map({ $0.lowercased() }) == [SafariBridge.browserName] else {
+            throw AmcuError(.invalidArgument, "uninstall only handles --browser safari", nextSteps: [
+                "For Chrome-family browsers, remove the extension in the browser's extensions page; the native host manifest is a plain file `amcu browser doctor` lists."
+            ])
+        }
+        let removed = try SafariInstall.uninstall()
+        struct Payload: Encodable {
+            let ok = true
+            let removed: Bool
+            let app: String
+        }
+        Output.emit(Payload(removed: removed, app: SafariInstall.appURL.path)) {
+            removed ? "removed \(SafariInstall.appURL.path); Safari drops the extension from its list" : "nothing to remove: \(SafariInstall.appURL.path) does not exist"
+        }
+    }
+
+    /// The relay process, run from inside the container app (the CLI starts
+    /// it on demand; not meant to be typed).
+    static func safariRelay(_ flags: Flags) throws {
+        let info = NSDictionary(contentsOf: SafariInstall.appexInfoURL(SafariInstall.appURL)) as? [String: Any] ?? [:]
+        guard let config = SafariBridge.relayConfig(from: info) else {
+            throw AmcuError(.bridgeUnavailable, "no relay configuration in \(SafariInstall.appexInfoURL(SafariInstall.appURL).path)", nextSteps: [
+                "Run `amcu browser install --browser safari`."
+            ])
+        }
+        SafariRelay.run(config: config)
+    }
+
+    static func doctorSafari(_ flags: Flags) throws {
+        let status = SafariInstall.status()
+        let checks = SafariInstall.diagnose(status)
+        struct Payload: Encodable {
+            let ok: Bool
+            let status: SafariInstall.Status
+            let checks: [SafariInstall.Check]
+        }
+        Output.emit(Payload(ok: checks.allSatisfy(\.ok), status: status, checks: checks)) {
+            var lines = ["amcu browser doctor --browser safari — bridge \(AmcuVersion.string)"]
+            for check in checks {
+                lines.append("  [\(check.ok ? "ok" : "  ")] \(check.name): \(check.detail)")
+                for step in check.next { lines.append("       next: \(step)") }
+            }
+            return lines.joined(separator: "\n")
+        }
+    }
+
     static func doctor(_ flags: Flags) throws {
+        if flags.list("browser").map({ $0.lowercased() }).contains(SafariBridge.browserName) {
+            try doctorSafari(flags)
+            return
+        }
         let manifests = BrowserInstall.manifestStatuses()
         let onDisk = BrowserInstall.extensionOnDiskMatches()
         let endpoints = BrowserClient.discover()
@@ -381,6 +473,11 @@ enum BrowserCommands {
                         : "extension \(endpoint.extensionVersion ?? "?") — binary carries \(ExtensionBundle.version); run `amcu browser install` and Reload the extension"
                     lines.append("  [ok] connection: \(endpoint.label) — \(versionNote)")
                 }
+            }
+            if FileManager.default.fileExists(atPath: SafariInstall.appURL.path) {
+                lines.append("  safari: bridge app installed — `amcu browser doctor --browser safari` checks it")
+            } else {
+                lines.append("  safari: not set up (optional) — `amcu browser install --browser safari`")
             }
             return lines.joined(separator: "\n")
         }
@@ -453,6 +550,10 @@ enum BrowserCommands {
             params["wait"] = !flags.has("no-wait")
             let result = try client.request("tabs.create", params: params, timeout: try timeout(flags, default: 40))
             emit(client, action: "tab-new", result: result) {
+                if client.endpoint.browser == SafariBridge.browserName {
+                    let place = flags.has("activate") ? "selected in the user's front window" : "unselected in the user's front window — Safari cannot open a window without focusing it"
+                    return "opened \(tabLine(result["tab"])) (now current for this session, \(place))"
+                }
                 let place = flags.has("user-window")
                     ? (flags.has("activate") ? ", shown in the user's window" : ", in the user's window, unselected")
                     : (flags.has("activate") ? ", amcu's window focused" : ", in amcu's background window")
@@ -507,6 +608,7 @@ enum BrowserCommands {
         let result = try client.request("window.info", params: try baseParams(flags), timeout: 10)
         emit(client, action: "window", result: result) {
             guard !result["window"].isNull else {
+                if let note = result["note"].string { return note }
                 return "no amcu window is open (the first `amcu browser tab --new` creates it)"
             }
             let window = result["window"]
@@ -685,9 +787,14 @@ enum BrowserCommands {
             let path: String
             let bytes: Int
             let tab: AnyEncodable
+            let visibleOnly: Bool?
+            let clip: AnyEncodable?
         }
-        Output.emit(Payload(path: path, bytes: data.count, tab: result["tab"].encodable)) {
-            "wrote \(data.count) bytes of \(ext) to \(path) — \(tabLine(result["tab"]))"
+        let visibleOnly = result["visibleOnly"].bool
+        Output.emit(Payload(path: path, bytes: data.count, tab: result["tab"].encodable, visibleOnly: visibleOnly, clip: result["clip"].isNull ? nil : result["clip"].encodable)) {
+            var line = "wrote \(data.count) bytes of \(ext) to \(path) — \(tabLine(result["tab"]))"
+            if visibleOnly == true { line += " (visible area only)" }
+            return line
         }
     }
 
@@ -811,7 +918,9 @@ enum BrowserCommands {
         let client = try client(flags)
         let result = try client.request("hover", params: params, timeout: try timeout(flags))
         emit(client, action: "hover", result: result) {
-            "hover ok on \(result["ref"].string ?? "") (\(result["description"].string ?? "")) at \(result["point"]["x"].int ?? 0),\(result["point"]["y"].int ?? 0)"
+            var line = "hover ok on \(result["ref"].string ?? "") (\(result["description"].string ?? "")) at \(result["point"]["x"].int ?? 0),\(result["point"]["y"].int ?? 0)"
+            if let note = result["note"].string { line += " — synthetic: \(note)" }
+            return line
         }
     }
 
@@ -831,6 +940,7 @@ enum BrowserCommands {
         emit(client, action: "type", result: result) {
             var line = "type ok on \(result["ref"].string ?? "") (\(result["description"].string ?? "")): \(result["typed"].int ?? 0) characters"
             if result["submitted"].bool == true { line += ", then Enter" }
+            if result["synthetic"].bool == true { line += " (synthetic\(result["mode"].string.map { ": \($0)" } ?? ""))" }
             if let value = result["value"].string { line += " — value now \"\(value.count > 120 ? String(value.prefix(120)) + "…" : value)\"" }
             return ([line] + afterLines(result["after"])).joined(separator: "\n")
         }
@@ -886,7 +996,16 @@ enum BrowserCommands {
         let result = try client.request("key", params: params, timeout: try timeout(flags))
         emit(client, action: "key", result: result) {
             let combination = (modifiers + [result["key"].string ?? ""]).joined(separator: "+")
-            let line = "key ok: \(combination)\((result["count"].int ?? 1) > 1 ? " ×\(result["count"].int ?? 1)" : "") to \(tabLine(result["tab"]))"
+            var line = "key ok: \(combination)\((result["count"].int ?? 1) > 1 ? " ×\(result["count"].int ?? 1)" : "") to \(tabLine(result["tab"]))"
+            if result["synthetic"].bool == true {
+                if result["cancelled"].bool == true {
+                    line += " (synthetic; the page cancelled the keydown)"
+                } else if let action = result["defaultAction"].string {
+                    line += " (synthetic; default action reproduced: \(action))"
+                } else {
+                    line += " (synthetic; no default action reproduced — only page handlers saw it)"
+                }
+            }
             return ([line] + afterLines(result["after"])).joined(separator: "\n")
         }
     }
@@ -904,7 +1023,10 @@ enum BrowserCommands {
         let client = try client(flags)
         let result = try client.request("scroll", params: params, timeout: try timeout(flags))
         emit(client, action: "scroll", result: result) {
-            "scroll ok at \(result["at"].string ?? "viewport") (dx=\(dx) dy=\(dy))"
+            var line = "scroll ok at \(result["at"].string ?? "viewport") (dx=\(dx) dy=\(dy))"
+            if result["moved"].bool == false { line = "scroll at \(result["at"].string ?? "viewport") moved nothing (dx=\(dx) dy=\(dy)) — already at the edge, or not scrollable" }
+            if let mode = result["mode"].string { line += " via \(mode)" }
+            return line
         }
     }
 
@@ -958,9 +1080,15 @@ enum BrowserCommands {
         }
         params["files"] = files
         let client = try client(flags)
+        if client.endpoint.browser == SafariBridge.browserName {
+            // Safari's extension cannot read the disk; the bytes travel with the request.
+            params["fileData"] = try SafariBridge.uploadPayload(paths: files)
+        }
         let result = try client.request("upload", params: params, timeout: try timeout(flags))
         emit(client, action: "upload", result: result) {
-            "upload ok on \(result["ref"].string ?? ""): \(files.count) file\(files.count == 1 ? "" : "s")"
+            var line = "upload ok on \(result["ref"].string ?? ""): \(files.count) file\(files.count == 1 ? "" : "s")"
+            if let mode = result["mode"].string { line += " via \(mode)" }
+            return line
         }
     }
 

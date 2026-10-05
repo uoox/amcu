@@ -22,7 +22,7 @@ set-value ok on element 2 via ax:AXValue (verified) (settled 0.4s)
 - **Structure first, pixels last.** The accessibility tree gives roles, labels, values and actions: an order of magnitude fewer tokens than a screenshot, and element indices that survive the window moving. When a window draws its own interface and publishes nothing, `amcu scan` falls back to OCR and coordinate clicks, in the same index space.
 - **Background delivery that actually lands.** Coordinate clicks, scrolls and drags are posted to the target process and routed to its window (window-id fields plus `CGEventSetWindowLocation`). The real pointer never moves. Because that path relies on a private symbol, `amcu doctor` verifies once per OS build that a routed click lands where it was aimed, and coordinate clicks are refused rather than allowed to misfire.
 - **Every action reports what happened.** Actions wait for the application to stop emitting accessibility notifications, then re-capture and print only the diff (`~` changed, `+` added, `- [a..b]` removed, or `# no change`). Indices stay stable across captures. Writes are read back and a mismatch is an error, not a caveat. A background input that stole focus is reported instead of hidden.
-- **Your own browser, no relay.** `amcu browser` drives tabs in your Chrome (or any Chromium) through a small extension that talks to amcu over native messaging: no debug port, no token, no separate profile, logged-in sessions intact. Pages are read as an outline with stable refs; input goes through the debugger protocol so it reaches tabs that are not even visible.
+- **Your own browser, no relay.** `amcu browser` drives tabs in your Chrome (or any Chromium) through a small extension that talks to amcu over native messaging: no debug port, no token, no separate profile, logged-in sessions intact. Pages are read as an outline with stable refs; input goes through the debugger protocol so it reaches tabs that are not even visible. Safari works too (`--browser safari`), through a container app amcu builds and a Safari Web Extension; Safari offers extensions no debugger, so input there is synthetic and console/network/dialogs are not available.
 - **Refuses instead of guessing.** Disabled controls, stale indices, ambiguous app names, password managers, foreground delivery to a background app: each is a structured error with a code and concrete next steps. Never a silent no-op.
 
 ## Install
@@ -35,7 +35,7 @@ amcu doctor --request     # macOS prompts for Accessibility (and Screen Recordin
 amcu doctor               # every line should read [ok]
 ```
 
-Permissions belong to **whatever runs amcu** (your terminal or the agent host), not to the binary; `doctor` names that host on its `subject:` line. For web pages: `amcu browser install`, then load the unpacked extension it names in `chrome://extensions`.
+Permissions belong to **whatever runs amcu** (your terminal or the agent host), not to the binary; `doctor` names that host on its `subject:` line. For web pages: `amcu browser install`, then load the unpacked extension it names in `chrome://extensions`. For Safari: `amcu browser install --browser safari`, then the three Safari settings it prints (allow unsigned extensions, enable the extension, allow it on all websites).
 
 From source: `swift build -c release` (Command Line Tools are enough) and copy `.build/release/amcu` onto your PATH. Do not put it in a package manager's prefix.
 

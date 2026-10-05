@@ -31,5 +31,5 @@ jobs:
         run: .build/release/amcu skill | diff - skills/amcu/SKILL.md
       - name: Check extension
         run: |
-          for f in extension/*.js; do node --check "$f"; done
-          python3 Scripts/embed-extension.py && git diff --exit-code -- Sources/AmcuCore/ExtensionBundle.swift
+          for f in extension/*.js safari/extension/*.js; do node --check "$f"; done
+          python3 Scripts/embed-extension.py && git diff --exit-code -- Sources/AmcuCore/ExtensionBundle.swift Sources/AmcuCore/SafariExtensionBundle.swift
