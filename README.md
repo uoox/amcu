@@ -35,7 +35,7 @@ amcu doctor --request     # macOS prompts for Accessibility (and Screen Recordin
 amcu doctor               # every line should read [ok]
 ```
 
-Permissions belong to **whatever runs amcu** (your terminal or the agent host), not to the binary; `doctor` names that host on its `subject:` line. For web pages: `amcu browser install`, then load the unpacked extension it names in `chrome://extensions`. For Safari: `amcu browser install --browser safari`, then the three Safari settings it prints (allow unsigned extensions, enable the extension, allow it on all websites).
+Permissions belong to **whatever runs amcu** (your terminal or the agent host), not to the binary; `doctor` names that host on its `subject:` line. For web pages: `amcu browser install`, then load the unpacked extension it names in `chrome://extensions` — once in every profile you want driven. Each profile is then its own connection: `amcu browser profiles` lists them, `--profile NAME` picks one, and a command that could mean several is refused rather than sent to the first. For Safari: `amcu browser install --browser safari`, then the three Safari settings it prints (allow unsigned extensions, enable the extension, allow it on all websites).
 
 From source: `swift build -c release` (Command Line Tools are enough) and copy `.build/release/amcu` onto your PATH. Do not put it in a package manager's prefix.
 

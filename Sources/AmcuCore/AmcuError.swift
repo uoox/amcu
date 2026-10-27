@@ -29,6 +29,9 @@ public struct AmcuError: Error, CustomStringConvertible {
         /// A `--secret KEY` restricted by `KEY__DOMAINS` was aimed at a tab or
         /// frame whose host is not on the list.
         case secretScope = "secret_scope"
+        /// More than one browser connection (profile) could take the command
+        /// and neither --browser nor --profile narrowed it to one.
+        case ambiguousBrowser = "ambiguous_browser"
     }
 
     public let code: Code

@@ -18,6 +18,9 @@ async function refresh() {
       ? 'The native host is not registered. In a terminal run <code>amcu browser install</code>, then reload this extension.'
       : 'Last error: ' + reason + '. Run <code>amcu browser doctor</code>.';
   }
+  const { amcu_identity: identity } = await chrome.storage.local.get('amcu_identity');
+  document.getElementById('label').textContent = identity && identity.label ? identity.label : 'none (amcu browser label --name L)';
+  document.getElementById('instance').textContent = identity && identity.instanceId ? identity.instanceId : '?';
   document.getElementById('requests').textContent = status && status.requests ? String(status.requests) : '0';
   try {
     const targets = await chrome.debugger.getTargets();

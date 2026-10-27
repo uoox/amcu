@@ -44,8 +44,9 @@ Commands.<verb>       Permissions.requireAccessibility → resolveTarget / Sessi
 | `ChromiumAccessibility.swift` | Ask Chromium/Electron hosts to publish their tree (`AXManualAccessibility` only). | `requiresActivation`, `looksLikeChromiumHost`, `activate` |
 | `NumericBounds.swift`, `AmcuError.swift`, `Version.swift` | Input narrowing, error type with codes, version string. | `AmcuError.Code` (app_not_found, stale_snapshot, permission_denied, unsupported, …) |
 | `BrowserBridge.swift` | Protocol pieces shared with the extension: framing, socket naming, ref parsing, error mapping. | `BrowserBridge.hostName`, `frame/unframe`, `socketURL`, `parseRef` (`e12`, `f42e12`), `JSONValue` |
-| `NativeHost.swift` | The process Chrome spawns for the extension: relays JSON-RPC between a Unix socket (`~/Library/Caches/amcu/browser/`) and native messaging stdio. | `NativeHost.run`, `HostRuntime` |
-| `BrowserClient.swift` | CLI side: discover sockets, send a request, wait for the reply. | `BrowserEndpoint`, `BrowserClient.discover/select/request` |
+| `NativeHost.swift` | The process Chrome spawns for the extension (one per profile): relays JSON-RPC between a Unix socket (`~/Library/Caches/amcu/browser/`) and native messaging stdio. Answers `hello` itself with browser, versions, the extension's `instanceId`/`label`, and the inferred `userDataDir`/`profileDir`/`profileName`. | `NativeHost.run`, `HostRuntime` (`profileInfo` caches the dir once found, re-reads the display name) |
+| `BrowserClient.swift` | CLI side: discover sockets, send a request, wait for the reply. | `BrowserEndpoint` (`fromHello`, `summary`, `ready`; unknown identity encoded as null), `BrowserClient.discover/select(browser:profile:)/request` (select starts the Safari relay on demand) |
+| `BrowserProfiles.swift` | Which profile a connection is, and which connection a command goes to. | `ProfileLocator` (`userDataDirectory` from the parent's `--user-data-dir` via `KERN_PROCARGS2` else the browser default, `profileDirectory` = byte search for `amcu_instance_<id>` in `<profile>/Local Extension Settings/<ext id>/*.log|*.ldb`, exactly one hit or nil, `profileName` from `Local State`), `BrowserSelection` (`choose`: --browser filter, --profile tiers label → dir → display name → whole id → id prefix, first tier with a hit, one left, else without selectors drop unready relays and prefer a lone Chrome, else `ambiguous_browser`; `selectingFlag`) |
 | `BrowserInstall.swift` | Writes native-messaging manifests for known browsers and the unpacked extension to disk. | `install`, `manifestStatuses`, `extensionOnDiskMatches` |
 | `ExtensionBundle.swift` | Generated: the extension files as strings. Do not edit; run `Scripts/embed-extension.py`. | `ExtensionBundle.version/id/files` |
 | `SafariBridge.swift` | Safari constants, the appex⇄relay wire (port/token from the appex Info.plist, constant-time token check), verbs refused up front, upload payloads, and `SafariRelayCore` — the socket-free queue of CLI requests, extension polls and responses (profile pinning, readiness, fast failure when nothing polls). | `SafariBridge.relayConfig/unsupportedError/isSafariSelector/uploadPayload`, `SafariRelayCore.submit/notePoll/poll/requeue/respond` |
@@ -72,7 +73,7 @@ Commands.<verb>       Permissions.requireAccessibility → resolveTarget / Sessi
 
 ## Extension (`extension/`)
 
-- `background.js` (service worker): connects to the native host (`chrome.runtime.connectNative`), receives JSON-RPC requests, resolves tabs (amcu's own background window vs a user tab pinned with `tab --select`), attaches `chrome.debugger` for input/screenshot/eval/console/network, calls the content script for reading, and reports what an action caused (`settle`, `waitForNavigation`, `armObserver/reportObserver`).
+- `background.js` (service worker): loads or creates its identity (`amcu_identity` = `{instanceId, label}` in `chrome.storage.local`, plus the marker key `amcu_instance_<id>` re-written at every start) before `connectNative`, so the first `hello` carries it; `identity` and `setLabel` handlers (setLabel persists, reads back, re-sends hello so the host's cache updates before the reply). Connects to the native host (`chrome.runtime.connectNative`), receives JSON-RPC requests, resolves tabs (amcu's own background window vs a user tab pinned with `tab --select`), attaches `chrome.debugger` for input/screenshot/eval/console/network, calls the content script for reading, and reports what an action caused (`settle`, `waitForNavigation`, `armObserver/reportObserver`).
 - `content.js`: computes the accessibility outline in-page (roles, names, states, visibility, refs `eN`, frames `fNeN`), `measure` (click geometry), `value`, `focus`, `find`. No debugger needed for reading.
 - `manifest.json` version must match `Version.swift`.
 
@@ -92,7 +93,8 @@ CLI ─unix socket (native-host protocol)─▶ relay (app executable) ◀─TCP
 |---|---|
 | `~/Library/Caches/amcu/session-<name>.json` | Last snapshot per session (indices, identities, paths). |
 | `~/Library/Caches/amcu/selfcheck.json` | Routed-click verdict, keyed by OS build. |
-| `~/Library/Caches/amcu/browser/<browser>-<pid>.sock` | Native host sockets. |
+| `~/Library/Caches/amcu/browser/<browser>-<pid>.sock` | Native host sockets, one per connected profile (pid is the host's). |
+| `<browser user data dir>/<profile>/Local Extension Settings/<ext id>/` | The extension's `chrome.storage.local`: identity and the `amcu_instance_<id>` marker the host searches for. |
 | `~/Library/Application Support/amcu/lab/` | Lab Chrome state and profiles. |
 | `~/.config/amcu/policy.json` | User policy. |
 | `~/Library/Application Support/amcu/extension/` | Unpacked extension written by `browser install`. |

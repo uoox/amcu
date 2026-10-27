@@ -965,7 +965,7 @@ enum Commands {
             if browsers.isEmpty {
                 lines.append("  [  ] browser bridge: no browser connected — optional; `amcu browser doctor` explains the one-time setup")
             } else {
-                lines.append("  [ok] browser bridge: \(browsers.map(\.label).joined(separator: ", ")) connected — `amcu browser` drives web pages")
+                lines.append("  [ok] browser bridge: \(browsers.map(\.summary).joined(separator: "; ")) connected — `amcu browser` drives web pages")
             }
             return lines.joined(separator: "\n")
         }

@@ -17,11 +17,17 @@ enum BrowserCommands {
       install     [--browser chrome,edge]   register the native host and write the extension folder
                   [--extension-dir D] [--manifest-dir D]   (a browser run with --user-data-dir reads
                                         <that dir>/NativeMessagingHosts; point --manifest-dir there)
+                  [--no-reload]             do not ask running extensions to reload themselves
+                                            (each browser profile loads the extension separately:
+                                            Load unpacked once in every profile amcu should drive)
                   --browser safari          build and register the Safari container app (~/Applications/
                                             amcu Safari Bridge.app) and print the one-time Safari steps
       uninstall   --browser safari          remove the Safari container app
-      doctor      [--browser safari]        check registration, extension, connection
+      doctor      [--browser safari]        check registration, extension, every connection
       status                                what is connected, attached, and current
+      profiles                              every connection: browser, profile dir and name, label,
+                                            instance id, tabs, and the flag that selects it
+      label       --name L | --clear        name the selected connection (persists in that profile)
       guide                                 operating instructions for an agent
 
     TABS
@@ -70,7 +76,10 @@ enum BrowserCommands {
     COMMON FLAGS
       --tab ID          act on a specific tab instead of the session's current one
       --session NAME    keep a separate current tab per agent (default: "default")
-      --browser NAME    chrome, edge, brave, safari, … or NAME:PID when several are connected
+      --profile X       which profile: its label, profile dir (Default, "Profile 2"), display
+                        name, or instance id prefix ($AMCU_PROFILE). Required when several
+                        connections could take the command (else: ambiguous_browser)
+      --browser NAME    chrome, edge, brave, safari, … or NAME:PID (host pid, see `profiles`)
                         (Safari is used only when named; see SAFARI below)
       --timeout S       per-command limit in seconds (default 30; navigation and wait honour it)
       --secrets FILE    dotenv KEY=VALUE file (or $AMCU_SECRETS): enables --secret KEY and masks
@@ -116,6 +125,8 @@ enum BrowserCommands {
         case "doctor": try doctor(flags)
         case "safari-relay": try safariRelay(flags)
         case "status": try status(flags)
+        case "profiles": try profiles(flags)
+        case "label": try label(flags)
         case "guide": print(browserGuideText)
         case "help": print(helpText)
         case "tabs": try tabs(flags)
@@ -153,7 +164,11 @@ enum BrowserCommands {
     // MARK: - Shared
 
     static func client(_ flags: Flags) throws -> BrowserClient {
-        try BrowserClient.select(flags.string("browser") ?? ProcessInfo.processInfo.environment["AMCU_BROWSER"])
+        let environment = ProcessInfo.processInfo.environment
+        return try BrowserClient.select(
+            browser: flags.string("browser") ?? environment["AMCU_BROWSER"],
+            profile: flags.string("profile") ?? environment["AMCU_PROFILE"]
+        )
     }
 
     /// The parameters every tab-scoped request carries.
@@ -278,15 +293,39 @@ enum BrowserCommands {
         return line
     }
 
+    /// Which profile served the command, so an agent working several
+    /// accounts can check every result against the one it meant.
+    struct ConnectionJSON: Encodable {
+        let pid: Int32
+        let instanceId: String?
+        let label: String?
+        let profileDir: String?
+        let profileName: String?
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(pid, forKey: .pid)
+            try container.encode(instanceId, forKey: .instanceId)
+            try container.encode(label, forKey: .label)
+            try container.encode(profileDir, forKey: .profileDir)
+            try container.encode(profileName, forKey: .profileName)
+        }
+        private enum CodingKeys: String, CodingKey { case pid, instanceId, label, profileDir, profileName }
+    }
+
     struct BrowserResult: Encodable {
         let ok = true
         let browser: String
+        let connection: ConnectionJSON
         let action: String
         let result: AnyEncodable
     }
 
     static func emit(_ client: BrowserClient, action: String, result: JSONValue, text: () -> String) {
-        Output.emit(BrowserResult(browser: client.endpoint.browser, action: action, result: result.encodable), text: text)
+        let endpoint = client.endpoint
+        let connection = ConnectionJSON(pid: endpoint.pid, instanceId: endpoint.instanceId, label: endpoint.label,
+                                        profileDir: endpoint.profileDir, profileName: endpoint.profileName)
+        Output.emit(BrowserResult(browser: endpoint.browser, connection: connection, action: action, result: result.encodable), text: text)
     }
 
     // MARK: - Setup
@@ -301,20 +340,26 @@ enum BrowserCommands {
         let directory = flags.string("extension-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
         let manifestDirectory = flags.string("manifest-dir").map { URL(fileURLWithPath: $0, isDirectory: true) }
         let report = try BrowserInstall.install(browsers: browsers, extensionDirectory: directory, manifestDirectory: manifestDirectory)
-        // A running extension can reload itself to pick up the new files.
+        // A running extension can reload itself to pick up the new files;
+        // --no-reload leaves the user's browser untouched.
         var reloaded: [String] = []
-        for endpoint in BrowserClient.discover() where endpoint.browser != SafariBridge.browserName {
-            if let client = try? BrowserClient.select("\(endpoint.browser):\(endpoint.pid)"),
-               (try? client.request("extension.reload", timeout: 5)) != nil {
-                reloaded.append(endpoint.label)
+        var notReloaded: [String] = []
+        let running = BrowserClient.discover().filter { $0.browser != SafariBridge.browserName }
+        let skipReload = flags.has("no-reload")
+        for endpoint in running {
+            if !skipReload, (try? BrowserClient(endpoint: endpoint).request("extension.reload", timeout: 5)) != nil {
+                reloaded.append(endpoint.summary)
+            } else {
+                notReloaded.append(endpoint.summary)
             }
         }
         struct Payload: Encodable {
             let ok = true
             let report: BrowserInstall.InstallReport
             let reloaded: [String]
+            let notReloaded: [String]
         }
-        Output.emit(Payload(report: report, reloaded: reloaded)) {
+        Output.emit(Payload(report: report, reloaded: reloaded, notReloaded: notReloaded)) {
             var lines: [String] = []
             for manifest in report.manifests {
                 lines.append("registered native host for \(manifest.browser): \(manifest.path)")
@@ -325,15 +370,18 @@ enum BrowserCommands {
             lines.append("host binary: \(report.executable)")
             lines.append("wrote extension \(report.extensionVersion) (id \(report.extensionID)) to \(report.extensionDirectory)")
             lines.append("")
-            if reloaded.isEmpty {
-                lines.append("next: in the browser open chrome://extensions, turn on Developer mode (top right), click \"Load unpacked\"")
-                lines.append("      and choose:  \(report.extensionDirectory)")
-                lines.append("      (in the file dialog, ⌘⇧G lets you paste that path; already loaded? click Reload on the amcu bridge card)")
-                lines.append("then: amcu browser doctor")
-            } else {
-                lines.append("asked the running extension to reload itself: \(reloaded.joined(separator: ", "))")
-                lines.append("then: amcu browser doctor")
+            if !reloaded.isEmpty {
+                lines.append("asked the running extension to reload itself: \(reloaded.joined(separator: "; "))")
             }
+            if !notReloaded.isEmpty {
+                lines.append((skipReload ? "not reloaded (--no-reload): " : "reload not confirmed: ") + notReloaded.joined(separator: "; "))
+                lines.append("      the new extension takes effect after Reload on the amcu bridge card in chrome://extensions, in each of those profiles")
+            }
+            lines.append("next: in every browser profile amcu should drive (each profile loads extensions separately):")
+            lines.append("      open chrome://extensions, turn on Developer mode (top right), click \"Load unpacked\"")
+            lines.append("      and choose:  \(report.extensionDirectory)")
+            lines.append("      (in the file dialog, ⌘⇧G lets you paste that path; already loaded? click Reload on the amcu bridge card)")
+            lines.append("then: amcu browser profiles   (one line per connected profile; `amcu browser label --name L --profile X` names one)")
             return lines.joined(separator: "\n")
         }
     }
@@ -470,9 +518,18 @@ enum BrowserCommands {
                 for endpoint in endpoints {
                     let versionNote = endpoint.extensionVersion == ExtensionBundle.version
                         ? "extension \(endpoint.extensionVersion ?? "?")"
-                        : "extension \(endpoint.extensionVersion ?? "?") — binary carries \(ExtensionBundle.version); run `amcu browser install` and Reload the extension"
-                    lines.append("  [ok] connection: \(endpoint.label) — \(versionNote)")
+                        : "extension \(endpoint.extensionVersion ?? "?") — binary carries \(ExtensionBundle.version); run `amcu browser install` and Reload the extension in that profile"
+                    lines.append("  [ok] connection: \(endpoint.summary) — \(versionNote)")
+                    if endpoint.instanceId == nil {
+                        lines.append("       this extension predates per-profile identity; Reload it (chrome://extensions) so --profile can select it")
+                    } else if endpoint.profileDir == nil {
+                        lines.append("       profile directory not found for this instance (unverified: no store under \(endpoint.userDataDir ?? "the browser's user data dir") holds its id); select it by label or instance id")
+                    }
+                    if endpoints.count > 1 {
+                        lines.append("       select with: \(BrowserSelection.selectingFlag(for: endpoint, among: endpoints))")
+                    }
                 }
+                lines.append("       one connection per browser profile with the extension loaded; profiles without it are not listed")
             }
             if FileManager.default.fileExists(atPath: SafariInstall.appURL.path) {
                 lines.append("  safari: bridge app installed — `amcu browser doctor --browser safari` checks it")
@@ -487,7 +544,7 @@ enum BrowserCommands {
                 let client = try client(flags)
         let result = try client.request("status", params: try baseParams(flags), timeout: 10)
         emit(client, action: "status", result: result) {
-            var lines = ["browser: \(client.endpoint.label) — extension \(result["version"].string ?? "?"), host since \(client.endpoint.since ?? "?")"]
+            var lines = ["browser: \(client.endpoint.summary) — extension \(result["version"].string ?? "?"), host since \(client.endpoint.since ?? "?")"]
             lines.append("tabs: \(result["tabs"].int ?? 0), debugger attached to: \(result["attached"].array.compactMap { $0.int.map(String.init) }.joined(separator: ", ").ifEmpty("none"))")
             let sessions = result["sessions"].dictionary
             if sessions.isEmpty {
@@ -495,11 +552,88 @@ enum BrowserCommands {
             } else {
                 lines.append("sessions: " + sessions.map { "\($0.key) → tab \($0.value.int ?? 0)" }.sorted().joined(separator: ", "))
             }
-            let others = BrowserClient.discover().filter { $0.pid != client.endpoint.pid }
-            if !others.isEmpty {
-                lines.append("also connected: \(others.map(\.label).joined(separator: ", ")) (choose with --browser)")
+            let everyone = BrowserClient.discover()
+            let others = everyone.filter { $0.socket != client.endpoint.socket }
+            for other in others {
+                lines.append("also connected: \(other.summary) — select with \(BrowserSelection.selectingFlag(for: other, among: everyone))")
             }
             return lines.joined(separator: "\n")
+        }
+    }
+
+    // MARK: - Profiles
+
+    static func profiles(_ flags: Flags) throws {
+        let endpoints = BrowserClient.discover()
+        struct Row: Encodable {
+            let connection: BrowserEndpoint
+            /// nil when the extension did not answer `status` within 3 s.
+            let tabs: Int?
+            let select: String
+        }
+        struct Payload: Encodable {
+            let ok = true
+            let profiles: [Row]
+        }
+        let rows = endpoints.map { endpoint -> Row in
+            let status = try? BrowserClient(endpoint: endpoint).request("status", timeout: 3)
+            return Row(connection: endpoint, tabs: status?["tabs"].int,
+                       select: endpoints.count > 1 ? BrowserSelection.selectingFlag(for: endpoint, among: endpoints) : "(only connection; no flag needed)")
+        }
+        Output.emit(Payload(profiles: rows)) {
+            guard !rows.isEmpty else {
+                return "no browser is connected — `amcu browser doctor` explains the setup (Load unpacked once per profile)"
+            }
+            var lines: [String] = []
+            for row in rows {
+                let endpoint = row.connection
+                let profile = endpoint.profileDir.map { "\"\($0)\"" + (endpoint.profileName.map { " (\($0))" } ?? "") } ?? "unknown"
+                lines.append("\(endpoint.browser) pid=\(endpoint.pid)\tprofile=\(profile)\tlabel=\(endpoint.label ?? "-")\tinstance=\(endpoint.instanceId ?? "- (extension \(endpoint.extensionVersion ?? "?") predates identity; Reload it)")\ttabs=\(row.tabs.map(String.init) ?? "?")\tsince=\(endpoint.since ?? "?")")
+                lines.append("    select: \(row.select)")
+            }
+            lines.append("profiles without the extension are not connected; Load unpacked in each one amcu should drive")
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    /// Names the selected connection. The name lives in that profile's
+    /// extension storage, so it survives restarts; it is read back from a
+    /// fresh discovery before success is reported.
+    static func label(_ flags: Flags) throws {
+        let clearing = flags.has("clear")
+        let raw = flags.string("name")
+        guard clearing != (raw != nil) else {
+            throw AmcuError(.invalidArgument, "label needs exactly one of --name L or --clear", nextSteps: [
+                "`amcu browser label --name shop --profile \"Profile 2\"` names that profile's connection; --clear removes the name."
+            ])
+        }
+        let name = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let name, name.isEmpty {
+            throw AmcuError(.invalidArgument, "--name is empty", nextSteps: ["Use --clear to remove a label."])
+        }
+        let client = try client(flags)
+        if let name {
+            let others = BrowserClient.discover().filter { $0.socket != client.endpoint.socket }
+            if let clash = others.first(where: { other in
+                [other.label, other.profileDir, other.profileName, other.instanceId].compactMap { $0?.lowercased() }.contains(name.lowercased())
+            }) {
+                throw AmcuError(.invalidArgument, "'\(name)' already selects \(clash.summary); --profile \(BrowserSelection.shellQuoted(name)) would become ambiguous", nextSteps: [
+                    "Pick a name no other connection uses as label, profile directory, profile name or instance id."
+                ])
+            }
+        }
+        let result = try client.request("setLabel", params: ["label": name ?? NSNull()], timeout: 10)
+        let stored = result["label"].string
+        let after = BrowserClient.discover().first { $0.socket == client.endpoint.socket }
+        guard stored == name, after?.label == name else {
+            throw AmcuError(.valueMismatch, "the label reads back as \(after?.label ?? stored ?? "none"), not \(name ?? "none")", nextSteps: [
+                "Run `amcu browser profiles` to see the current state, then retry once."
+            ])
+        }
+        let endpoint = after ?? client.endpoint
+        emit(client, action: "label", result: result) {
+            if let name { return "labelled \(endpoint.summary) — select it with --profile \(BrowserSelection.shellQuoted(name))" }
+            return "cleared the label of \(endpoint.summary)"
         }
     }
 

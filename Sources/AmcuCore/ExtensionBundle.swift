@@ -113,7 +113,97 @@ function setStatus(update) {
   chrome.storage.session.set({ status }).catch(() => {});
 }
 
-function connect() {
+// ---------------------------------------------------------------------------
+// Identity
+//
+// Every profile runs its own copy of this extension and spawns its own host,
+// so the CLI sees one connection per profile. An instance id, generated once
+// and kept in chrome.storage.local, is what tells those connections apart; a
+// label is the name the user or agent gives it. The id is also written as a
+// key name because leveldb keeps keys verbatim in its write-ahead log: the
+// host finds the profile directory by searching for that key, and re-writing
+// it at every worker start keeps a plain copy in the newest log.
+
+const IDENTITY_KEY = 'amcu_identity';
+const INSTANCE_MARK_PREFIX = 'amcu_instance_';
+const LABEL_MAX = 64;
+let identity = null;
+let identityPromise = null;
+
+function randomInstanceId() {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  return Array.from(bytes, b => alphabet[b % alphabet.length]).join('');
+}
+
+function loadIdentity() {
+  if (identity) return Promise.resolve(identity);
+  // One in-flight load: two first-run loads would each mint an id and leave
+  // two markers, and the host would then refuse to name the profile.
+  if (!identityPromise) {
+    identityPromise = readOrCreateIdentity().finally(() => { identityPromise = null; });
+  }
+  return identityPromise;
+}
+
+async function readOrCreateIdentity() {
+  const stored = await chrome.storage.local.get(IDENTITY_KEY);
+  let value = stored[IDENTITY_KEY];
+  if (!value || typeof value.instanceId !== 'string' || !/^[a-z0-9]{10}$/.test(value.instanceId)) {
+    value = { instanceId: randomInstanceId(), label: null, createdAt: Date.now() };
+  }
+  if (typeof value.label !== 'string' || !value.label) value.label = null;
+  await chrome.storage.local.set({ [IDENTITY_KEY]: value, [INSTANCE_MARK_PREFIX + value.instanceId]: Date.now() });
+  identity = value;
+  return identity;
+}
+
+function identityInfo() {
+  return {
+    instanceId: identity ? identity.instanceId : null,
+    label: identity ? identity.label : null,
+    version: VERSION,
+    extensionId: chrome.runtime.id
+  };
+}
+
+function helloMessage() {
+  let brands = [];
+  try {
+    brands = (navigator.userAgentData && navigator.userAgentData.brands || []).map(b => `${b.brand} ${b.version}`);
+  } catch (_) { /* older browsers */ }
+  const info = identityInfo();
+  return { type: 'hello', version: VERSION, brands, userAgent: navigator.userAgent, extensionId: chrome.runtime.id, instanceId: info.instanceId, label: info.label };
+}
+
+function normalizeLabel(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'string') throw new BridgeError('invalid_argument', 'label must be a string');
+  const label = raw.trim();
+  if (!label) return null;
+  if (label.length > LABEL_MAX) throw new BridgeError('invalid_argument', `label is ${label.length} characters; at most ${LABEL_MAX}`);
+  if (/[\u0000-\u001f\u007f]/.test(label)) throw new BridgeError('invalid_argument', 'label must not contain control characters');
+  return label;
+}
+
+// ---------------------------------------------------------------------------
+// Connection
+
+let connecting = false;
+
+async function connect() {
+  if (port || connecting) return;
+  connecting = true;
+  // The host caches the identity from the first hello, so it is loaded before
+  // connecting; a storage failure still connects, just without one (the
+  // keepalive alarm retries and re-announces it).
+  try {
+    await loadIdentity();
+  } catch (error) {
+    noteError('identity', error);
+  } finally {
+    connecting = false;
+  }
   if (port) return;
   try {
     port = chrome.runtime.connectNative(HOST_NAME);
@@ -127,11 +217,7 @@ function connect() {
     port = null;
     scheduleReconnect(reason);
   });
-  let brands = [];
-  try {
-    brands = (navigator.userAgentData && navigator.userAgentData.brands || []).map(b => `${b.brand} ${b.version}`);
-  } catch (_) { /* older browsers */ }
-  post({ type: 'hello', version: VERSION, brands, userAgent: navigator.userAgent, extensionId: chrome.runtime.id });
+  post(helloMessage());
   backoffMs = 1000;
   setStatus({ state: 'connected', error: null, since: Date.now() });
 }
@@ -191,7 +277,11 @@ function onHostMessage(message) {
 setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === KEEPALIVE_ALARM) connect();
+  if (alarm.name !== KEEPALIVE_ALARM) return;
+  if (port && !identity) {
+    loadIdentity().then(() => post(helloMessage())).catch(error => noteError('identity', error));
+  }
+  connect();
 });
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
@@ -1320,7 +1410,30 @@ function wordPresent(word, haystack) {
 
 const handlers = {
   async hello() {
-    return { version: VERSION, extensionId: chrome.runtime.id };
+    await loadIdentity();
+    return identityInfo();
+  },
+
+  async identity() {
+    await loadIdentity();
+    return identityInfo();
+  },
+
+  // Persisted before answering, and announced to the host as a fresh hello
+  // ahead of the response on the same port, so the next `amcu browser
+  // profiles` already shows it.
+  async setLabel(params) {
+    const label = normalizeLabel(params.label);
+    await loadIdentity();
+    const updated = Object.assign({}, identity, { label });
+    await chrome.storage.local.set({ [IDENTITY_KEY]: updated });
+    const stored = (await chrome.storage.local.get(IDENTITY_KEY))[IDENTITY_KEY];
+    if (!stored || stored.label !== label) {
+      throw new BridgeError('value_mismatch', 'the label did not persist in chrome.storage.local', ['Retry once; if it persists, run `amcu browser doctor`.']);
+    }
+    identity = stored;
+    post(helloMessage());
+    return identityInfo();
   },
 
   async status(params) {
@@ -1333,6 +1446,8 @@ const handlers = {
     return {
       version: VERSION,
       extensionId: chrome.runtime.id,
+      instanceId: identity ? identity.instanceId : null,
+      label: identity ? identity.label : null,
       tabs: tabs.length,
       attached: Array.from(attached.keys()),
       sessions,
@@ -4044,6 +4159,8 @@ async function executionContextFor(tabId, frameId) {
 <body>
 <h1>amcu bridge <span id="version"></span></h1>
 <div class="row"><span>host</span><span id="host">…</span></div>
+<div class="row"><span>profile label</span><span id="label">…</span></div>
+<div class="row"><span>instance</span><span id="instance">…</span></div>
 <div class="row"><span>requests served</span><span id="requests">0</span></div>
 <div class="row"><span>debugger attached to</span><span id="attached">no tabs</span></div>
 <p id="hint"></p>
@@ -4074,6 +4191,9 @@ async function refresh() {
       ? 'The native host is not registered. In a terminal run <code>amcu browser install</code>, then reload this extension.'
       : 'Last error: ' + reason + '. Run <code>amcu browser doctor</code>.';
   }
+  const { amcu_identity: identity } = await chrome.storage.local.get('amcu_identity');
+  document.getElementById('label').textContent = identity && identity.label ? identity.label : 'none (amcu browser label --name L)';
+  document.getElementById('instance').textContent = identity && identity.instanceId ? identity.instanceId : '?';
   document.getElementById('requests').textContent = status && status.requests ? String(status.requests) : '0';
   try {
     const targets = await chrome.debugger.getTargets();

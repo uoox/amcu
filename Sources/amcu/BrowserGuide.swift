@@ -18,6 +18,9 @@ FIRST CONTACT
   user has a one-time setup: `amcu browser install`, then Load unpacked in
   chrome://extensions. Say so and stop; you cannot do that part for them.
   Safari is separate and opt-in: see SAFARI below.
+  Each Chrome-family profile is separate: the extension has to be loaded once in
+  every profile you should reach, and each loaded profile is its own
+  connection (see SEVERAL PROFILES).
 
 THE NORMAL SEQUENCE
   1. `amcu browser tabs` — see what is open. Every tab has an id.
@@ -166,8 +169,36 @@ TABS, WINDOWS AND VISIBILITY
   `navigate`, `back`, `forward`, `reload` wait for the load to finish;
   `--no-wait` and `wait --load` split that.
   Concurrent agents: use `--session NAME`; each session has its own current
-  tab (they share the one amcu window). Several browsers or profiles:
-  `--browser chrome|edge|…`.
+  tab (they share the one amcu window).
+
+SEVERAL PROFILES
+  Every profile with the extension loaded is its own connection, with its own
+  tabs, logins and amcu window. `amcu browser profiles` lists them: browser,
+  host pid, profile directory (Default, "Profile 2") and the name the browser
+  shows for it, label, instance id, tab count, and the flag that selects it.
+  The profile directory is inferred from the extension's storage on disk;
+  "unknown" means it could not be proven, not that it is Default.
+  `--profile X` picks one: X is tried, case-insensitively and exactly, as a
+  label, then a profile directory, then a display name, then a whole
+  instance id, and finally as an instance id prefix; the first kind that
+  matches anything decides. Every result's JSON carries `connection`
+  (pid, instanceId, label, profileDir, profileName): check it when acting
+  for one account among several.
+  `--browser chrome|edge|…|NAME:PID` still picks by browser and combines with
+  --profile. With one connection nothing needs choosing. With several that
+  could take the command and nothing narrowing them, every browser verb is
+  refused with ambiguous_browser; the error lists each candidate with its
+  flag. (Exception kept from before profiles: one Chrome among other
+  browsers is used without asking, and a Safari relay whose extension is not
+  polling is skipped when something live remains.) Safari connections carry
+  no profile identity; select them with --browser safari. Do not guess from that list — the
+  profiles hold different accounts. Ask the user which one when the task
+  does not say.
+  `amcu browser label --name shop --profile "Profile 2"` gives a connection a
+  name that persists in that profile and is accepted by --profile from then
+  on; `label --clear` removes it. A name another connected profile already
+  answers to is refused (profiles not connected right now are not checked). $AMCU_PROFILE and $AMCU_BROWSER set the defaults for a
+  shell. An extension older than 0.10 has no identity: reload it.
 
 SAFARI (--browser safari)
   Safari has no debugger API and no stdio native messaging, so it has its own

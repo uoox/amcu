@@ -38,6 +38,11 @@ final class HostRuntime {
     private var extensionVersion: String?
     private var extensionID: String?
     private var brands: [String] = []
+    private var instanceID: String?
+    private var instanceLabel: String?
+    private var userDataDir: URL?
+    private var profileDir: String?
+    private var profileMissSince: Date?
     private let helloSemaphore = DispatchSemaphore(value: 0)
     private var helloSignalled = false
     private let startedAt = Date()
@@ -55,6 +60,7 @@ final class HostRuntime {
         // not recognisable.
         _ = helloSemaphore.wait(timeout: .now() + 2)
         browser = detectBrowser()
+        userDataDir = ProfileLocator.userDataDirectory(arguments: ProfileLocator.processArguments(pid: getppid()) ?? [], browser: browser)
 
         do {
             try openSocket()
@@ -191,9 +197,38 @@ final class HostRuntime {
         return encode(payload)
     }
 
+    /// Resolved on demand and kept once found: a host serves one extension
+    /// instance, which never changes profile. The display name is re-read
+    /// because the user can rename a profile at any time.
+    private func profileInfo() -> (userDataDir: String?, profileDir: String?, profileName: String?) {
+        stateLock.lock()
+        let id = instanceID, known = profileDir, root = userDataDir
+        let extensionID = self.extensionID ?? BrowserBridge.extensionID
+        // A miss is remembered briefly so a burst of discoveries does not
+        // rescan every profile's store each time.
+        let recentMiss = profileMissSince.map { Date().timeIntervalSince($0) < 30 } ?? false
+        stateLock.unlock()
+        guard let root else { return (nil, nil, nil) }
+        var directory = known
+        if directory == nil, let id, !recentMiss {
+            directory = ProfileLocator.profileDirectory(instanceID: id, extensionID: extensionID, userDataDir: root)
+            stateLock.lock()
+            if let directory { profileDir = directory } else { profileMissSince = Date() }
+            stateLock.unlock()
+        }
+        let name = directory.flatMap { ProfileLocator.profileName(userDataDir: root, profileDir: $0) }
+        return (root.path, directory, name)
+    }
+
     private func hostInfo() -> [String: Any] {
+        let profile = profileInfo()
         stateLock.lock(); defer { stateLock.unlock() }
         return [
+            "instanceId": instanceID ?? NSNull(),
+            "label": instanceLabel ?? NSNull(),
+            "userDataDir": profile.userDataDir ?? NSNull(),
+            "profileDir": profile.profileDir ?? NSNull(),
+            "profileName": profile.profileName ?? NSNull(),
             "browser": browser,
             "pid": Int(getpid()),
             "hostVersion": AmcuVersion.string,
@@ -277,6 +312,10 @@ final class HostRuntime {
             extensionVersion = object["version"] as? String
             extensionID = object["extensionId"] as? String
             brands = object["brands"] as? [String] ?? []
+            // The extension says hello again after `setLabel`; an id never
+            // changes for a running instance, so a new one only fills a gap.
+            if let id = object["instanceId"] as? String, !id.isEmpty, instanceID == nil { instanceID = id; profileMissSince = nil }
+            instanceLabel = (object["label"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let signalled = helloSignalled
             helloSignalled = true
             stateLock.unlock()
