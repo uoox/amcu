@@ -175,8 +175,10 @@ TABS, WINDOWS AND VISIBILITY
   that window (a visible change).
   `navigate`, `back`, `forward`, `reload` wait for the load to finish;
   `--no-wait` and `wait --load` split that.
-  Concurrent agents: use `--session NAME`; each session has its own current
-  tab (they share the one amcu window).
+  Each agent has its own session without asking (the same rule as desktop
+  commands: $AMCU_SESSION, else $AAA_SESSION or $CLAUDE_CODE_SESSION_ID),
+  and so its own current tab; `--session NAME` splits further. Sessions
+  share the one amcu window.
 
 SEVERAL PROFILES
   Every profile with the extension loaded is its own connection, with its own

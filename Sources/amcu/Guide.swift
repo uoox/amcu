@@ -25,7 +25,12 @@ THE NORMAL SEQUENCE
   2. `amcu snapshot --app <selector>` — the accessibility tree as indexed text.
   3. Act by index: `amcu click --element 12`, `amcu set-value --element 7
      --value "..."`. Indices come from the most recent snapshot in the same
-     `--session`.
+     session. Each agent has a session of its own without asking — taken
+     from $AMCU_SESSION, else the host's $AAA_SESSION or
+     $CLAUDE_CODE_SESSION_ID — so agents running side by side do not act
+     on each other's snapshots; `amcu doctor` prints the one in effect.
+     An `--element` action that also names `--app` is refused when the
+     session's snapshot is of a different application.
   4. Read the diff the action printed. Every action waits for the interface
      to settle, re-captures the session's snapshot and prints only what
      changed (`~` changed, `+` added, `- [a..b]` removed, or `# no change`).
@@ -196,8 +201,9 @@ WEB PAGES
 
 OUTPUT
   Add `--json` to any command for machine-readable output on stdout and
-  structured errors on stderr. `--session NAME` keeps concurrent work on
-  different applications from overwriting each other's snapshots.
+  structured errors on stderr. `--session NAME` splits one agent's work
+  further, e.g. two applications driven in alternation, each with its own
+  snapshot and diff.
 
 `amcu help` lists every command and flag.
 """

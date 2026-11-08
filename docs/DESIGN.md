@@ -77,6 +77,10 @@ Selection refuses rather than guesses. Before 0.10 two Chrome profiles meant `se
 
 All synthesized events carry `0x414D4355` in `eventSourceUserData`. Nothing consumes it yet; it exists so a future intervention monitor or the self-check can distinguish amcu's input from the user's without heuristics.
 
+## Each agent has a session of its own (since 0.11.2)
+
+Measured on 27.2 with two agents on one machine: one ran `amcu scan --app cc.uoox.aaaui` without `--session`, the other ran `snapshot --app com.apple.calculator` and then four `click --app com.apple.calculator --element N`, also without `--session`. The scan landed in between, so all four clicks resolved against the scan and were routed into the AAA window at the recognised texts, each reported as `click ok`. Two causes, both fixed. First, `--element` takes its target from the snapshot (`pid:` of `snapshot.app`) and ignored `--app`; `elementTarget` now refuses with `stale_snapshot` when a named `--app` is another process. Second, `default` was one namespace for every agent on the machine, and the guide's advice to pass `--session` was not followed in practice (neither agent did). Without `--session`, the name now comes from the environment the host gives every command: `AMCU_SESSION`, else `AAA_SESSION` (aaa-daemon, any agent), else `CLAUDE_CODE_SESSION_ID`, else `default`. The browser's current-tab namespace follows the same rule, because two agents sharing a current tab is the same failure with page actions. Values are sanitised into file-name-safe characters; `doctor` prints the session in effect and its source. An agent that relied on `default` to share state across hosts must now pass `--session default` explicitly.
+
 ## Deliberately not adopted
 
 - **Animated agent cursor / banner / Esc-to-stop**: contradicts "do not disturb the user" and needs a daemon.

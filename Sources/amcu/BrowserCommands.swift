@@ -76,7 +76,8 @@ enum BrowserCommands {
 
     COMMON FLAGS
       --tab ID          act on a specific tab instead of the session's current one
-      --session NAME    keep a separate current tab per agent (default: "default")
+      --session NAME    the current-tab namespace; default: the agent's own session,
+                        as for desktop commands (see `amcu help`)
       --profile X       which profile: its label, profile dir (Default, "Profile 2"), display
                         name, or instance id prefix ($AMCU_PROFILE). Required when several
                         connections could take the command (else: ambiguous_browser)
@@ -174,7 +175,7 @@ enum BrowserCommands {
 
     /// The parameters every tab-scoped request carries.
     static func baseParams(_ flags: Flags) throws -> [String: Any] {
-        var params: [String: Any] = ["session": flags.string("session") ?? "default"]
+        var params: [String: Any] = ["session": SessionName.resolve(explicit: flags.string("session")).name]
         if let tab = try flags.int("tab") { params["tab"] = tab }
         if let seconds = try flags.double("timeout") { params["timeoutMs"] = Int(seconds * 1000) }
         // `--element "Submit button"`: checked against the addressed element

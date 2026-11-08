@@ -72,7 +72,9 @@ AFTER EVERY ACTION
 
 COMMON FLAGS
   --json             machine-readable output on stdout, structured errors on stderr
-  --session NAME     namespace for snapshot state (default: "default")
+  --session NAME     namespace for snapshot state; default: $AMCU_SESSION, else
+                     the agent's own session ($AAA_SESSION, $CLAUDE_CODE_SESSION_ID),
+                     else "default" (`amcu doctor` prints the one in effect)
   --no-observe       do not re-snapshot and diff after an action
   --no-shaping       snapshot: keep every node — no elision, no offscreen-row
                      culling; the escape hatch when shaping hides too much

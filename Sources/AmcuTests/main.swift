@@ -437,5 +437,6 @@ runBrowserProfilesTests(t)
 runSecretStoreTests(t)
 runSnapshotDiffTests(t)
 runSafariBridgeTests(t)
+runSessionNameTests(t)
 
 t.finish()

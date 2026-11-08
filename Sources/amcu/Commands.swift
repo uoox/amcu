@@ -44,7 +44,27 @@ enum Commands {
     }
 
     static func session(_ flags: Flags) -> String {
-        flags.string("session") ?? "default"
+        SessionName.resolve(explicit: flags.string("session")).name
+    }
+
+    /// `--element` resolves through the session's snapshot, so the target is
+    /// whatever application that snapshot captured. When the caller also names
+    /// `--app`, the two must agree; otherwise the action would land in another
+    /// application while reporting success.
+    static func elementTarget(_ flags: Flags, index: Int) throws -> (snapshot: Snapshot, node: SnapshotNode, app: NSRunningApplication) {
+        let sessionName = session(flags)
+        let (snapshot, node) = try SessionStore.node(index: index, session: sessionName)
+        if let selector = flags.string("app") {
+            let named = try Target.resolveApp(selector)
+            guard named.processIdentifier == snapshot.app.pid else {
+                throw AmcuError(.staleSnapshot, "element \(index) comes from session '\(sessionName)', whose snapshot is of \(snapshot.app.name) [pid:\(snapshot.app.pid)], not \(named.localizedName ?? selector) [pid:\(named.processIdentifier)]", nextSteps: [
+                    "Run `amcu snapshot --app \(selector)` and use the indices it prints.",
+                    "If another agent may be using this session, pass a --session of your own."
+                ])
+            }
+        }
+        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+        return (snapshot, node, app)
     }
 
     /// How a pointer-shaped command will reach the target, resolved from
@@ -385,9 +405,7 @@ enum Commands {
         // advertises. It needs no coordinates, survives window movement, and is
         // the only path that works when a control is scrolled out of view.
         if let elementIndex = try flags.int("element") {
-            let sessionName = session(flags)
-            let (snapshot, node) = try SessionStore.node(index: elementIndex, session: sessionName)
-            let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+            let (snapshot, node, app) = try elementTarget(flags, index: elementIndex)
             let window = try snapshotWindow(for: snapshot, app: app)
 
             // Optically located text has no element behind it to re-resolve, so
@@ -486,8 +504,7 @@ enum Commands {
             throw AmcuError(.invalidArgument, "--element is required", nextSteps: ["Run `amcu snapshot` first to get element indices."])
         }
         let name = try flags.required("action", hint: "Pass an action listed for that element in `amcu snapshot`.")
-        let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
-        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+        let (snapshot, node, app) = try elementTarget(flags, index: elementIndex)
         let window = try snapshotWindow(for: snapshot, app: app)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
@@ -503,8 +520,7 @@ enum Commands {
             throw AmcuError(.invalidArgument, "--element is required", nextSteps: ["Run `amcu snapshot` first to get element indices."])
         }
         let value = try flags.required("value")
-        let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
-        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+        let (snapshot, node, app) = try elementTarget(flags, index: elementIndex)
         let window = try snapshotWindow(for: snapshot, app: app)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
@@ -537,8 +553,7 @@ enum Commands {
             throw AmcuError(.invalidArgument, "--element is required", nextSteps: ["Run `amcu snapshot` first to get element indices."])
         }
         let text = try flags.required("text")
-        let (snapshot, node) = try SessionStore.node(index: elementIndex, session: session(flags))
-        let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+        let (snapshot, node, app) = try elementTarget(flags, index: elementIndex)
         let window = try snapshotWindow(for: snapshot, app: app)
         let element = try SnapshotBuilder.resolve(node: node, windowElement: window.element)
         let forcedNote = try requireEnabled(element, elementIndex: elementIndex, flags: flags)
@@ -946,6 +961,10 @@ enum Commands {
             let path: String?
             let isSelf: Bool
         }
+        struct SessionJSON: Encodable {
+            let name: String
+            let source: String
+        }
         struct Payload: Encodable {
             let ok: Bool
             let permissions: [PermissionState]
@@ -954,8 +973,10 @@ enum Commands {
             let windowRouting: SelfCheckResult
             let axWindowIDs: Bool
             let osBuild: String
+            let session: SessionJSON
             let browsers: [BrowserEndpoint]
         }
+        let effectiveSession = SessionName.resolve(explicit: flags.string("session"))
         let payload = Payload(
             ok: permissions.allSatisfy(\.granted) && check.usable,
             permissions: permissions,
@@ -964,6 +985,7 @@ enum Commands {
             windowRouting: check,
             axWindowIDs: AX.canResolveWindowID,
             osBuild: SelfCheck.osBuild,
+            session: SessionJSON(name: effectiveSession.name, source: effectiveSession.source),
             browsers: browsers
         )
         Output.emit(payload) {
@@ -973,6 +995,9 @@ enum Commands {
                     ? "  subject: amcu itself (self-responsible run — launchd or disclaimed)"
                     : "  subject: this run answers for \(host.name) (pid \(host.pid)\(host.path.map { ", \($0)" } ?? ""))")
             }
+            lines.append(effectiveSession.source == "fallback"
+                ? "  session: default — shared with every other agent that has no session of its own; pass --session or set AMCU_SESSION when agents run side by side"
+                : "  session: \(effectiveSession.name) (from \(effectiveSession.source))")
             let hostTag = (host?.isSelf == false) ? host.map { " (\($0.name))" } ?? "" : ""
             for permission in permissions {
                 lines.append("  [\(permission.granted ? "ok" : "  ")] \(permission.id)\(hostTag): \(permission.detail)")
