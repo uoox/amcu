@@ -713,7 +713,7 @@ enum Commands {
                 "Run `amcu windows --app <selector>` and pass an explicit --window-id."
             ])
         }
-        let image = try Capture.window(id: windowID)
+        let image = try Capture.capture(id: windowID).image
         let windowSize = target.windowInfo.frame.cgRect.size
         let languages = flags.list("lang").isEmpty ? ["zh-Hans", "en-US"] : flags.list("lang")
         let marks = try VisionScan.recognizeText(in: image, windowSize: windowSize, languages: languages)

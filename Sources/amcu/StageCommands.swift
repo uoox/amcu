@@ -13,12 +13,15 @@ enum StageCommands {
       screen. Windows on it are fully drawn — screenshots and scans are
       current, unlike a minimised window — every amcu verb works on them as
       usual, and the user does not see them. A menu bar icon shows the user
-      how many windows are there; clicking it opens a live view and a way to
-      close the stage. The cursor is kept off the stage.
+      how many windows are there; clicking it opens a window with a live
+      picture of each one, a browser window's tabs under its picture (the
+      ones amcu's debugger is on marked), and a way to close the stage. The
+      cursor is kept off the stage.
 
     THE USER CAN TAKE A WINDOW OVER
-      Clicking a window in the live view (or its "take over" button) brings it
-      to the user's screen and switches to it. From then on every acting verb
+      Clicking a window's picture in the stage window (or its "take over"
+      button) brings it to the user's screen, the clicked spot under the
+      pointer, and switches to it. From then on every acting verb
       on that application — click, type, set-value, key, scroll, drag, window,
       stage put, … — is refused with `taken_over` until the user presses
       "hand back", which puts the window where it was on the stage. Reading
@@ -37,13 +40,14 @@ enum StageCommands {
                left on the stage. --activate hands the window to the user
                instead (ask first): raised and switched to, and taken over —
                amcu then leaves the application alone until the user hands it
-               back from the panel.
+               back from the stage window.
       status   the display, the windows on it (whoever put them there), who is
                followed, recent events
       show     [--hide]
-               open the menu bar panel for the user (live view, take-over
-               buttons) without taking their focus; it closes on their next
-               click elsewhere, or with --hide
+               bring up the stage window for the user (live pictures, tabs,
+               take-over and hand-back buttons) without taking their
+               keyboard; they move, resize, minimise or close it like any
+               window; --hide closes it
       start    [--size WxH] [--scale 1|2]
                start an empty stage; the default matches the user's main display
       stop     bring every window back and remove the display
@@ -192,7 +196,7 @@ enum StageCommands {
             let stage: StageStatus
         }
         Output.emit(Payload(shown: !hide, stage: reply.status)) {
-            hide ? "stage panel closed" : "stage panel open under the menu bar icon (\(reply.status.windows.count) window\(reply.status.windows.count == 1 ? "" : "s")); it closes on the user's next click elsewhere"
+            hide ? "stage window closed" : "stage window open (\(reply.status.windows.count) window\(reply.status.windows.count == 1 ? "" : "s") on the stage); the user's keyboard stays where it was"
         }
     }
 

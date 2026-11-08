@@ -23,6 +23,12 @@ public enum Stage {
     /// so every amcu process can check it without a round trip.
     public static var takeoversURL: URL { cacheDirectory.appendingPathComponent("stage-takeovers.json") }
     static var lockURL: URL { cacheDirectory.appendingPathComponent("stage.lock") }
+    /// The host runs from its own copy of the binary. replayd tells its
+    /// clients apart by executable path: while the host held capture
+    /// streams, `amcu screenshot` run from the very same path hung in
+    /// replayd (4 of 5 runs, and on after the streams stopped), while a copy
+    /// anywhere else, even beside it, did not.
+    static var hostExecutableURL: URL { cacheDirectory.appendingPathComponent("stage-host/amcu") }
     public static var logURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/amcu/stage.log")
     }
@@ -92,7 +98,7 @@ public enum Stage {
         formatter.dateFormat = "HH:mm"
         let window = held.title.map { " (window \"\($0)\")" } ?? ""
         return AmcuError(.takenOver, "the user took over \(held.app)\(window) from the stage at \(formatter.string(from: held.since)); amcu leaves \(held.app) alone until they hand it back", nextSteps: [
-            "Wait until the user hands it back with the \"hand back\" button in the stage panel; `amcu stage status` shows what is still taken over.",
+            "Wait until the user hands it back with the \"hand back\" button in the stage window; `amcu stage status` shows what is still taken over.",
             "Or ask the user whether they are done with it.",
             "Reading still works (snapshot, scan, screenshot). Do not move its windows back onto the stage yourself."
         ])
@@ -354,9 +360,9 @@ public enum StageClient {
     }
 
     private static func spawnHost(pointSize: CGSize?, scale: Int?) throws -> pid_t {
-        let executable = Responsibility.executablePath
         try FileManager.default.createDirectory(at: Stage.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: Stage.cacheDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let executable = try hostExecutable()
         var arguments = [executable, "stage", "serve"]
         if let pointSize { arguments += ["--size", "\(Int(pointSize.width))x\(Int(pointSize.height))"] }
         if let scale { arguments += ["--scale", String(scale)] }
@@ -383,6 +389,30 @@ public enum StageClient {
             throw AmcuError(.stageUnavailable, "could not start the stage host: \(String(cString: strerror(status)))")
         }
         return pid
+    }
+
+    /// A fresh copy of this binary at `hostExecutableURL` (a clone on APFS,
+    /// signature included), swapped in atomically; a host still running from
+    /// the old copy keeps its file.
+    private static func hostExecutable() throws -> String {
+        let source = URL(fileURLWithPath: Responsibility.executablePath).resolvingSymlinksInPath()
+        let target = Stage.hostExecutableURL
+        guard source.path != target.path else { return source.path }
+        let manager = FileManager.default
+        try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let staging = target.deletingLastPathComponent().appendingPathComponent(".amcu-\(getpid())")
+        try? manager.removeItem(at: staging)
+        do {
+            try manager.copyItem(at: source, to: staging)
+        } catch {
+            throw AmcuError(.stageUnavailable, "could not copy amcu to \(target.path) for the stage host: \(error.localizedDescription)")
+        }
+        guard rename(staging.path, target.path) == 0 else {
+            let reason = String(cString: strerror(errno))
+            try? manager.removeItem(at: staging)
+            throw AmcuError(.stageUnavailable, "could not put the stage host's copy of amcu in place: \(reason)")
+        }
+        return target.path
     }
 
     static func lastLogLine() -> String? {

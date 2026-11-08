@@ -50,6 +50,11 @@ public enum Capture {
         }
         do {
             return Captured(image: try window(id: windowID, scale: scale), via: "screencapturekit")
+        } catch let error as AmcuError where error.code == .timeout {
+            // On 27.x the window server's capture goes through replayd too
+            // (SLSHWCaptureWindowListToIOSurfaceProxying) and would wait just
+            // the same.
+            throw error
         } catch {
             if !preferWindowServer, let image = windowServerCapture(id: windowID) { return Captured(image: image, via: "window-server") }
             throw error
@@ -116,7 +121,14 @@ public enum Capture {
             semaphore.signal()
         }
 
-        semaphore.wait()
+        // replayd can stop answering: it did for a process sharing its
+        // executable path with another that held capture streams. Fail
+        // rather than hang the command for good.
+        guard semaphore.wait(timeout: .now() + 6) == .success else {
+            throw AmcuError(.timeout, "screen capture did not answer within 6 seconds", nextSteps: [
+                "Retry once; if it keeps timing out, tell the user that screen capture is stuck instead of retrying in a loop."
+            ])
+        }
         guard let result = box.value else {
             throw AmcuError(.captureFailure, "screen capture produced no result")
         }

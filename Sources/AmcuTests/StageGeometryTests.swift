@@ -55,13 +55,30 @@ func runStageGeometryTests(_ t: Harness) {
     t.expect(StageGeometry.parseSize("9000x1080") == nil, "too large is refused")
     t.expect(StageGeometry.parseSize("wide") == nil, "garbage is refused")
 
-    let preview = CGSize(width: 600, height: 253.125)
-    t.expectEqual(StageGeometry.stagePoint(fromPreview: CGPoint(x: 0, y: 253.125), viewSize: preview, stage: corner), CGPoint(x: 2560, y: 1080), "the live view's top-left is the stage's top-left")
-    t.expectEqual(StageGeometry.stagePoint(fromPreview: CGPoint(x: 300, y: 126.5625), viewSize: preview, stage: corner), CGPoint(x: 3840, y: 1620), "its centre is the stage's centre (AppKit's y runs up, Quartz's down)")
-    t.expect(StageGeometry.stagePoint(fromPreview: CGPoint(x: 600, y: 100), viewSize: preview, stage: corner) == nil, "a click on the right edge is outside the picture")
-    let letterbox = CGSize(width: 600, height: 400)
-    t.expect(StageGeometry.stagePoint(fromPreview: CGPoint(x: 300, y: 10), viewSize: letterbox, stage: corner) == nil, "a click in the letterbox band is outside the picture")
-    t.expectEqual(StageGeometry.stagePoint(fromPreview: CGPoint(x: 300, y: 200), viewSize: letterbox, stage: corner), CGPoint(x: 3840, y: 1620), "letterboxing is accounted for")
+    let calculator = CGRect(x: 4151, y: 1394, width: 230, height: 408)
+    t.expectEqual(StageGeometry.point(in: calculator, fraction: CGPoint(x: 0.5, y: 0.25)), CGPoint(x: 4266, y: 1496), "a click halfway across and a quarter down the thumbnail is that point of the window")
+    t.expectEqual(StageGeometry.point(in: calculator, fraction: CGPoint(x: 1.2, y: -0.1)), CGPoint(x: 4381, y: 1394), "a click past the thumbnail's edge is held to the window")
+
+    let tab = StageTabs.Tab(id: 1, title: "github.com/example/project/blob/main/docs/release-notes-2026-11.md", url: "", active: true, attached: false)
+    t.expect(StageTabs.titled("github.com/example/proj…release-notes-2026-11.md", by: tab), "a browser window title shortened in the middle still matches its active tab")
+    t.expect(StageTabs.titled("github.com/example/project/blob/main/docs/release-notes-2026-11.md - Google Chrome - Work", by: tab), "browser and profile after the title still match")
+    t.expect(!StageTabs.titled("github.com/example/proj…other.md", by: tab), "a different tail does not match")
+    t.expectEqual(StageTabs.host(of: "https://www.example.com/explore?x=1"), "example.com", "a tab's site drops www.")
+
+    t.expectEqual(StageLayout.columns(for: 460), 1, "the default window holds one column")
+    t.expectEqual(StageLayout.columns(for: 765), 1, "two columns need room for two minimum cards")
+    t.expectEqual(StageLayout.columns(for: 766), 2, "and get it at 2 × 360 + 14 + 2 × 16")
+    t.expectEqual(StageLayout.columns(for: 1200), 3, "a wider window adds a column instead of stretching cards")
+    t.expectEqual(StageLayout.columns(for: 5000), 4, "an ultrawide window stops at four columns")
+    t.expectEqual(StageLayout.columns(for: 200), 1, "a window narrower than a card still shows one column")
+
+    func browser(_ id: Int, _ active: String) -> StageTabs.BrowserWindow {
+        StageTabs.BrowserWindow(id: id, tabs: [StageTabs.Tab(id: id * 10, title: active, url: "", active: true, attached: false)])
+    }
+    t.expectEqual(StageTabs.pair([(7, "Mail"), (8, "Example Domain")], with: [browser(5, "Example Domain"), browser(3, "Mail")]), [7: 1, 8: 0], "distinct titles pair directly")
+    t.expectEqual(StageTabs.pair([(641, "Example Domain"), (640, "Example Domain")], with: [browser(9002, "Example Domain"), browser(9001, "Example Domain")]), [640: 1, 641: 0], "twins (two profiles on one site) pair in creation order on both sides")
+    t.expectEqual(StageTabs.pair([(641, "Example Domain")], with: [browser(9002, "Example Domain"), browser(9001, "Example Domain")]), [:], "one window and two candidates is not guessed")
+    t.expectEqual(StageTabs.pair([(9, "")], with: [browser(1, "")]), [:], "an untitled window pairs with nothing")
 
     let staged = CGRect(x: 4151, y: 1394, width: 230, height: 408)
     let mainArea = CGRect(x: 0, y: 30, width: 2500, height: 1050)

@@ -64,8 +64,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     enum Placement {
         /// Where the window was before it came to the stage.
         case home
-        /// So that the point the user clicked in the live view rests under
-        /// the cursor.
+        /// So that the point the user clicked in the window's thumbnail
+        /// rests under the cursor.
         case underCursor(grabbed: CGPoint, cursor: CGPoint)
     }
 
@@ -515,7 +515,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     // MARK: - The user taking windows over, and handing them back
 
     /// Moves a window off the stage into the user's hands: to its home, or
-    /// under their cursor when they clicked it in the live view, then raises
+    /// under their cursor when they clicked its thumbnail, then raises
     /// it and brings its application to the front. Through the accessibility
     /// API rather than NSRunningApplication: since macOS 14 an application
     /// that is not itself active (the host never is) may not hand activation
@@ -569,14 +569,16 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         return StageMove(windowID: id, app: name, title: title, from: FrameJSON(frame), to: FrameJSON(landed), ok: true, note: "\(actor); locked for amcu until handed back")
     }
 
-    /// The window the user clicked in the live view: the frontmost one on the
-    /// stage at that point.
-    func takeOver(at stagePoint: CGPoint, cursor: CGPoint) {
-        guard let window = windowsOnStage().first(where: { $0.frame.cgRect.contains(stagePoint) }) else {
-            note("nothing to take over there: no window at that spot on the stage")
+    /// A click in a window's thumbnail, at `fraction` of the window from its
+    /// top-left corner: that spot of the window comes to rest under the
+    /// cursor.
+    func takeOver(_ id: CGWindowID, grabbedAt fraction: CGPoint, cursor: CGPoint) {
+        guard let window = windowsOnStage().first(where: { $0.windowID == id }) else {
+            note("nothing to take over: window \(id) has left the stage")
             return
         }
-        let move = takeOver(window.windowID, placement: .underCursor(grabbed: stagePoint, cursor: cursor))
+        let grabbed = StageGeometry.point(in: window.frame.cgRect, fraction: fraction)
+        let move = takeOver(id, placement: .underCursor(grabbed: grabbed, cursor: cursor))
         if !move.ok { note("could not take \(move.app) over: \(move.note ?? "unknown reason")") }
     }
 
@@ -782,15 +784,19 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         return result
     }
 
-    /// Forgets windows that closed or left the stage some other way. A
-    /// minimised one is kept: the window list omits it, but restoring it
-    /// brings it back onto the stage.
+    /// Forgets windows that closed or left the stage some other way. One that
+    /// is merely off screen for now is kept while its frame is still on the
+    /// stage: minimised, or anything that briefly empties the on-screen list
+    /// (a put window came back "not put here by amcu" after a night, its home
+    /// lost).
     private func prune() {
         guard !records.isEmpty else { return }
         let present = Set(windowsOnStage().map(\.windowID))
-        for (id, record) in records where !present.contains(id) {
-            if AX.bool(record.element, kAXMinimizedAttribute as String) == true,
-               let frame = AX.frame(record.element), StageGeometry.isOnStage(frame, stage: stageBounds) {
+        let absent = records.filter { !present.contains($0.key) }
+        guard !absent.isEmpty else { return }
+        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        for (id, record) in absent {
+            if existing.contains(id), let frame = AX.frame(record.element), StageGeometry.isOnStage(frame, stage: stageBounds) {
                 continue
             }
             records[id] = nil
@@ -882,7 +888,9 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         guard !stopping else { return }
         prune()
         pruneTakeovers()
-        if windowsOnStage().isEmpty && takeovers.isEmpty {
+        // Not empty while amcu still holds a put window, even if the window
+        // list cannot see it right now: leaving would dump it on the user.
+        if windowsOnStage().isEmpty && records.isEmpty && takeovers.isEmpty {
             let start = emptySince ?? Date()
             emptySince = start
             if Date().timeIntervalSince(start) >= Stage.idleExit {

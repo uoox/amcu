@@ -192,7 +192,9 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   and `scan` see what it shows now, where a minimised window gives a stale
   frame — and every verb works on it as anywhere else; `amcu windows` marks
   it "on the stage". The first `put` starts the stage; the user gets a menu
-  bar icon with a live view of it and a "take over" button per window.
+  bar icon whose window shows every staged window live, a browser window's
+  tabs under its picture (the ones your debugger is on marked "amcu"), and
+  a "take over" button per window.
   Windows the application opens later (dialogs, new documents) appear on the
   user's screen first, because macOS opens them where the user is, and are
   moved over within a fraction of a second — except while the user is
@@ -203,8 +205,8 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   staged, or `amcu stage release --app <selector>` to put its windows back
   where they were; `amcu stage stop` does that for everything and removes
   the display. An empty stage removes itself after 15 minutes.
-  The user can take a window over at any time: clicking it in the panel's
-  live view (or its "take over" button) brings it to their screen and
+  The user can take a window over at any time: clicking its picture in the
+  stage window (or its "take over" button) brings it to their screen and
   switches to it. From then on every acting verb on that application —
   click, type, set-value, key, scroll, drag, window, menu-item, stage put —
   fails with `taken_over` until they press "hand back", which returns the
@@ -214,7 +216,7 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   again before you continue: the user may have changed things.
   When the user has to act in a staged window (a password, a 2FA prompt),
   `amcu stage release --app <selector> --activate` hands it to them — ask
-  first; it counts as a take-over — or `amcu stage show` opens the panel so
+  first; it counts as a take-over — or `amcu stage show` opens the stage window so
   they can take it over themselves. The cursor is kept off the stage, and
   `--mode foreground` is refused there. `amcu stage status` lists what is on
   it, including windows amcu did not put there, and what the user holds.

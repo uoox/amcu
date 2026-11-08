@@ -94,21 +94,16 @@ public enum StageGeometry {
         return (common.width * common.height) / (frame.width * frame.height)
     }
 
-    /// The stage point under a click in the panel's live view, which shows
-    /// the whole stage aspect-fitted into a view of `viewSize` (AppKit view
-    /// coordinates, y up). Nil outside the picture.
-    public static func stagePoint(fromPreview point: CGPoint, viewSize: CGSize, stage: CGRect) -> CGPoint? {
-        guard viewSize.width > 0, viewSize.height > 0, stage.width > 0, stage.height > 0 else { return nil }
-        let scale = min(viewSize.width / stage.width, viewSize.height / stage.height)
-        let shown = CGSize(width: stage.width * scale, height: stage.height * scale)
-        let inset = CGPoint(x: (viewSize.width - shown.width) / 2, y: (viewSize.height - shown.height) / 2)
-        let x = (point.x - inset.x) / scale
-        let fromTop = (inset.y + shown.height - point.y) / scale
-        guard x >= 0, x < stage.width, fromTop >= 0, fromTop < stage.height else { return nil }
-        return CGPoint(x: stage.minX + x, y: stage.minY + fromTop)
+    /// The point of a window at a fraction of its size from its top-left
+    /// corner: where the user clicked in its thumbnail, which has the
+    /// window's proportions. Held inside the window.
+    public static func point(in window: CGRect, fraction: CGPoint) -> CGPoint {
+        let x = min(max(fraction.x, 0), 1)
+        let y = min(max(fraction.y, 0), 1)
+        return CGPoint(x: window.minX + x * window.width, y: window.minY + y * window.height)
     }
 
-    /// Where a window taken over from the live view lands: the point the user
+    /// Where a window taken over from its thumbnail lands: the point the user
     /// clicked comes to rest under the cursor, then the window is pulled inside
     /// the usable area (and stops lining up exactly when it had to be).
     public static func alignedOrigin(window: CGRect, grabbed: CGPoint, cursor: CGPoint, within area: CGRect) -> CGPoint {
