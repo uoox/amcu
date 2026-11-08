@@ -44,6 +44,21 @@ public struct BrowserEndpoint: Encodable {
     /// fallback for the browser name.
     public static func fromHello(_ result: [String: Any], browser fallbackBrowser: String, pid: pid_t, socket: String) -> BrowserEndpoint {
         func text(_ key: String) -> String? { (result[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        // macOS 27's System Policy sandbox denies a host that Chrome spawned
+        // any read under Chrome's own data directory (`deny file-read-data
+        // …/Google/Chrome/Local State` in the sandbox log), so the host answers
+        // with the user data dir only. The CLI runs under the agent's host and
+        // usually may read it, so it finishes the inference here.
+        var profileDir = text("profileDir")
+        var profileName = text("profileName")
+        if let root = text("userDataDir").map({ URL(fileURLWithPath: $0, isDirectory: true) }) {
+            if profileDir == nil, let id = text("instanceId") {
+                profileDir = ProfileLocator.profileDirectory(instanceID: id, extensionID: text("extensionId") ?? BrowserBridge.extensionID, userDataDir: root)
+            }
+            if profileName == nil, let profileDir {
+                profileName = ProfileLocator.profileName(userDataDir: root, profileDir: profileDir)
+            }
+        }
         return BrowserEndpoint(
             browser: text("browser") ?? fallbackBrowser,
             pid: pid,
@@ -54,8 +69,8 @@ public struct BrowserEndpoint: Encodable {
             instanceId: text("instanceId"),
             label: text("label"),
             userDataDir: text("userDataDir"),
-            profileDir: text("profileDir"),
-            profileName: text("profileName"),
+            profileDir: profileDir,
+            profileName: profileName,
             ready: result["ready"] as? Bool ?? true
         )
     }
