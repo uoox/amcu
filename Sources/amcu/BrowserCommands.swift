@@ -18,6 +18,7 @@ enum BrowserCommands {
                   [--extension-dir D] [--manifest-dir D]   (a browser run with --user-data-dir reads
                                         <that dir>/NativeMessagingHosts; point --manifest-dir there)
                   [--no-reload]             do not ask running extensions to reload themselves
+                  [--profile P]             reload only that profile's extension (others keep their state)
                                             (each browser profile loads the extension separately:
                                             Load unpacked once in every profile amcu should drive)
                   --browser safari          build and register the Safari container app (~/Applications/
@@ -344,7 +345,12 @@ enum BrowserCommands {
         // --no-reload leaves the user's browser untouched.
         var reloaded: [String] = []
         var notReloaded: [String] = []
-        let running = BrowserClient.discover().filter { $0.browser != SafariBridge.browserName }
+        // --profile narrows the reload to one connection, so updating the
+        // binary while another agent works in a different profile does not
+        // drop that profile's debugger attachments and session state.
+        let running = try flags.string("profile") == nil
+            ? BrowserClient.discover().filter { $0.browser != SafariBridge.browserName }
+            : [client(flags).endpoint]
         let skipReload = flags.has("no-reload")
         for endpoint in running {
             if !skipReload, (try? BrowserClient(endpoint: endpoint).request("extension.reload", timeout: 5)) != nil {
@@ -728,12 +734,15 @@ enum BrowserCommands {
         if flags.has("hide") {
             let result = try client.request("window.hide", params: try baseParams(flags), timeout: 10)
             emit(client, action: "window-hide", result: result) {
-                result["window"].isNull ? "no amcu window is open" : "amcu window \(result["window"]["id"].int ?? 0) minimised (screenshots restore it unfocused when they need it to render)"
+                guard !result["window"].isNull else { return "no amcu window is open" }
+                return "amcu window \(result["window"]["id"].int ?? 0) \(windowPlace(result["window"]))"
             }
             return
         }
         if flags.has("close") {
-            let result = try client.request("window.close", params: try baseParams(flags), timeout: 10)
+            var params = try baseParams(flags)
+            params["force"] = flags.has("force")
+            let result = try client.request("window.close", params: params, timeout: 10)
             emit(client, action: "window-close", result: result) {
                 result["closed"].bool == true ? "closed the amcu window and its tabs" : "no amcu window is open"
             }
@@ -746,12 +755,23 @@ enum BrowserCommands {
                 return "no amcu window is open (the first `amcu browser tab --new` creates it)"
             }
             let window = result["window"]
-            var lines = ["amcu window \(window["id"].int ?? 0): \(window["state"].string ?? "?"), \(window["focused"].bool == true ? "focused" : "not focused"), \(window["width"].int ?? 0)x\(window["height"].int ?? 0)"]
+            var lines = ["amcu window \(window["id"].int ?? 0): \(windowPlace(window))"]
             for tab in window["tabs"].array {
                 lines.append("  id=\(tab["id"].int ?? 0)\t\(tab["title"].string ?? "")\t\(tab["url"].string ?? "")\(tab["active"].bool == true ? "  (active)" : "")")
             }
             return lines.joined(separator: "\n")
         }
+    }
+
+    /// One phrase for where the amcu window is — minimised in the Dock, or on
+    /// screen and whether it holds the user's focus.
+    static func windowPlace(_ window: JSONValue) -> String {
+        let size = "\(window["width"].int ?? 0)x\(window["height"].int ?? 0)"
+        if window["hidden"].bool == true {
+            return "minimised in the Dock (its tabs keep rendering there; `window --show` brings it on screen), \(size)"
+        }
+        let focus = window["focused"].bool == true ? "focused — the user sees it; `window --hide` puts it away" : "not focused"
+        return "on screen, \(window["state"].string ?? "?"), \(focus), \(size)"
     }
 
     static func navigate(_ flags: Flags) throws {

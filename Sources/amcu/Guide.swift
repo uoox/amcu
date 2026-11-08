@@ -60,6 +60,21 @@ STARTING AN APPLICATION
   be a placeholder: one zero-size window, no window id, the application's
   name as title. Wait and snapshot again rather than acting on it.
 
+WINDOWS ON OTHER DESKTOPS, MINIMISED WINDOWS
+  An application the user has put on another desktop (Space) is driven the
+  same way: `windows` lists those windows too, marked "(on another
+  desktop)"; snapshot, click, type and screenshot work on them, and nothing
+  switches desktops. Minimised windows are listed and driven as well. This
+  is how an application the agent works in stays out of the user's sight:
+  the user puts it on a desktop of its own, or minimises it. amcu cannot
+  create a desktop or move a window to one without a visible switch, so it
+  does not try. `screenshot` of a window on another desktop comes from the
+  window server rather than ScreenCaptureKit (the result says so) and is
+  current. A minimised window is not composited at all: its screenshot is
+  the last frame from before it was minimised, usually blank, and the result
+  warns; read its tree instead, or for a browser tab use `amcu browser
+  screenshot`, which renders the page itself.
+
 DISABLED CONTROLS ARE REFUSED
   Pressing a disabled control through the accessibility API reports success
   while the application ignores it entirely, so element commands read the live

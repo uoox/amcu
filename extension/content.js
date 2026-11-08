@@ -278,7 +278,8 @@
       if (!el) continue;
       out.push(el);
       const kids = [];
-      if (el.shadowRoot) for (const c of el.shadowRoot.children) kids.push(c);
+      const shadow = shadowOf(el);
+      if (shadow) for (const c of shadow.children) kids.push(c);
       for (const c of el.children) kids.push(c);
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
     }
@@ -653,8 +654,22 @@
   // ---------------------------------------------------------------------------
   // Tree walking (light DOM, open shadow roots, slots)
 
+  // Closed shadow roots hide their contents from the page, not from an
+  // extension: Chrome's chrome.dom opens them for content scripts (Safari
+  // has no such API and sees open roots only).
+  function shadowOf(el) {
+    if (el.shadowRoot) return el.shadowRoot;
+    try {
+      if (typeof chrome !== 'undefined' && chrome.dom && chrome.dom.openOrClosedShadowRoot && el instanceof Element) {
+        return chrome.dom.openOrClosedShadowRoot(el) || null;
+      }
+    } catch (_) { /* not an element the API accepts */ }
+    return null;
+  }
+
   function childNodesOf(el) {
-    if (el.shadowRoot) return Array.from(el.shadowRoot.childNodes);
+    const shadow = shadowOf(el);
+    if (shadow) return Array.from(shadow.childNodes);
     if (tagOf(el) === 'slot') return el.assignedNodes({ flatten: true });
     return Array.from(el.childNodes);
   }
@@ -1162,9 +1177,11 @@
 
   function hitTest(el, x, y) {
     let hit = document.elementFromPoint(x, y);
-    // Descend through open shadow roots to the innermost target.
-    while (hit && hit.shadowRoot) {
-      const inner = hit.shadowRoot.elementFromPoint(x, y);
+    // Descend through shadow roots (closed ones too) to the innermost target.
+    for (;;) {
+      const shadow = hit && shadowOf(hit);
+      if (!shadow) break;
+      const inner = shadow.elementFromPoint(x, y);
       if (!inner || inner === hit) break;
       hit = inner;
     }
@@ -1413,7 +1430,7 @@
 
   function deepActiveElement() {
     let active = document.activeElement;
-    while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+    for (let shadow = active && shadowOf(active); shadow && shadow.activeElement; shadow = shadowOf(active)) active = shadow.activeElement;
     return active || document.body;
   }
 

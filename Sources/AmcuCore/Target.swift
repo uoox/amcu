@@ -27,14 +27,29 @@ public struct WindowInfo: Codable, Sendable {
     public let frame: FrameJSON
     public let minimized: Bool
     public let main: Bool
+    /// The window lives on a desktop (Space) other than the one the user is
+    /// looking at; it was found through the window server, not `AXWindows`.
+    public let onAnotherDesktop: Bool
 
-    public init(windowID: CGWindowID?, index: Int, title: String?, frame: FrameJSON, minimized: Bool, main: Bool) {
+    public init(windowID: CGWindowID?, index: Int, title: String?, frame: FrameJSON, minimized: Bool, main: Bool, onAnotherDesktop: Bool = false) {
         self.windowID = windowID
         self.index = index
         self.title = title
         self.frame = frame
         self.minimized = minimized
         self.main = main
+        self.onAnotherDesktop = onAnotherDesktop
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
+        index = try c.decode(Int.self, forKey: .index)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        frame = try c.decode(FrameJSON.self, forKey: .frame)
+        minimized = try c.decode(Bool.self, forKey: .minimized)
+        main = try c.decode(Bool.self, forKey: .main)
+        onAnotherDesktop = try c.decodeIfPresent(Bool.self, forKey: .onAnotherDesktop) ?? false
     }
 }
 
@@ -167,7 +182,7 @@ public enum Target {
                 "If it clearly has visible windows, toggle Accessibility off and on for the host application in System Settings — macOS can hold a stale grant."
             ])
         }
-        return windowElements.enumerated().map { index, element in
+        var result: [(element: AXUIElement, info: WindowInfo)] = windowElements.enumerated().map { index, element in
             let frame = AX.frame(element) ?? .zero
             let info = WindowInfo(
                 windowID: AX.windowID(element),
@@ -178,6 +193,43 @@ public enum Target {
                 main: AX.bool(element, kAXMainAttribute as String) ?? false
             )
             return (element, info)
+        }
+        // Windows on other desktops are missing from AXWindows; the window
+        // server still lists them, and a remote token reaches their element.
+        let known = Set(result.compactMap(\.info.windowID))
+        for window in windowServerWindows(pid: app.processIdentifier) where !known.contains(window.id) {
+            guard let element = AX.remoteWindow(pid: app.processIdentifier, windowID: window.id) else { continue }
+            let info = WindowInfo(
+                windowID: window.id,
+                index: result.count,
+                title: AX.string(element, kAXTitleAttribute as String) ?? window.name,
+                frame: FrameJSON(AX.frame(element) ?? window.frame),
+                minimized: AX.bool(element, kAXMinimizedAttribute as String) ?? false,
+                main: false,
+                onAnotherDesktop: true
+            )
+            result.append((element, info))
+        }
+        return result
+    }
+
+    /// Off-screen, normal-level, named windows of a process as the window
+    /// server sees them. Names need Screen Recording; without it nothing is
+    /// found here, and the AX list stands alone. The name requirement also
+    /// skips a browser's hidden helper windows (omnibox popups, tab previews),
+    /// each of which would cost a full remote-token search.
+    static func windowServerWindows(pid: pid_t) -> [(id: CGWindowID, name: String, frame: CGRect)] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return list.compactMap { entry in
+            guard (entry[kCGWindowOwnerPID as String] as? pid_t) == pid,
+                  (entry[kCGWindowLayer as String] as? Int) == 0,
+                  (entry[kCGWindowIsOnscreen as String] as? Bool) != true,
+                  let id = entry[kCGWindowNumber as String] as? CGWindowID,
+                  let name = entry[kCGWindowName as String] as? String, !name.isEmpty,
+                  let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat],
+                  let width = bounds["Width"], let height = bounds["Height"], width >= 100, height >= 100
+            else { return nil }
+            return (id, name, CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: width, height: height))
         }
     }
 

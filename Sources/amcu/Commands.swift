@@ -316,7 +316,7 @@ enum Commands {
         Output.emit(Payload(windows: list)) {
             list.map { window in
                 let frame = window.frame
-                let marks = [window.main ? "main" : nil, window.minimized ? "minimized" : nil].compactMap { $0 }
+                let marks = [window.main ? "main" : nil, window.minimized ? "minimized" : nil, window.onAnotherDesktop ? "on another desktop" : nil].compactMap { $0 }
                 let suffix = marks.isEmpty ? "" : "  (\(marks.joined(separator: ", ")))"
                 return "index=\(window.index)\tid=\(window.windowID.map(String.init) ?? "-")\t\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height))\t\(window.title ?? "(untitled)")\(suffix)"
             }.joined(separator: "\n")
@@ -746,6 +746,22 @@ enum Commands {
                 "These visibly disturb the user, which is why no other command does them for you."
             ])
         }
+        // Applications apply geometry asynchronously (Chrome animates and may
+        // pull a window back on screen), so the frame is read back after the
+        // app settles and reported as what actually happened.
+        if try flags.point("move") != nil || flags.point("resize") != nil {
+            _ = Settle.wait(pid: target.app.processIdentifier)
+            if let frame = AX.frame(target.windowElement) {
+                let landed = "now at \(Int(frame.origin.x)),\(Int(frame.origin.y)) \(Int(frame.width))x\(Int(frame.height))"
+                if let point = try flags.point("move"), abs(frame.origin.x - point.x) > 1 || abs(frame.origin.y - point.y) > 1 {
+                    performed.append("\(landed) — the application kept it from \(Int(point.x)),\(Int(point.y)) (macOS keeps a title bar on screen; some apps keep the whole window visible)")
+                } else {
+                    performed.append(landed)
+                }
+            } else {
+                performed.append("unverified: the window's frame could not be read back")
+            }
+        }
         let result = ActionResult(action: "window", mode: nil, target: target.windowInfo.title ?? "window", detail: performed.joined(separator: ", "))
         Output.emit(result) { result.text }
     }
@@ -865,7 +881,8 @@ enum Commands {
                 "Run `amcu windows --app <selector>` and pass an explicit --window-id."
             ])
         }
-        let image = try Capture.window(id: windowID)
+        let captured = try Capture.capture(id: windowID, preferWindowServer: target.windowInfo.onAnotherDesktop)
+        let image = captured.image
         let path = flags.string("out") ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("amcu-\(windowID).png").path
         try Capture.writePNG(image, to: URL(fileURLWithPath: path))
@@ -874,9 +891,19 @@ enum Commands {
             let path: String
             let width: Int
             let height: Int
+            let via: String
+            let warning: String?
         }
-        let payload = Payload(path: path, width: image.width, height: image.height)
-        Output.emit(payload) { "wrote \(image.width)x\(image.height) capture to \(path)" }
+        // The window server stops compositing a minimised window, so both
+        // capture paths return its last frame, usually a blank one.
+        let warning = target.windowInfo.minimized
+            ? "the window is minimised: this is its last frame before minimising, not what it shows now; restore it, or for a browser tab use `amcu browser screenshot`"
+            : nil
+        let payload = Payload(path: path, width: image.width, height: image.height, via: captured.via, warning: warning)
+        var line = "wrote \(image.width)x\(image.height) capture to \(path)"
+        if captured.via == "window-server" { line += " (window on another desktop: captured through the window server)" }
+        if let warning { line += "\nwarning: \(warning)" }
+        Output.emit(payload) { line }
     }
 
     // MARK: - Diagnostics

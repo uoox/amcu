@@ -135,6 +135,34 @@ public enum AX {
 
     public static var canResolveWindowID: Bool { getWindowFn != nil }
 
+    /// `kAXWindowsAttribute` omits windows on other desktops (Spaces).
+    /// `_AXUIElementCreateWithRemoteToken` builds an element from a 20-byte
+    /// token — pid, zero, the 'coco' magic, element id — and yabai found that
+    /// an application's element ids are small integers, so a window the list
+    /// omits is reached by trying ids until `_AXUIElementGetWindow` answers
+    /// with its CGWindowID (measured: Chrome's window was id 1583, 34 ms).
+    /// Private, resolved at runtime; absence means such windows stay invisible.
+    private static let createWithTokenFn: (@convention(c) (CFData) -> Unmanaged<AXUIElement>?)? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementCreateWithRemoteToken") else { return nil }
+        return unsafeBitCast(symbol, to: (@convention(c) (CFData) -> Unmanaged<AXUIElement>?).self)
+    }()
+
+    public static var canReachRemoteWindows: Bool { createWithTokenFn != nil && getWindowFn != nil }
+
+    public static func remoteWindow(pid: pid_t, windowID: CGWindowID, maxElementID: UInt64 = 0x7fff) -> AXUIElement? {
+        guard let create = createWithTokenFn, let getWindow = getWindowFn else { return nil }
+        var bytes = [UInt8](repeating: 0, count: 20)
+        withUnsafeBytes(of: UInt32(pid).littleEndian) { bytes.replaceSubrange(0..<4, with: $0) }
+        withUnsafeBytes(of: UInt32(0x636f_636f).littleEndian) { bytes.replaceSubrange(8..<12, with: $0) }
+        for elementID in UInt64(0)...maxElementID {
+            withUnsafeBytes(of: elementID.littleEndian) { bytes.replaceSubrange(12..<20, with: $0) }
+            guard let element = create(Data(bytes) as CFData)?.takeRetainedValue() else { continue }
+            var found: CGWindowID = 0
+            if getWindow(element, &found) == .success, found == windowID { return element }
+        }
+        return nil
+    }
+
     public static func windowID(_ element: AXUIElement) -> CGWindowID? {
         guard let fn = getWindowFn else { return nil }
         var identifier: CGWindowID = 0

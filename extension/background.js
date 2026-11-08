@@ -267,42 +267,112 @@ connect();
 // ---------------------------------------------------------------------------
 // The automation window.
 //
-// Tabs the CLI opens live in a window of amcu's own, created unfocused so the
-// user's focus, active tab and window order are never touched. Inside that
-// window tabs can be freely activated — activation is only visible when a
-// window is focused — which keeps them rendering, so screenshots work without
-// ever surfacing anything. Its first tab is a pinned extension page that says
-// what the window is, and keeps the window alive between tasks.
+// Tabs the CLI opens live in a window of amcu's own, created minimised and
+// never focused, so the user's focus, active tab and window order are never
+// touched: an unfocused window would still be ordered above most of the
+// user's windows, a minimised one is only a thumbnail in the Dock. Inside it
+// tabs can be freely activated. The tabs keep rendering because the debugger
+// attachment turns on focus emulation, which holds a capture lock on the
+// page (document.visibilityState stays "visible"), so screenshots work
+// without ever surfacing anything. Its first tab is a pinned extension page
+// that says what the window is, and keeps the window alive between tasks.
+//
+// The window id lives in chrome.storage.local: session storage is emptied by
+// an extension reload, and the reload also closes the extension's own pages,
+// the pinned one included, so the page is put back when the window is next
+// looked up. Window ids restart with the browser, so onStartup forgets it.
 
 const AMCU_WINDOW_KEY = 'amcuWindow';
+const PLACEHOLDER_KEY = 'amcuPlaceholder';
+const HOME_SIZE = { width: 1280, height: 850 };
+
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.local.remove([AMCU_WINDOW_KEY, PLACEHOLDER_KEY]).catch(() => {});
+});
+
+function homeURL() {
+  return chrome.runtime.getURL('window.html');
+}
+
+function isHome(tab) {
+  const home = homeURL();
+  return tab.url === home || tab.pendingUrl === home;
+}
 
 async function amcuWindowId() {
-  const stored = await chrome.storage.session.get(AMCU_WINDOW_KEY);
+  const stored = await chrome.storage.local.get(AMCU_WINDOW_KEY);
   const id = stored[AMCU_WINDOW_KEY];
   if (id === undefined || id === null) return null;
-  try {
-    const win = await chrome.windows.get(id);
-    if (win && win.type === 'normal') return id;
-  } catch (_) { /* closed */ }
-  await chrome.storage.session.remove(AMCU_WINDOW_KEY);
-  return null;
+  const win = await chrome.windows.get(id, { populate: true }).catch(() => null);
+  if (!win || win.type !== 'normal') {
+    await chrome.storage.local.remove(AMCU_WINDOW_KEY);
+    return null;
+  }
+  await ensureHomePage(win);
+  return id;
+}
+
+async function ensureHomePage(win) {
+  if (!(win.tabs || []).some(isHome)) {
+    await chrome.tabs.create({ windowId: win.id, url: homeURL(), pinned: true, active: false }).catch(() => {});
+  }
+  const stored = await chrome.storage.local.get(PLACEHOLDER_KEY);
+  const placeholder = stored[PLACEHOLDER_KEY];
+  if (placeholder) {
+    await chrome.storage.local.remove(PLACEHOLDER_KEY);
+    const tab = await chrome.tabs.get(placeholder).catch(() => null);
+    if (tab && tab.windowId === win.id && tab.url === 'about:blank') await chrome.tabs.remove(tab.id).catch(() => {});
+  }
 }
 
 async function ensureAmcuWindow() {
   const existing = await amcuWindowId();
   if (existing !== null) return existing;
-  const win = await chrome.windows.create({
-    url: chrome.runtime.getURL('window.html'),
-    focused: false,
-    type: 'normal',
-    width: 1280,
-    height: 850
-  });
-  await chrome.storage.session.set({ [AMCU_WINDOW_KEY]: win.id });
+  // Chrome on macOS ignores `state: 'minimized'` at creation (the window
+  // comes up in the last window's state, maximised included), so the window
+  // is created unfocused with explicit bounds and minimised right after.
+  const win = await chrome.windows.create({ url: homeURL(), focused: false, type: 'normal', width: HOME_SIZE.width, height: HOME_SIZE.height });
+  await chrome.storage.local.set({ [AMCU_WINDOW_KEY]: win.id });
   const first = win.tabs && win.tabs[0];
   if (first) await chrome.tabs.update(first.id, { pinned: true }).catch(() => {});
+  await hideWindow(win.id);
   return win.id;
 }
+
+// Minimising is refused while the user holds the window (a drag in
+// progress), so it is retried briefly; the result says what happened.
+async function hideWindow(id) {
+  let win = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    win = await chrome.windows.update(id, { state: 'minimized' }).catch(() => null);
+    if (!win) break;
+    if (win.state === 'minimized') break;
+    await sleep(250);
+    win = await chrome.windows.get(id).catch(() => null);
+    if (!win || win.state === 'minimized') break;
+  }
+  return win ? windowPlace(win) : null;
+}
+
+async function revealWindow(id) {
+  const win = await chrome.windows.update(id, { state: 'normal', focused: true });
+  return windowPlace(win);
+}
+
+function windowPlace(win) {
+  return {
+    id: win.id,
+    state: win.state,
+    focused: !!win.focused,
+    hidden: win.state === 'minimized',
+    width: win.width,
+    height: win.height
+  };
+}
+
+// After a reload, put the pinned page back and drop the placeholder now
+// rather than at the next command.
+amcuWindowId().catch(() => {});
 
 async function inAmcuWindow(tab) {
   const id = await amcuWindowId();
@@ -1435,6 +1505,18 @@ const handlers = {
   },
 
   async 'extension.reload'() {
+    // Reloading closes the extension's own pages; when the pinned page is
+    // the amcu window's only tab, the window would close with it — and with
+    // the profile's last window goes the profile. A blank tab holds the
+    // window open; the next lookup removes it again.
+    const id = await amcuWindowId();
+    if (id !== null) {
+      const win = await chrome.windows.get(id, { populate: true }).catch(() => null);
+      if (win && (win.tabs || []).every(isHome)) {
+        const tab = await chrome.tabs.create({ windowId: id, url: 'about:blank', active: false }).catch(() => null);
+        if (tab) await chrome.storage.local.set({ [PLACEHOLDER_KEY]: tab.id });
+      }
+    }
     // Answer first, then reload: the host sees the disconnect and the next
     // connection is the new code.
     setTimeout(() => chrome.runtime.reload(), 200);
@@ -1467,8 +1549,10 @@ const handlers = {
       create.active = true;
     }
     const tab = await chrome.tabs.create(create);
-    if (params.activate && !params.userWindow) {
-      await chrome.windows.update(tab.windowId, { focused: true });
+    if (!params.userWindow) {
+      // A discarded tab never answers the debugger; amcu's own tabs stay.
+      await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => {});
+      if (params.activate) await revealWindow(tab.windowId);
     }
     await setCurrentTab(session, tab.id);
     const loaded = params.url && params.wait !== false ? await waitForLoad(tab.id, params.timeoutMs || 30000) : tab;
@@ -1482,7 +1566,8 @@ const handlers = {
     await setCurrentTab(session, tab.id);
     if (params.activate) {
       await chrome.tabs.update(tab.id, { active: true });
-      await chrome.windows.update(tab.windowId, { focused: true });
+      if (await inAmcuWindow(tab)) await revealWindow(tab.windowId);
+      else await chrome.windows.update(tab.windowId, { focused: true });
     } else if (await inAmcuWindow(tab)) {
       // Activation inside the amcu window is invisible and keeps the tab
       // rendering; in the user's windows it would be a visible change.
@@ -1913,12 +1998,9 @@ const handlers = {
     const tab = await resolveTab(params);
     await ensureAttached(tab.id);
     // A tab that is not its window's active tab does not render. In the amcu
-    // window that is fixable invisibly; restore from minimised too, unfocused.
+    // window activating it is invisible (minimised or not, the window stays
+    // where it is; focus emulation keeps the page rendering).
     if (await inAmcuWindow(tab)) {
-      const win = await chrome.windows.get(tab.windowId).catch(() => null);
-      if (win && win.state === 'minimized') {
-        await chrome.windows.update(tab.windowId, { state: 'normal', focused: false }).catch(() => {});
-      }
       if (!tab.active) {
         await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
         await sleep(200);
@@ -2155,36 +2237,36 @@ const handlers = {
     const id = await amcuWindowId();
     if (id === null) return { window: null };
     const win = await chrome.windows.get(id, { populate: true });
-    return {
-      window: {
-        id: win.id,
-        state: win.state,
-        focused: !!win.focused,
-        width: win.width,
-        height: win.height,
-        tabs: (win.tabs || []).map(t => tabSummary(t))
-      }
-    };
+    const place = windowPlace(win);
+    place.tabs = (win.tabs || []).map(t => tabSummary(t));
+    return { window: place };
   },
 
   async 'window.show'() {
     const id = await ensureAmcuWindow();
-    const win = await chrome.windows.update(id, { state: 'normal', focused: true });
-    return { window: { id: win.id, state: win.state, focused: !!win.focused } };
+    return { window: await revealWindow(id) };
   },
 
   async 'window.hide'() {
     const id = await amcuWindowId();
     if (id === null) return { window: null };
-    const win = await chrome.windows.update(id, { state: 'minimized' });
-    return { window: { id: win.id, state: win.state, focused: !!win.focused } };
+    return { window: await hideWindow(id) };
   },
 
-  async 'window.close'() {
+  async 'window.close'(params) {
     const id = await amcuWindowId();
     if (id === null) return { closed: false };
+    // Chrome unloads a profile whose last window closes, and the extension,
+    // this connection and every session's state go with it.
+    const others = (await chrome.windows.getAll({ windowTypes: ['normal'] })).filter(w => w.id !== id);
+    if (!others.length && !params.force) {
+      throw new BridgeError('last_window', 'the amcu window is the only window of this browser profile; closing it would unload the profile and end this connection', [
+        'Close its tabs instead: `amcu browser tab --close --tab ID` for each one (`amcu browser window` lists them); the pinned page keeps the window alive.',
+        'Pass --force to close it anyway; amcu reconnects when a window of this profile is opened again.'
+      ]);
+    }
     await chrome.windows.remove(id);
-    await chrome.storage.session.remove(AMCU_WINDOW_KEY);
+    await chrome.storage.local.remove(AMCU_WINDOW_KEY);
     return { closed: true };
   },
 

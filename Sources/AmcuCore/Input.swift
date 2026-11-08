@@ -15,8 +15,12 @@ public enum DeliveryMode: String, Codable, Sendable, CaseIterable {
 /// Two things must be true for a pointer event posted with `postToPid` to land
 /// on the right pixel of a non-frontmost window:
 ///
-///  1. the window id must be written to the two `kCGMouseEventWindowUnderMousePointer`
-///     fields (51 and 52), otherwise the event is not associated with a window at all; and
+///  1. the window id must be written to the window fields — the private pair
+///     51 and 52 (window number, and the window that may handle the event; the
+///     pair Sky and wisp use, measured to route on their own) and the public
+///     `kCGMouseEventWindowUnderMousePointer` pair 91 and 92, which Chromium's
+///     synthetic-event filter reads — otherwise the event is not associated
+///     with a window at all; and
 ///  2. the window-local location must be set through `CGEventSetWindowLocation`,
 ///     otherwise WindowServer keeps the window association but collapses the
 ///     location to the window's top-left corner.
@@ -36,8 +40,14 @@ public enum EventTag {
 }
 
 public enum PointerInput {
-    static let kMouseEventWindowUnderMousePointer = CGEventField(rawValue: 51)!
-    static let kMouseEventWindowUnderMousePointerThatCanHandleThisEvent = CGEventField(rawValue: 52)!
+    static let windowNumberField = CGEventField(rawValue: 51)!
+    static let windowNumberThatCanHandleField = CGEventField(rawValue: 52)!
+
+    static func route(_ event: CGEvent, toWindow windowID: CGWindowID) {
+        for field in [windowNumberField, windowNumberThatCanHandleField, .mouseEventWindowUnderMousePointer, .mouseEventWindowUnderMousePointerThatCanHandleThisEvent] {
+            event.setIntegerValueField(field, value: Int64(windowID))
+        }
+    }
 
     typealias SetWindowLocationFn = @convention(c) (CGEvent, CGPoint) -> Void
 
@@ -66,8 +76,7 @@ public enum PointerInput {
         event.setIntegerValueField(.mouseEventClickState, value: clickState)
         EventTag.stamp(event)
         if let routing {
-            event.setIntegerValueField(kMouseEventWindowUnderMousePointer, value: Int64(routing.windowID))
-            event.setIntegerValueField(kMouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(routing.windowID))
+            route(event, toWindow: routing.windowID)
             setWindowLocation?(event, routing.local)
         }
         return event
@@ -163,8 +172,7 @@ public enum PointerInput {
                     "Run `amcu doctor`, pass --window-id, or use --mode foreground."
                 ])
             }
-            event.setIntegerValueField(kMouseEventWindowUnderMousePointer, value: Int64(windowID))
-            event.setIntegerValueField(kMouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+            route(event, toWindow: windowID)
             setWindowLocation?(event, windowLocal(global: global, windowFrame: windowFrame))
         }
         post(event, to: pid, mode: mode)
@@ -208,7 +216,10 @@ public enum PointerInput {
 
     static func post(_ event: CGEvent, to pid: pid_t, mode: DeliveryMode) {
         switch mode {
-        case .background: event.postToPid(pid)
+        case .background:
+            // Chromium's synthetic-event filter reads the target pid field.
+            event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+            event.postToPid(pid)
         case .foreground: event.post(tap: .cghidEventTap)
         }
     }

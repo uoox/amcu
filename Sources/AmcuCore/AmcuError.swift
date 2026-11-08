@@ -32,6 +32,9 @@ public struct AmcuError: Error, CustomStringConvertible {
         /// More than one browser connection (profile) could take the command
         /// and neither --browser nor --profile narrowed it to one.
         case ambiguousBrowser = "ambiguous_browser"
+        /// Closing amcu's window would close the last window of the browser
+        /// profile, unloading the extension and this connection with it.
+        case lastWindow = "last_window"
     }
 
     public let code: Code

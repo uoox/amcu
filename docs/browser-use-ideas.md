@@ -314,3 +314,20 @@ report — so everything below lands inside existing verbs.*
 - React controlled-input clearing: already covered — `fill` types through trusted `insertText`
   over a selected value, and `set-value` uses the native setter + input/change events.
 - `<select>` options inline: already in the snapshot.
+
+
+## 2026-11-08 survey: cua, Peekaboo, browsermcp, Playwright extension mode, chrome-devtools-mcp
+
+Done in 0.11.0: the amcu window is created minimised and stays so (focus emulation keeps its tabs rendering, measured), `autoDiscardable:false` on amcu's tabs, closed shadow roots through `chrome.dom.openOrClosedShadowRoot`, `last_window` refusal.
+
+| Idea | Source | Verdict |
+|---|---|---|
+| Check `document.visibilityState` before `Input.*` and screenshots; a hidden tab queues input and replays it when it becomes visible, and `captureScreenshot` returns blank/stale instead of failing | browsermcp hidden-tabs spike | **~** focus emulation is enabled at attach and makes the state `visible` (measured in a minimised window); add the check as a guard for the case another client reset emulation |
+| Discarded tabs never answer the debugger; wake with `tabs.reload`, not `activateTarget` | chrome-devtools-mcp #1230 | **★** for user tabs pinned with `tab --select` (amcu's own are not discardable now) |
+| Idle detach from the user's tabs: focus emulation makes `hasFocus()` true, chat and mail sites mark things read | chrome-devtools-mcp (emulation only on touched pages), browsermcp (10-min idle release) | **★** |
+| Remove other extensions' injected iframes before retrying a failed `debugger.attach` | browsermcp `removeOtherExtensionFrames` | ~ |
+| CDP method deny-list (`Network.getAllCookies`, `Target.*`, `Storage.*`) as a floor when running in the user's real profile | browsermcp `cdp-policy.ts` | ~ amcu's extension exposes no raw CDP; relevant only if `eval`-adjacent verbs grow |
+| Tab group as the authorisation boundary: dragging a tab into the group grants, out revokes; one colour per client | Playwright extension `connectedTabGroup.ts` | ~ an alternative to `tab --select` worth a look when the amcu window model proves insufficient |
+| `Page.bringToFront` before actions (Stagehand, agent-browser) | — | ✗ activates Chrome and hides the user's tab for ~100 ms per step |
+| Full snapshot to a `.yml` file, link in the tool result; incremental snapshots removed for lack of use | Playwright MCP #37795 → #41581 | ~ the diff stays (amcu is a CLI with state); "diff on stdout, full tree on disk with the path" is the combination to consider |
+| MCP by re-spawning the CLI with `--json` per call (agent-browser) | — | ~ cheapest wrapper; the real reasons for `amcu mcp` are the resident-process features (AXObserver, key-focus guard), see DESIGN backlog |

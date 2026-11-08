@@ -155,14 +155,21 @@ ACTING
   typing the value yourself.
 
 TABS, WINDOWS AND VISIBILITY
-  `tab --new` opens in amcu's background window: a separate, never-focused
-  Chrome window whose first tab is a pinned page explaining itself. The user's
-  focus, active tab and window order are untouched; tabs there stay rendered,
-  so screenshots work. The window appears on first use and is reused after
-  that; `amcu browser window` reports it, `window --hide` minimises it,
-  `window --close` closes it and its tabs.
-  `tab --new --activate` focuses that window so the user can watch;
-  `window --show` does the same later. `tab --new --user-window` opens in the
+  `tab --new` opens in amcu's background window: a separate Chrome window
+  that is created minimised and never focused, whose first tab is a pinned
+  page explaining itself. The user's focus, active tab and window order are
+  untouched — an unfocused window on screen would still sit above most of
+  the user's windows, a minimised one is a Dock thumbnail. Its tabs keep
+  rendering while minimised (the debugger's focus emulation holds the page
+  visible), so screenshots work without surfacing anything. The window is
+  reused after that; `amcu browser window` reports where it is, `window
+  --hide` minimises it again after the user opened it or `--show` brought it
+  up, `window --close` closes it and its tabs (refused when it is the
+  profile's last window — that would unload the profile and this connection;
+  `--force` overrides).
+  `tab --new --activate` brings that window on screen and focuses it so the
+  user can watch; `window --show` does the same later, and `window --hide`
+  is how you put it away once the user is done. `tab --new --user-window` opens in the
   user's own window instead — only when the user asked to be handed the page.
   `tab --select ID --activate` makes a tab visible in its window and focuses
   that window (a visible change).
