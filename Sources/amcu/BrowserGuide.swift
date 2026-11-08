@@ -175,6 +175,10 @@ TABS, WINDOWS AND VISIBILITY
   that window (a visible change).
   `navigate`, `back`, `forward`, `reload` wait for the load to finish;
   `--no-wait` and `wait --load` split that.
+  When the user has taken a window of this browser off amcu's stage (`amcu
+  guide`, THE STAGE), every verb that changes a page, a tab or the amcu
+  window fails with `taken_over` until they hand it back — for the whole
+  browser, every profile. Reading still works. Wait, or ask the user.
   Each agent has its own session without asking (the same rule as desktop
   commands: $AMCU_SESSION, else $AAA_SESSION or $CLAUDE_CODE_SESSION_ID),
   and so its own current tab; `--session NAME` splits further. Sessions

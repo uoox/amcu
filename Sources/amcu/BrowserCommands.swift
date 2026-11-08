@@ -121,6 +121,7 @@ enum BrowserCommands {
         if let path = flags.string("secrets") ?? ProcessInfo.processInfo.environment["AMCU_SECRETS"] {
             try SecretStore.load(path: path)
         }
+        if changesPageOrWindow(verb, flags) { try refuseIfTakenOver(flags) }
         switch verb {
         case "install": try install(flags)
         case "uninstall": try uninstall(flags)
@@ -164,6 +165,32 @@ enum BrowserCommands {
     }
 
     // MARK: - Shared
+
+    static let actingVerbs: Set<String> = [
+        "navigate", "goto", "open", "back", "forward", "reload", "eval", "evaluate",
+        "click", "hover", "type", "fill", "select-option", "select", "key", "press",
+        "scroll", "drag", "upload", "dialog", "resize"
+    ]
+
+    /// The verbs that change a page, a tab or the amcu window. Reading —
+    /// tabs, snapshot, find, screenshot, console, network, wait — never is.
+    static func changesPageOrWindow(_ verb: String, _ flags: Flags) -> Bool {
+        switch verb {
+        case "tab": return flags.has("new") || flags.has("close") || flags.has("activate")
+        case "window": return flags.has("show") || flags.has("hide") || flags.has("close")
+        default: return actingVerbs.contains(verb)
+        }
+    }
+
+    /// While the user holds a window of this browser, taken off the stage,
+    /// page actions are refused like desktop ones. The lock is per browser
+    /// process, not per tab: a window server window and a tab do not match up
+    /// reliably, and every profile's windows belong to the same process.
+    static func refuseIfTakenOver(_ flags: Flags) throws {
+        guard FileManager.default.fileExists(atPath: Stage.takeoversURL.path), !Stage.takeovers().isEmpty,
+              let pid = Stage.browserPID(for: try client(flags).endpoint) else { return }
+        try Stage.refuseIfTakenOver(pid: pid)
+    }
 
     static func client(_ flags: Flags) throws -> BrowserClient {
         let environment = ProcessInfo.processInfo.environment

@@ -64,6 +64,7 @@ enum Commands {
             }
         }
         let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
+        try Stage.refuseIfTakenOver(pid: app.processIdentifier)
         return (snapshot, node, app)
     }
 
@@ -139,6 +140,7 @@ enum Commands {
             }
             return ("ax:\(pressed.action)@point", nil)
         }
+        if mode == .foreground { try Stage.refuseForegroundPointer(at: global) }
         let focus = focusGuard(app, mode: mode)
         try PointerInput.click(PointerInput.ClickRequest(
             pid: app.processIdentifier,
@@ -186,6 +188,20 @@ enum Commands {
             "Use --mode background so the event is routed to the target window regardless of what is frontmost.",
             "Or bring the target to the front yourself first, if taking focus is acceptable."
         ])
+    }
+
+    /// The acting verbs leave an application alone while the user holds one
+    /// of its windows, taken off the stage; reading is still allowed.
+    static func actingTarget(_ flags: Flags) throws -> ResolvedTarget {
+        let target = try resolveTarget(flags)
+        try Stage.refuseIfTakenOver(pid: target.app.processIdentifier)
+        return target
+    }
+
+    static func actingApp(_ flags: Flags) throws -> NSRunningApplication {
+        let app = try resolveApp(flags, try flags.required("app"))
+        try Stage.refuseIfTakenOver(pid: app.processIdentifier)
+        return app
     }
 
     /// Snapshot coordinates are window-relative; `--screen` opts into absolute
@@ -336,7 +352,7 @@ enum Commands {
         Output.emit(Payload(windows: list)) {
             list.map { window in
                 let frame = window.frame
-                let marks = [window.main ? "main" : nil, window.minimized ? "minimized" : nil, window.onAnotherDesktop ? "on another desktop" : nil].compactMap { $0 }
+                let marks = [window.main ? "main" : nil, window.minimized ? "minimized" : nil, window.onAnotherDesktop ? "on another desktop" : nil, window.onStage ? "on the stage" : nil].compactMap { $0 }
                 let suffix = marks.isEmpty ? "" : "  (\(marks.joined(separator: ", ")))"
                 return "index=\(window.index)\tid=\(window.windowID.map(String.init) ?? "-")\t\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height))\t\(window.title ?? "(untitled)")\(suffix)"
             }.joined(separator: "\n")
@@ -488,7 +504,7 @@ enum Commands {
                 "Coordinates are window-relative unless --screen is passed."
             ])
         }
-        let target = try resolveTarget(flags)
+        let target = try actingTarget(flags)
         let mode = try deliveryMode(flags, requiresRouting: true)
         try assertForegroundIsSafe(mode, app: target.app)
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
@@ -609,7 +625,7 @@ enum Commands {
     static func type(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
-        let app = try resolveApp(flags, try flags.required("app"))
+        let app = try actingApp(flags)
         let delivery = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(delivery, app: app)
         let mode = delivery.pointerMode ?? .background
@@ -653,7 +669,7 @@ enum Commands {
 
     static func menuItem(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let app = try resolveApp(flags, try flags.required("app"))
+        let app = try actingApp(flags)
         let raw = try flags.required("path", hint: "For example --path \"File > Save\".")
         let path = raw.split(separator: ">").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let item = try Menus.find(path, in: app)
@@ -731,7 +747,7 @@ enum Commands {
 
     static func window(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let target = try resolveTarget(flags)
+        let target = try actingTarget(flags)
         var performed: [String] = []
 
         if flags.has("raise") {
@@ -785,7 +801,7 @@ enum Commands {
         try Permissions.requireAccessibility()
         let key = try flags.required("key", hint: "For example --key return, --key escape, --key a.")
         let modifiers = flags.list("mod")
-        let app = try resolveApp(flags, try flags.required("app"))
+        let app = try actingApp(flags)
         let delivery = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(delivery, app: app)
         let mode = delivery.pointerMode ?? .background
@@ -801,7 +817,7 @@ enum Commands {
     static func paste(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
         let text = try flags.required("text")
-        let app = try resolveApp(flags, try flags.required("app"))
+        let app = try actingApp(flags)
         let delivery = try deliveryMode(flags, requiresRouting: false)
         try assertForegroundIsSafe(delivery, app: app)
         let mode = delivery.pointerMode ?? .background
@@ -828,7 +844,7 @@ enum Commands {
 
     static func scroll(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let target = try resolveTarget(flags)
+        let target = try actingTarget(flags)
         let deltaX = try flags.int32("dx", min: -100_000, max: 100_000) ?? 0
         let deltaY = try flags.int32("dy", min: -100_000, max: 100_000) ?? 0
         guard deltaX != 0 || deltaY != 0 else {
@@ -845,6 +861,7 @@ enum Commands {
             ])
         }
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
+        if mode == .foreground { try Stage.refuseForegroundPointer(at: global) }
         let guarded = focusGuard(target.app, mode: mode)
         try PointerInput.scroll(
             pid: target.app.processIdentifier,
@@ -862,7 +879,7 @@ enum Commands {
 
     static func drag(_ flags: Flags) throws {
         try Permissions.requireAccessibility()
-        let target = try resolveTarget(flags)
+        let target = try actingTarget(flags)
         guard let from = try flags.point("from"), let to = try flags.point("to") else {
             throw AmcuError(.invalidArgument, "drag needs --from x,y and --to x,y")
         }
@@ -874,13 +891,19 @@ enum Commands {
             ])
         }
         let isScreenSpace = flags.has("screen")
+        let start = globalPoint(from, window: target.windowInfo, isScreenSpace: isScreenSpace)
+        let end = globalPoint(to, window: target.windowInfo, isScreenSpace: isScreenSpace)
+        if mode == .foreground {
+            try Stage.refuseForegroundPointer(at: start)
+            try Stage.refuseForegroundPointer(at: end)
+        }
         let guarded = focusGuard(target.app, mode: mode)
         try PointerInput.drag(
             pid: target.app.processIdentifier,
             windowID: target.windowInfo.windowID,
             windowFrame: target.windowInfo.frame.cgRect,
-            from: globalPoint(from, window: target.windowInfo, isScreenSpace: isScreenSpace),
-            to: globalPoint(to, window: target.windowInfo, isScreenSpace: isScreenSpace),
+            from: start,
+            to: end,
             steps: try flags.boundedInt("steps", min: 1, max: 500) ?? 12,
             mode: mode
         )
@@ -954,6 +977,7 @@ enum Commands {
         if flags.has("force") { SelfCheck.store(check) }
 
         let browsers = BrowserClient.discover()
+        let stage: StageStatus? = StageClient.isRunning() ? (try? StageClient.request("status", timeout: 5))?.status : nil
 
         struct ResponsibleJSON: Encodable {
             let pid: Int32
@@ -975,6 +999,8 @@ enum Commands {
             let osBuild: String
             let session: SessionJSON
             let browsers: [BrowserEndpoint]
+            let stage: StageStatus?
+            let stageAvailable: Bool
         }
         let effectiveSession = SessionName.resolve(explicit: flags.string("session"))
         let payload = Payload(
@@ -986,7 +1012,9 @@ enum Commands {
             axWindowIDs: AX.canResolveWindowID,
             osBuild: SelfCheck.osBuild,
             session: SessionJSON(name: effectiveSession.name, source: effectiveSession.source),
-            browsers: browsers
+            browsers: browsers,
+            stage: stage,
+            stageAvailable: VirtualDisplay.unavailableReason == nil
         )
         Output.emit(payload) {
             var lines = ["amcu doctor — \(SelfCheck.osBuild)"]
@@ -1018,6 +1046,14 @@ enum Commands {
                 lines.append("  [  ] browser bridge: no browser connected — optional; `amcu browser doctor` explains the one-time setup")
             } else {
                 lines.append("  [ok] browser bridge: \(browsers.map(\.summary).joined(separator: "; ")) connected — `amcu browser` drives web pages")
+            }
+            if let stage {
+                let bounds = stage.bounds
+                lines.append("  [ok] stage: display \(stage.displayID), \(Int(bounds.width))x\(Int(bounds.height)) at \(Int(bounds.x)),\(Int(bounds.y)), \(stage.windows.count) window\(stage.windows.count == 1 ? "" : "s") on it — `amcu stage status`")
+            } else if let reason = VirtualDisplay.unavailableReason {
+                lines.append("  [  ] stage: unavailable on this system — \(reason)")
+            } else {
+                lines.append("  [  ] stage: not running — optional; `amcu stage put --app S` moves a window to a display the user never sees")
             }
             return lines.joined(separator: "\n")
         }

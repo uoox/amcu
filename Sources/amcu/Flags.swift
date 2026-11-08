@@ -16,7 +16,9 @@ struct Flags {
         "replace", "clear", "load", "hard", "all", "accept", "dismiss", "diff",
         "show", "hide", "user-window", "human", "no-reload",
         // lab verbs
-        "headless", "keep-profile"
+        "headless", "keep-profile",
+        // stage verbs
+        "no-follow"
     ]
 
     init(_ arguments: [String]) throws {

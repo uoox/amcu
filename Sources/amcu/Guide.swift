@@ -184,6 +184,41 @@ WHAT IS REFUSED
   than from the user. The lists (and settle timing) are extended by the user in
   ~/.config/amcu/policy.json; `amcu policy` prints what is in effect.
 
+THE STAGE: A DISPLAY THE USER NEVER SEES
+  When an application has to stay open while you work it, put its windows on
+  the stage: `amcu stage put --app <selector>` (`--all` for every window,
+  `--window-id N` for one). The stage is a virtual display amcu adds off the
+  corner of the user's screen. A window there is fully drawn — `screenshot`
+  and `scan` see what it shows now, where a minimised window gives a stale
+  frame — and every verb works on it as anywhere else; `amcu windows` marks
+  it "on the stage". The first `put` starts the stage; the user gets a menu
+  bar icon with a live view of it and a "take over" button per window.
+  Windows the application opens later (dialogs, new documents) appear on the
+  user's screen first, because macOS opens them where the user is, and are
+  moved over within a fraction of a second — except while the user is
+  working in that application. `--no-follow` turns this off.
+  Stage what you drive, not what the user is using: `put` refuses the
+  frontmost application, and moving their browser or chat window away is a
+  disturbance, not a courtesy. When you are done, quit or close what you
+  staged, or `amcu stage release --app <selector>` to put its windows back
+  where they were; `amcu stage stop` does that for everything and removes
+  the display. An empty stage removes itself after 15 minutes.
+  The user can take a window over at any time: clicking it in the panel's
+  live view (or its "take over" button) brings it to their screen and
+  switches to it. From then on every acting verb on that application —
+  click, type, set-value, key, scroll, drag, window, menu-item, stage put —
+  fails with `taken_over` until they press "hand back", which returns the
+  window to its place on the stage. On `taken_over`, wait or ask the user
+  whether they are done; never move the window back yourself. Reading
+  (snapshot, scan, screenshot) still works, so after the hand-back look
+  again before you continue: the user may have changed things.
+  When the user has to act in a staged window (a password, a 2FA prompt),
+  `amcu stage release --app <selector> --activate` hands it to them — ask
+  first; it counts as a take-over — or `amcu stage show` opens the panel so
+  they can take it over themselves. The cursor is kept off the stage, and
+  `--mode foreground` is refused there. `amcu stage status` lists what is on
+  it, including windows amcu did not put there, and what the user holds.
+
 WEB PAGES
   `amcu browser …` reads and drives tabs inside the user's own browser through
   the amcu bridge extension: `amcu browser tabs`, `amcu browser snapshot`,

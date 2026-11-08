@@ -30,8 +30,10 @@ public struct WindowInfo: Codable, Sendable {
     /// The window lives on a desktop (Space) other than the one the user is
     /// looking at; it was found through the window server, not `AXWindows`.
     public let onAnotherDesktop: Bool
+    /// The window is on amcu's stage, the virtual display the user never sees.
+    public let onStage: Bool
 
-    public init(windowID: CGWindowID?, index: Int, title: String?, frame: FrameJSON, minimized: Bool, main: Bool, onAnotherDesktop: Bool = false) {
+    public init(windowID: CGWindowID?, index: Int, title: String?, frame: FrameJSON, minimized: Bool, main: Bool, onAnotherDesktop: Bool = false, onStage: Bool = false) {
         self.windowID = windowID
         self.index = index
         self.title = title
@@ -39,6 +41,7 @@ public struct WindowInfo: Codable, Sendable {
         self.minimized = minimized
         self.main = main
         self.onAnotherDesktop = onAnotherDesktop
+        self.onStage = onStage
     }
 
     public init(from decoder: Decoder) throws {
@@ -50,6 +53,7 @@ public struct WindowInfo: Codable, Sendable {
         minimized = try c.decode(Bool.self, forKey: .minimized)
         main = try c.decode(Bool.self, forKey: .main)
         onAnotherDesktop = try c.decodeIfPresent(Bool.self, forKey: .onAnotherDesktop) ?? false
+        onStage = try c.decodeIfPresent(Bool.self, forKey: .onStage) ?? false
     }
 }
 
@@ -182,6 +186,7 @@ public enum Target {
                 "If it clearly has visible windows, toggle Accessibility off and on for the host application in System Settings — macOS can hold a stale grant."
             ])
         }
+        let stage = Stage.display()?.bounds
         var result: [(element: AXUIElement, info: WindowInfo)] = windowElements.enumerated().map { index, element in
             let frame = AX.frame(element) ?? .zero
             let info = WindowInfo(
@@ -190,7 +195,8 @@ public enum Target {
                 title: AX.string(element, kAXTitleAttribute as String),
                 frame: FrameJSON(frame),
                 minimized: AX.bool(element, kAXMinimizedAttribute as String) ?? false,
-                main: AX.bool(element, kAXMainAttribute as String) ?? false
+                main: AX.bool(element, kAXMainAttribute as String) ?? false,
+                onStage: stage.map { StageGeometry.isOnStage(frame, stage: $0) } ?? false
             )
             return (element, info)
         }

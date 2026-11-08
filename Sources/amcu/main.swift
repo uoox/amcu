@@ -50,6 +50,12 @@ WEB PAGES
                                         protocol exposed — extension development, traces,
                                         network interception; `amcu lab help`
 
+STAGE
+  stage        <verb> …                 a display the user never sees, off the corner of their
+                                        screen, for the windows you drive: `stage put --app S`
+                                        moves a window there, a menu bar icon lets the user
+                                        watch it — `amcu stage help`
+
 SELECTORS
   --app accepts a bundle id (com.apple.finder), pid:1234, or an application name.
   Bundle id and pid are stable across system languages; names are not.
@@ -192,6 +198,7 @@ func dispatch(_ command: String, _ flags: Flags) throws {
         print(String(decoding: data, as: UTF8.self))
     case "browser": try BrowserCommands.run(flags)
     case "lab": try LabCommands.run(flags)
+    case "stage": try StageCommands.run(flags)
     case "guide": print(guideText)
     case "skill": try Commands.skill(flags)
     case "help": print(helpText)

@@ -40,6 +40,9 @@ Desktop: `amcu snapshot --app <bundle id>` → act by element index
 action prints (`~` changed, `+` added, `- [a..b]` removed, `# no change`).
 Web page: `amcu browser snapshot` → act by ref (`--ref e12`) → read the
 action's result, `snapshot --diff` when you need to look again.
+Windows that should stay open but out of the user's way go on the stage:
+`amcu stage put --app <selector>` moves them to a display the user never
+sees, where every verb still works (`amcu guide`, THE STAGE).
 
 ## Truth comes from the tool
 

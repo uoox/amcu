@@ -23,6 +23,7 @@ set-value ok on element 2 via ax:AXValue (verified) (settled 0.4s)
 - **Background delivery that actually lands.** Coordinate clicks, scrolls and drags are posted to the target process and routed to its window (window-id fields plus `CGEventSetWindowLocation`). The real pointer never moves. Because that path relies on a private symbol, `amcu doctor` verifies once per OS build that a routed click lands where it was aimed, and coordinate clicks are refused rather than allowed to misfire.
 - **Every action reports what happened.** Actions wait for the application to stop emitting accessibility notifications, then re-capture and print only the diff (`~` changed, `+` added, `- [a..b]` removed, or `# no change`). Indices stay stable across captures. Writes are read back and a mismatch is an error, not a caveat. A background input that stole focus is reported instead of hidden.
 - **Your own browser, no relay.** `amcu browser` drives tabs in your Chrome (or any Chromium) through a small extension that talks to amcu over native messaging: no debug port, no token, no separate profile, logged-in sessions intact. Pages are read as an outline with stable refs; input goes through the debugger protocol so it reaches tabs that are not even visible. Safari works too (`--browser safari`), through a container app amcu builds and a Safari Web Extension; Safari offers extensions no debugger, so input there is synthetic and console/network/dialogs are not available.
+- **A stage for the windows it drives.** `amcu stage put --app …` moves a window onto a virtual display amcu adds off the corner of your screen: fully drawn, so screenshots stay current, yet never in front of you, and the cursor is kept out. A menu bar icon shows the stage live and hands any window back with one click. It rests on CoreGraphics' private `CGVirtualDisplay`, resolved at runtime; without it the rest of amcu is unaffected.
 - **Refuses instead of guessing.** Disabled controls, stale indices, ambiguous app names, password managers, foreground delivery to a background app: each is a structured error with a code and concrete next steps. Never a silent no-op.
 
 ## Install
@@ -55,6 +56,7 @@ amcu key --app com.apple.Notes --key s --mod cmd
 amcu menu-item --app com.apple.Notes --path "File > Export"
 amcu scroll --app com.apple.Notes --dy -300
 amcu screenshot --app com.apple.Notes --out shot.png
+amcu stage put --app com.apple.Notes      # onto a display you never see; every verb still works
 printf '%s\n' '{"cmd":"click","element":3}' '{"cmd":"type","text":"hi"}' | amcu batch --app com.apple.Notes
 
 amcu browser tabs

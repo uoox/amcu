@@ -35,6 +35,11 @@ public struct AmcuError: Error, CustomStringConvertible {
         /// Closing amcu's window would close the last window of the browser
         /// profile, unloading the extension and this connection with it.
         case lastWindow = "last_window"
+        /// No stage host is running, or it could not be reached or started.
+        case stageUnavailable = "stage_unavailable"
+        /// The user took a window of this application off the stage to work
+        /// in it; amcu does not act on the application until it is handed back.
+        case takenOver = "taken_over"
     }
 
     public let code: Code
