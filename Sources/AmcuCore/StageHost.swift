@@ -3,21 +3,62 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// The resident stage process (`amcu stage serve`): owns the virtual display,
-/// the menu bar icon and the cursor guard, moves windows on and off the
-/// stage, follows the windows staged applications open later, and answers
-/// the CLI over `Stage.socketURL`. Started detached by `StageClient.start`;
-/// it inherits the starting command's responsible process, so it acts with
-/// the same Accessibility and Screen Recording grants as that command.
+/// The resident stage process (`amcu stage serve`): the stage app (a Dock
+/// icon and its tabbed window), the cursor guard, moving windows on and off the stage,
+/// following the windows staged applications open later, answering the CLI
+/// over `Stage.socketURL`. The display itself is kept by a holder process
+/// (`StageDisplayHolder`), so a new host — after an upgrade, or `amcu stage
+/// restart` — takes it over with the windows still on it, and carries on
+/// from the state the old one wrote (`Stage.stateURL`). Started detached by
+/// `StageClient.start`; it inherits the starting command's responsible
+/// process, so it acts with the same Accessibility and Screen Recording
+/// grants as that command.
 public enum StageHost {
-    public static func run(pointSize: CGSize?, scale: Int?) -> Never {
+    public static func run(pointSize: CGSize?, scale: Int?, source: String?) -> Never {
         signal(SIGPIPE, SIG_IGN)
+        if !StageBundle.isCurrentProcessInside { relaunchInsideBundle(pointSize: pointSize, scale: scale, source: source) }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        let runtime = StageRuntime(pointSize: pointSize, scale: scale)
+        let runtime = StageRuntime(pointSize: pointSize, scale: scale, source: source)
         stageRuntime = runtime
         app.delegate = runtime
         app.run()
+        exit(0)
+    }
+
+    private static func relaunchInsideBundle(pointSize: CGSize?, scale: Int?, source: String?) {
+        let origin = URL(fileURLWithPath: source ?? Responsibility.executablePath).resolvingSymlinksInPath()
+        do {
+            var arguments = [try StageBundle.install(from: origin), "stage", "serve"]
+            if let source { arguments += ["--source", source] }
+            if let pointSize { arguments += ["--size", "\(Int(pointSize.width))x\(Int(pointSize.height))"] }
+            if let scale { arguments += ["--scale", String(scale)] }
+            _ = try Stage.spawnDetached(arguments)
+            exit(0)
+        } catch {
+            StageRuntime.log("could not start from the stage app at \(StageBundle.appURL.path) (\((error as? AmcuError)?.message ?? String(describing: error))); carrying on outside it")
+        }
+    }
+
+    public static var isRunningAsApp: Bool { StageBundle.isCurrentProcessInside }
+
+    public static func launchedFromFinder() -> Never {
+        if StageClient.isRunning() {
+            _ = try? StageClient.request("show", StageParams(activate: true))
+            exit(0)
+        }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        app.applicationIconImage = StageIcon.image()
+        app.activate()
+        let alert = NSAlert()
+        alert.messageText = StageText.t("The stage is not running", "舞台没有在运行")
+        alert.informativeText = StageText.t(
+            "It starts by itself when an agent puts a window on it (`amcu stage put`), and then shows up in the Dock with every window as a tab.",
+            "agent 把窗口放上舞台（amcu stage put）时它会自己启动，出现在程序坞里，每个窗口一个标签。"
+        )
+        alert.addButton(withTitle: StageText.t("OK", "好"))
+        alert.runModal()
         exit(0)
     }
 }
@@ -43,9 +84,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         let element: AXUIElement
     }
 
-    /// A window the user took off the stage to work in. amcu leaves its
-    /// application alone until the user hands the window back, which puts
-    /// it where it was on the stage.
+    /// A window the user took off the stage to work in. Hand-back puts it
+    /// where it was on the stage; an agent acting on it hands it back first.
     struct Takeover {
         let windowID: CGWindowID
         let pid: pid_t
@@ -83,7 +123,15 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     private let requestedSize: CGSize?
     private let requestedScale: Int?
-    private var display: VirtualDisplay?
+    /// The binary this host was copied from; when it changes, a new host
+    /// from it takes over.
+    private let source: String?
+    private var sourceStamp: FileStamp?
+    private var pendingStamp: (stamp: FileStamp, since: Date)?
+    /// Who keeps the display. Without one (no holder could start) the host
+    /// keeps it in `ownDisplay`, and a restart cannot keep it.
+    private var holder: StageDisplayHolder.Info?
+    private var ownDisplay: VirtualDisplay?
     private(set) var displayID: CGDirectDisplayID = 0
     private(set) var stageBounds: CGRect = .zero
     private var stageArea: CGRect = .zero
@@ -91,12 +139,22 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private(set) var contact: StageGeometry.Contact = .apart
     private var userDisplays: [CGRect] = []
     private var records: [CGWindowID: Record] = [:]
+    private var unresolved: [StageState.SavedRecord] = []
     private var followers: [pid_t: Follower] = [:]
     private var takeovers: [CGWindowID: Takeover] = [:]
     private(set) var pullbacks = 0
     private var notes: [String] = []
-    private let since = Date()
-    private var menu: StageMenu?
+    /// When the stage came up, carried across hosts.
+    private var since = Date()
+    private let launched = Date()
+    private(set) var activity: [StageActivity] = []
+    private var activitySeq = 0
+    /// Which tabs are in which browser window on the stage, for placing a
+    /// browser verb's activity; refreshed by the stage window and on demand.
+    private var tabPairing: [CGWindowID: StageTabs.Paired] = [:]
+    private var pairingTabs = false
+    private var lastPersisted: Data?
+    private var app: StageApp?
     private var monitors: [Any] = []
     private var timers: [Timer] = []
     private var signalSources: [DispatchSourceSignal] = []
@@ -106,9 +164,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private var stopping = false
     private var lastPlacement = Date.distantPast
 
-    init(pointSize: CGSize?, scale: Int?) {
+    init(pointSize: CGSize?, scale: Int?, source: String?) {
         requestedSize = pointSize
         requestedScale = scale
+        self.source = source
     }
 
     // MARK: - Start-up
@@ -121,7 +180,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             exit(0)
         }
         do {
-            try createDisplay()
+            try attachDisplay()
         } catch {
             StageRuntime.log("cannot create the stage display: \(error)")
             exit(2)
@@ -133,26 +192,61 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func takeLock() throws {
+    /// The lock is only held by a host that is running or on its way out
+    /// (handing over, stopping): nobody asks for a new host while one
+    /// answers. So waiting a little for it is right.
+    private func takeLock(wait: TimeInterval = 10) throws {
         try FileManager.default.createDirectory(at: Stage.cacheDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let fd = open(Stage.lockURL.path, O_CREAT | O_RDWR, 0o600)
+        let fd = open(Stage.lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw AmcuError(.stageUnavailable, "cannot open \(Stage.lockURL.path)") }
-        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
-            close(fd)
-            throw AmcuError(.stageUnavailable, "another stage host is running")
+        let deadline = Date().addingTimeInterval(wait)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            guard Date() < deadline else {
+                close(fd)
+                throw AmcuError(.stageUnavailable, "another stage host is running")
+            }
+            usleep(100_000)
         }
         lockFD = fd
     }
 
-    private func createDisplay() throws {
+    /// Takes over the display a holder keeps, or has one made.
+    private func attachDisplay() throws {
+        if let kept = StageDisplayHolder.current() {
+            holder = kept
+            displayID = kept.displayID
+            scale = kept.scale
+            refreshDisplays()
+            StageRuntime.log("taking over display \(displayID), kept by pid \(kept.pid) since \(ISO8601DateFormatter().string(from: kept.since))")
+            return
+        }
+        // A display whose keeper just went takes a moment to disappear.
+        let deadline = Date().addingTimeInterval(5)
+        while Stage.display() != nil, Date() < deadline { usleep(100_000) }
+        if let stray = Stage.display() {
+            // Kept by a process with no record; making a second display with
+            // the same identity would confuse every amcu process.
+            displayID = stray.id
+            scale = max(1, Int((CGDisplayCopyDisplayMode(stray.id).map { Double($0.pixelWidth) / Double(max(1, $0.width)) } ?? 1).rounded()))
+            refreshDisplays()
+            StageRuntime.log("display \(displayID) is up with no holder on record; using it as it is")
+            return
+        }
         let mainBounds = CGDisplayBounds(CGMainDisplayID())
         let size = requestedSize ?? mainBounds.size
         let scale = requestedScale ?? Int(NSScreen.screens.first?.backingScaleFactor ?? 2)
-        let display = try VirtualDisplay(identity: Stage.identity, pointSize: size, scale: scale) { [weak self] in
-            self?.displayTerminated()
+        do {
+            let started = try StageDisplayHolder.start(pointSize: size, scale: scale)
+            holder = started
+            displayID = started.displayID
+        } catch {
+            StageRuntime.log("no display holder (\(error)); keeping the display in the host, so a restart will not keep it")
+            let display = try VirtualDisplay(identity: Stage.identity, pointSize: size, scale: scale) { [weak self] in
+                self?.displayTerminated()
+            }
+            ownDisplay = display
+            displayID = display.displayID
         }
-        self.display = display
-        self.displayID = display.displayID
         self.scale = scale >= 2 ? 2 : 1
         refreshDisplays()
         let corner = StageGeometry.cornerOrigin(of: userDisplays)
@@ -183,7 +277,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     private func refreshDisplays() {
         stageBounds = CGDisplayBounds(displayID)
-        userDisplays = Stage.activeDisplays().filter { $0 != displayID }.map(CGDisplayBounds)
+        userDisplays = Stage.onlineDisplays().filter { $0 != displayID }.map(CGDisplayBounds)
         contact = StageGeometry.contact(of: stageBounds, with: userDisplays)
         refreshArea()
     }
@@ -221,7 +315,9 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     private func finishStart() {
         refreshDisplays()
-        try? FileManager.default.removeItem(at: Stage.takeoversURL)
+        let restored = restoreState()
+        if !restored.done { try? FileManager.default.removeItem(at: Stage.takeoversURL) }
+        sourceStamp = source.flatMap(FileStamp.init(path:))
         do {
             listenFD = try RelaySockets.listenUnix(path: Stage.socketURL.path)
         } catch {
@@ -232,14 +328,16 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         acceptor.name = "amcu-stage-accept"
         acceptor.start()
 
-        let menu = StageMenu(runtime: self)
-        self.menu = menu
+        let app = StageApp(runtime: self, tabs: restored.tabs)
+        self.app = app
+        NSApp.setActivationPolicy(.regular)
         startCursorGuard()
         observeSystem()
         handleSignals()
         repeatOnMain(every: 2) { [weak self] in self?.tick() }
-        StageRuntime.log("stage up: display \(displayID), \(Int(stageBounds.width))x\(Int(stageBounds.height))@\(scale)x at \(Int(stageBounds.minX)),\(Int(stageBounds.minY)), \(contact.rawValue) contact; answers for \(answersFor ?? "?")")
-        menu.refresh()
+        StageRuntime.log("stage up: display \(displayID), \(Int(stageBounds.width))x\(Int(stageBounds.height))@\(scale)x at \(Int(stageBounds.minX)),\(Int(stageBounds.minY)), \(contact.rawValue) contact; answers for \(answersFor ?? "?")\(holder.map { "; display kept by pid \($0.pid)" } ?? "")")
+        if restored.shown { app.show() }
+        changed()
     }
 
     // MARK: - Requests
@@ -273,6 +371,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self.exitNow() }
                 return
             }
+            if request.method == "handover", response.ok {
+                DispatchQueue.main.async { self.exitForHandover() }
+                return
+            }
         }
     }
 
@@ -285,13 +387,34 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             case "release": moves = try release(request.params)
             case "stop": moves = stop(reason: "asked to stop")
             case "show":
-                menu?.show()
+                app?.show(activate: request.params.activate == true)
                 moves = []
             case "hide":
-                menu?.hide()
+                app?.hide()
+                moves = []
+            case "handback":
+                let ids = request.params.windowIDs ?? []
+                moves = ids.isEmpty ? handBackAll(by: request.params.by) : ids.map { handBack($0, by: request.params.by) }
+            case "free":
+                let ids = request.params.windowIDs ?? []
+                moves = (ids.isEmpty ? Array(takeovers.keys) : ids).map { free($0, by: request.params.by) }
+            case "activity":
+                // Many a second, from verbs that do not wait: no status.
+                if let entry = request.params.activity { record(entry) }
+                return StageResponse(id: request.id, ok: true, result: nil, error: nil)
+            case "note":
+                if let text = request.params.text, !text.isEmpty { note(StageActivity.clip(text, 240)) }
+                return StageResponse(id: request.id, ok: true, result: nil, error: nil)
+            case "handover":
+                guard holder != nil else {
+                    throw AmcuError(.unsupported, "this stage keeps its display in the host itself (no holder could start), so a new host cannot take it over", nextSteps: [
+                        "`amcu stage restart` stops it and puts its windows back on a new stage instead."
+                    ])
+                }
                 moves = []
             default: throw AmcuError(.invalidArgument, "unknown stage request '\(request.method)'")
             }
+            changed()
             return StageResponse(id: request.id, ok: true, result: StageReply(status: status(), moves: moves), error: nil)
         } catch {
             let failure = error as? AmcuError ?? AmcuError(.unsupported, String(describing: error))
@@ -323,7 +446,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             windows: windowsOnStage(),
             takenOver: takeovers.values.sorted { $0.since < $1.since }.map(publicTakeover),
             following: following,
-            notes: notes
+            notes: notes,
+            // A folded repeat keeps its place in the list but not its time.
+            activity: Array(activity.suffix(20)).sorted { $0.at < $1.at },
+            holderPID: holder?.pid
         )
     }
 
@@ -346,19 +472,20 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         guard let pid = params.pid, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
             throw AmcuError(.appNotFound, "no running application with pid \(params.pid.map(String.init) ?? "-")", nextSteps: ["Run `amcu apps` and pass a current selector."])
         }
-        if let taken = takeovers.values.first(where: { $0.pid == pid }) { throw Stage.takenOverError(publicTakeover(taken)) }
         let ids = params.windowIDs ?? []
         guard !ids.isEmpty else { throw AmcuError(.invalidArgument, "put names no window") }
         let appElement = Target.appElement(app)
         AX.setMessagingTimeout(appElement, seconds: 1.5)
         let moves = ids.map { id -> StageMove in
+            // Putting a window the user holds back on the stage is handing
+            // it back.
+            if takeovers[id] != nil { return handBack(id, by: params.by) }
             guard let element = findWindow(app: app, appElement: appElement, id: id) else {
                 return StageMove(windowID: id, app: appName(app), title: nil, from: nil, to: nil, ok: false, note: "no such window any more")
             }
             return stage(element, id: id, app: app, origin: .put)
         }
         if params.follow ?? true { follow(app, appElement: appElement) }
-        menu?.refresh()
         return moves
     }
 
@@ -423,9 +550,6 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     func release(_ params: StageParams) throws -> [StageMove] {
         guard AXIsProcessTrusted() else { throw hostNotTrusted() }
-        if let pid = params.pid, let taken = takeovers.values.first(where: { $0.pid == pid }) {
-            throw Stage.takenOverError(publicTakeover(taken))
-        }
         prune()
         let onStage = windowsOnStage()
         var targets: [CGWindowID]
@@ -434,6 +558,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         } else if let pid = params.pid {
             targets = onStage.filter { $0.pid == pid }.map(\.windowID)
             targets += records.values.filter { $0.pid == pid && !targets.contains($0.windowID) }.map(\.windowID)
+            targets += takeovers.values.filter { $0.pid == pid && !targets.contains($0.windowID) }.map(\.windowID)
         } else {
             targets = onStage.map(\.windowID)
             targets += records.keys.filter { !targets.contains($0) }
@@ -441,9 +566,17 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         var touched = Set<pid_t>()
         let moves = targets.map { id -> StageMove in
             let entry = onStage.first { $0.windowID == id }
-            if let pid = records[id]?.pid ?? entry?.pid { touched.insert(pid) }
+            if let pid = records[id]?.pid ?? entry?.pid ?? takeovers[id]?.pid { touched.insert(pid) }
+            // A window the user holds is already on their screen: releasing
+            // it lets it stay there for good.
+            if let held = takeovers[id] {
+                if params.activate == true {
+                    return StageMove(windowID: id, app: held.app, title: held.title, from: nil, to: nil, ok: true, note: "the user holds it already")
+                }
+                return free(id, by: params.by)
+            }
             // Handing a window to the user is a take-over like one from the
-            // panel: the application is left alone until they hand it back.
+            // stage window.
             if params.activate == true { return takeOver(id, placement: .home, by: "handed to the user") }
             return unstage(id, entry: entry)
         }
@@ -456,7 +589,6 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         for pid in Array(followers.keys) where !staying.contains(pid) && (everything || touched.contains(pid)) {
             unfollow(pid)
         }
-        menu?.refresh()
         return moves
     }
 
@@ -564,9 +696,9 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             previousFront: previousFront == pid ? nil : previousFront
         )
         saveTakeovers()
-        note("\(name)\(title.map { " \"\($0)\"" } ?? "") \(actor); amcu leaves \(name) alone until it is handed back")
-        menu?.refresh()
-        return StageMove(windowID: id, app: name, title: title, from: FrameJSON(frame), to: FrameJSON(landed), ok: true, note: "\(actor); locked for amcu until handed back")
+        note("\(name)\(title.map { " \"\($0)\"" } ?? "") \(actor); an agent acting on it hands it back first")
+        changed()
+        return StageMove(windowID: id, app: name, title: title, from: FrameJSON(frame), to: FrameJSON(landed), ok: true, note: "\(actor); handed back to the stage when an agent acts on it")
     }
 
     /// A click in a window's thumbnail, at `fraction` of the window from its
@@ -582,10 +714,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         if !move.ok { note("could not take \(move.app) over: \(move.note ?? "unknown reason")") }
     }
 
-    /// Puts a taken-over window back where it was on the stage and lifts
-    /// amcu's hands-off once none of the application's windows is held.
+    /// Puts a taken-over window back where it was on the stage: the user
+    /// pressed "hand back" (`by` nil), or the session `by` acted on it.
     @discardableResult
-    func handBack(_ id: CGWindowID) -> StageMove {
+    func handBack(_ id: CGWindowID, by session: String? = nil) -> StageMove {
         guard let held = takeovers[id] else {
             return StageMove(windowID: id, app: "window \(id)", title: nil, from: nil, to: nil, ok: false, note: "it is not taken over")
         }
@@ -594,7 +726,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                 takeovers[id] = nil
                 saveTakeovers()
             }
-            menu?.refresh()
+            changed()
             return move
         }
         guard let app = NSRunningApplication(processIdentifier: held.pid), !app.isTerminated else {
@@ -622,8 +754,53 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
            let previous = held.previousFront, let previousApp = NSRunningApplication(processIdentifier: previous), !previousApp.isTerminated {
             try? AX.setValue(AXUIElementCreateApplication(previous), kAXFrontmostAttribute as String, kCFBooleanTrue)
         }
-        note("\(held.app)\(held.title.map { " \"\($0)\"" } ?? "") handed back to the stage")
-        return finish(StageMove(windowID: id, app: held.app, title: held.title, from: FrameJSON(frame), to: FrameJSON(landed), ok: true, note: "handed back"), release: false)
+        let label = held.title.map { " \"\($0)\"" } ?? ""
+        if let session {
+            note("\(held.app)\(label) handed back to the stage: \(StageActivity.sessionLabel(session)) acted on it")
+            record(StageActivity(kind: .handBack, session: session, pid: held.pid, windowID: id))
+        } else {
+            note("\(held.app)\(label) handed back to the stage")
+        }
+        return finish(StageMove(windowID: id, app: held.app, title: held.title, from: FrameJSON(frame), to: FrameJSON(landed), ok: true, note: session.map { "handed back before \(StageActivity.sessionLabel($0)) acts on it" } ?? "handed back"), release: false)
+    }
+
+    /// "Hand back" in the stage window: everything the user holds.
+    @discardableResult
+    func handBackAll(by session: String? = nil) -> [StageMove] {
+        takeovers.values.sorted { $0.since < $1.since }.map { handBack($0.windowID, by: session) }
+    }
+
+    /// Lets a window the user holds go for good: it stays where it is on
+    /// their screen and leaves the stage, so nothing hands it back, and amcu
+    /// acts on it there like on any other window.
+    @discardableResult
+    func free(_ id: CGWindowID, by session: String? = nil) -> StageMove {
+        guard let held = takeovers.removeValue(forKey: id) else {
+            return StageMove(windowID: id, app: records[id]?.app ?? "window \(id)", title: records[id]?.title, from: nil, to: nil, ok: false, note: "it is not taken over")
+        }
+        records[id] = nil
+        saveTakeovers()
+        let staying = Set(records.values.map(\.pid)).union(takeovers.values.map(\.pid))
+        if !staying.contains(held.pid) { unfollow(held.pid) }
+        note("\(held.app)\(held.title.map { " \"\($0)\"" } ?? "") released\(session.map { " by \(StageActivity.sessionLabel($0))" } ?? ""): it stays on the user's screen and is no longer on the stage")
+        changed()
+        return StageMove(windowID: id, app: held.app, title: held.title, from: nil, to: nil, ok: true, note: "stays on the user's screen, off the stage")
+    }
+
+    /// Everything the user holds, released.
+    @discardableResult
+    func freeAll() -> [StageMove] {
+        takeovers.values.sorted { $0.since < $1.since }.map { free($0.windowID) }
+    }
+
+    /// Clicking the picture of a window the user holds brings it to the
+    /// front where it is.
+    func focusHeld(_ id: CGWindowID) {
+        guard let held = takeovers[id], let app = NSRunningApplication(processIdentifier: held.pid), !app.isTerminated,
+              let element = findWindow(app: app, appElement: Target.appElement(app), id: id) else { return }
+        try? AX.setValue(element, kAXMainAttribute as String, kCFBooleanTrue)
+        try? AX.perform(element, kAXRaiseAction as String)
+        try? AX.setValue(Target.appElement(app), kAXFrontmostAttribute as String, kCFBooleanTrue)
     }
 
     private func publicTakeover(_ held: Takeover) -> StageTakeover {
@@ -649,7 +826,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         let gone = takeovers.keys.filter { !existing.contains($0) }
         guard !gone.isEmpty else { return }
         for id in gone {
-            if let held = takeovers.removeValue(forKey: id) { note("\(held.app)'s taken-over window closed; amcu may act on \(held.app) again") }
+            if let held = takeovers.removeValue(forKey: id) { note("\(held.app)'s taken-over window closed") }
         }
         saveTakeovers()
     }
@@ -695,7 +872,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         if notification == kAXUIElementDestroyedNotification as String {
             if let id = records.first(where: { CFEqual($0.value.element, element) })?.key {
                 records[id] = nil
-                menu?.refresh()
+                changed()
             }
             return
         }
@@ -727,7 +904,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         if StageGeometry.isOnStage(frame, stage: stageBounds) {
             records[id] = Record(windowID: id, pid: pid, app: name, bundleID: app.bundleIdentifier, title: StageRuntime.title(of: element), home: nil, origin: .followed, element: element)
             watchDestruction(of: element, pid: pid)
-            menu?.refresh()
+            changed()
             return
         }
         if userIsWorking(in: pid) {
@@ -737,7 +914,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         let move = stage(element, id: id, app: app, origin: .followed)
         let label = move.title.map { " \"\($0)\"" } ?? ""
         note(move.ok ? "moved a new \(name) window\(label) onto the stage" : "a new \(name) window\(label) stayed on the user's screen: \(move.note ?? "it could not be moved")")
-        menu?.refresh()
+        changed()
     }
 
     static func title(of element: AXUIElement) -> String? {
@@ -769,16 +946,17 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                   (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
                   StageGeometry.isOnStage(rect, stage: stageBounds) else { continue }
             let record = records[id]
-            let title = (entry[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? record?.title
+            let saved = record == nil ? unresolved.first { $0.windowID == id } : nil
+            let title = (entry[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? record?.title ?? saved?.title
             result.append(StageWindow(
                 windowID: id,
                 pid: pid,
-                app: record?.app ?? NSRunningApplication(processIdentifier: pid)?.localizedName ?? (entry[kCGWindowOwnerName as String] as? String) ?? "pid \(pid)",
-                bundleID: record?.bundleID ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+                app: record?.app ?? saved?.app ?? NSRunningApplication(processIdentifier: pid)?.localizedName ?? (entry[kCGWindowOwnerName as String] as? String) ?? "pid \(pid)",
+                bundleID: record?.bundleID ?? saved?.bundleID ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
                 title: title,
                 frame: FrameJSON(rect),
-                home: record?.home.map(FrameJSON.init),
-                origin: record?.origin ?? .found
+                home: record?.home.map(FrameJSON.init) ?? saved?.home,
+                origin: record?.origin ?? saved?.origin ?? .found
             ))
         }
         return result
@@ -790,6 +968,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     /// (a put window came back "not put here by amcu" after a night, its home
     /// lost).
     private func prune() {
+        adoptUnresolved()
         guard !records.isEmpty else { return }
         let present = Set(windowsOnStage().map(\.windowID))
         let absent = records.filter { !present.contains($0.key) }
@@ -800,6 +979,29 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                 continue
             }
             records[id] = nil
+        }
+    }
+
+    private func adoptUnresolved() {
+        guard !unresolved.isEmpty else { return }
+        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let locked = Stage.screenIsLocked
+        var waiting: [StageState.SavedRecord] = []
+        var adopted = 0
+        for saved in unresolved {
+            guard existing.contains(saved.windowID), records[saved.windowID] == nil,
+                  let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
+            guard !locked, let element = findWindow(app: app, appElement: Target.appElement(app), id: saved.windowID) else {
+                waiting.append(saved)
+                continue
+            }
+            records[saved.windowID] = Record(windowID: saved.windowID, pid: saved.pid, app: saved.app, bundleID: saved.bundleID, title: saved.title, home: saved.home?.cgRect, origin: saved.origin, element: element)
+            watchDestruction(of: element, pid: saved.pid)
+            adopted += 1
+        }
+        unresolved = waiting
+        if adopted > 0 {
+            note("accessibility sees \(adopted == 1 ? "the window" : "the \(adopted) windows") the previous host left again; \(adopted == 1 ? "its record is" : "their records are") back")
         }
     }
 
@@ -832,7 +1034,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         if pullbacks == 1 || pullbacks % 25 == 0 {
             note("pulled the cursor back off the stage (\(pullbacks) time\(pullbacks == 1 ? "" : "s") so far)")
         }
-        menu?.refresh()
+        changed()
     }
 
     // MARK: - System events
@@ -844,11 +1046,12 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             let pid = app.processIdentifier
             self.unfollow(pid)
             self.records = self.records.filter { $0.value.pid != pid }
+            self.unresolved.removeAll { $0.pid == pid }
             if self.takeovers.values.contains(where: { $0.pid == pid }) {
                 self.takeovers = self.takeovers.filter { $0.value.pid != pid }
                 self.saveTakeovers()
             }
-            self.menu?.refresh()
+            self.changed()
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.screensChanged() }
@@ -856,7 +1059,11 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     }
 
     private func screensChanged() {
-        guard !stopping, display != nil else { return }
+        guard !stopping else { return }
+        guard Stage.onlineDisplays().contains(displayID) else {
+            displayGone()
+            return
+        }
         refreshDisplays()
         // Another display was plugged in or rearranged and now shares an edge
         // with the stage: back to the corner, at most every few seconds so a
@@ -865,7 +1072,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             place()
             note("the user's displays changed; the stage went back to the corner (\(contact.rawValue) contact now)")
         }
-        menu?.refresh()
+        changed()
     }
 
     private func handleSignals() {
@@ -886,11 +1093,15 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     private func tick() {
         guard !stopping else { return }
+        guard Stage.onlineDisplays().contains(displayID) else {
+            displayGone()
+            return
+        }
         prune()
         pruneTakeovers()
         // Not empty while amcu still holds a put window, even if the window
         // list cannot see it right now: leaving would dump it on the user.
-        if windowsOnStage().isEmpty && records.isEmpty && takeovers.isEmpty {
+        if windowsOnStage().isEmpty && records.isEmpty && unresolved.isEmpty && takeovers.isEmpty {
             let start = emptySince ?? Date()
             emptySince = start
             if Date().timeIntervalSince(start) >= Stage.idleExit {
@@ -900,14 +1111,25 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         } else {
             emptySince = nil
         }
-        menu?.refresh()
+        changed()
+        checkForUpgrade()
     }
 
     private func displayTerminated() {
         guard !stopping else { return }
         StageRuntime.log("the system ended the stage display; macOS moved its windows to the user's displays")
         stopping = true
-        display = nil
+        ownDisplay = nil
+        exitNow()
+    }
+
+    /// The holder ended (or the system ended its display): macOS has moved
+    /// the windows to the user's displays already.
+    private func displayGone() {
+        guard !stopping else { return }
+        StageRuntime.log("the stage display went away\(holder.map { " (its holder, pid \($0.pid), ended)" } ?? ""); macOS moved its windows to the user's displays")
+        stopping = true
+        holder = nil
         exitNow()
     }
 
@@ -930,20 +1152,271 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     }
 
     func exitNow() {
-        menu?.uninstall()
-        menu = nil
-        display?.invalidate()
-        display = nil
-        try? FileManager.default.removeItem(at: Stage.takeoversURL)
+        stopping = true
+        app?.uninstall()
+        app = nil
+        // No request reaches a host on its way out.
+        if listenFD >= 0 { close(listenFD) }
         unlink(Stage.socketURL.path)
+        if let holder { StageDisplayHolder.stop(holder) }
+        ownDisplay?.invalidate()
+        ownDisplay = nil
+        try? FileManager.default.removeItem(at: Stage.takeoversURL)
+        try? FileManager.default.removeItem(at: Stage.stateURL)
         exit(0)
     }
 
-    // MARK: - For the menu
+    /// Leaves the display and its windows to the next host: what this one
+    /// knows is on disk, what the user holds stays held.
+    func exitForHandover() {
+        guard holder != nil else {
+            stopAndExit(reason: "handover without a holder")
+            return
+        }
+        persist()
+        stopping = true
+        app?.uninstall()
+        app = nil
+        if listenFD >= 0 { close(listenFD) }
+        unlink(Stage.socketURL.path)
+        StageRuntime.log("handing the stage over; display \(displayID) stays with pid \(holder?.pid ?? 0)")
+        exit(0)
+    }
+
+    // MARK: - For the stage app
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        app?.reopen()
+        return false
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        app?.dockMenu()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let app, !StageRuntime.systemIsQuitting() else {
+            stopAndExit(reason: "the system is logging out or shutting down")
+            return .terminateCancel
+        }
+        app.confirmClose { [weak self] in self?.stopAndExit(reason: "quit by the user") }
+        return .terminateCancel
+    }
+
+    private static func systemIsQuitting() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              let reason = event.attributeDescriptor(forKeyword: fourCharCode("why?"))?.enumCodeValue else { return false }
+        return ["logo", "rlgo", "rrst", "rsdn", "rest", "shut"].map(fourCharCode).contains(reason)
+    }
+
+    private static func fourCharCode(_ text: String) -> OSType {
+        text.utf8.reduce(0) { ($0 << 8) | OSType($1) }
+    }
+
+    func tabsChanged() {
+        persist()
+    }
 
     func takeOverFromMenu(_ windowID: UInt32) {
         let move = takeOver(windowID, placement: .home)
         if !move.ok { note("could not take \(move.app) over: \(move.note ?? "unknown reason")") }
+    }
+
+    var shownActivity: [StageActivity] { activity }
+
+    func updateTabPairing(_ pairing: [CGWindowID: StageTabs.Paired]) {
+        tabPairing = pairing
+    }
+
+    // MARK: - What the next host needs
+
+    /// After anything changed: the stage window shows it, and the next host
+    /// would find it.
+    private func changed() {
+        persist()
+        app?.refresh()
+    }
+
+    private func persist() {
+        guard !stopping, let holder else { return }
+        let state = StageState(
+            version: AmcuVersion.string,
+            holderPID: holder.pid,
+            displayID: displayID,
+            since: since,
+            records: (records.values.map {
+                StageState.SavedRecord(windowID: $0.windowID, pid: $0.pid, app: $0.app, bundleID: $0.bundleID, title: $0.title, home: $0.home.map(FrameJSON.init), origin: $0.origin)
+            } + unresolved.filter { records[$0.windowID] == nil }).sorted { $0.windowID < $1.windowID },
+            takeovers: takeovers.values.sorted { $0.windowID < $1.windowID }.map {
+                StageState.SavedTakeover(windowID: $0.windowID, pid: $0.pid, app: $0.app, bundleID: $0.bundleID, title: $0.title, since: $0.since, stageFrame: FrameJSON($0.stageFrame), home: $0.home.map(FrameJSON.init), origin: $0.origin, previousFront: $0.previousFront)
+            },
+            followers: followers.values.sorted { $0.pid < $1.pid }.map { StageFollow(pid: $0.pid, app: $0.app, bundleID: $0.bundleID) },
+            notes: notes,
+            pullbacks: pullbacks,
+            activity: Array(activity.suffix(80)),
+            windowShown: app?.isShown ?? false,
+            tabs: app?.tabs
+        )
+        guard let data = try? StageWire.encoder().encode(state), data != lastPersisted else { return }
+        do {
+            try data.write(to: Stage.stateURL, options: .atomic)
+            chmod(Stage.stateURL.path, 0o600)
+            lastPersisted = data
+        } catch {
+            StageRuntime.log("cannot write \(Stage.stateURL.path): \(error)")
+        }
+    }
+
+    /// Carries on from the host that kept this display before: its records,
+    /// what it followed and what the user holds, for the windows still there.
+    private func restoreState() -> (done: Bool, shown: Bool, tabs: StageState.Tabs?) {
+        guard let holder, let data = try? Data(contentsOf: Stage.stateURL),
+              let state = try? StageWire.decoder().decode(StageState.self, from: data),
+              state.holderPID == holder.pid, state.displayID == displayID else { return (false, false, nil) }
+        since = state.since
+        pullbacks = state.pullbacks
+        notes = state.notes
+        activity = state.activity
+        activitySeq = activity.map(\.seq).max() ?? 0
+        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        for saved in state.records {
+            guard let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
+            guard let element = findWindow(app: app, appElement: Target.appElement(app), id: saved.windowID) else {
+                if existing.contains(saved.windowID) { unresolved.append(saved) }
+                continue
+            }
+            records[saved.windowID] = Record(windowID: saved.windowID, pid: saved.pid, app: saved.app, bundleID: saved.bundleID, title: saved.title, home: saved.home?.cgRect, origin: saved.origin, element: element)
+        }
+        for saved in state.takeovers where existing.contains(saved.windowID) {
+            guard let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
+            takeovers[saved.windowID] = Takeover(windowID: saved.windowID, pid: saved.pid, app: saved.app, bundleID: saved.bundleID, title: saved.title, since: saved.since, stageFrame: saved.stageFrame.cgRect, home: saved.home?.cgRect, origin: saved.origin, previousFront: saved.previousFront)
+        }
+        for saved in state.followers {
+            guard let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
+            follow(app, appElement: Target.appElement(app))
+        }
+        saveTakeovers()
+        let waiting = unresolved.isEmpty ? "" : "; \(unresolved.count) more kept until accessibility can see \(unresolved.count == 1 ? "it" : "them")\(Stage.screenIsLocked ? " (the screen is locked)" : "")"
+        note("took the stage over from the previous host (amcu \(state.version)): \(records.count) window\(records.count == 1 ? "" : "s"), \(takeovers.count) held by the user, \(followers.count) followed\(waiting)")
+        return (true, state.windowShown, state.tabs)
+    }
+
+    // MARK: - Upgrading in place
+
+    struct FileStamp: Equatable {
+        let inode: UInt64
+        let size: Int64
+        let modified: TimeInterval
+
+        init?(path: String) {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            inode = UInt64(info.st_ino)
+            size = Int64(info.st_size)
+            modified = TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9
+        }
+    }
+
+    /// A new amcu installed where this host was copied from takes over the
+    /// stage once the file has stopped changing, unless the user is working
+    /// in the stage window right now.
+    private func checkForUpgrade() {
+        guard let source, holder != nil, Date().timeIntervalSince(launched) > 20, !Stage.screenIsLocked,
+              let stamp = FileStamp(path: source), stamp != sourceStamp else {
+            pendingStamp = nil
+            return
+        }
+        guard let pending = pendingStamp, pending.stamp == stamp else {
+            pendingStamp = (stamp, Date())
+            return
+        }
+        guard Date().timeIntervalSince(pending.since) >= 4, !(app?.isInUse ?? false) else { return }
+        upgrade(to: stamp)
+    }
+
+    private func upgrade(to stamp: FileStamp) {
+        guard let source else { return }
+        let executable: String
+        do {
+            executable = try StageBundle.install(from: URL(fileURLWithPath: source))
+        } catch {
+            note("amcu at \(source) changed, but copying it for the stage failed: \((error as? AmcuError)?.message ?? String(describing: error))")
+            sourceStamp = stamp
+            return
+        }
+        note("amcu at \(source) changed; a host from it takes the stage over (the display and its windows stay)")
+        persist()
+        do {
+            _ = try Stage.spawnDetached([executable, "stage", "serve", "--source", source])
+        } catch {
+            note("the new stage host could not start: \((error as? AmcuError)?.message ?? String(describing: error)); this one carries on")
+            sourceStamp = stamp
+            return
+        }
+        exitForHandover()
+    }
+
+    // MARK: - What agents do on the stage
+
+    /// An acting verb's report: kept for the stage window when its window is
+    /// on the stage or held, dropped otherwise.
+    func record(_ incoming: StageActivity) {
+        var entry = incoming
+        if entry.windowID == nil, let tab = entry.tabID {
+            guard let window = window(ofTab: tab) else {
+                pairTabs(for: entry.pid) { [weak self] in
+                    guard let self, let window = self.window(ofTab: tab) else { return }
+                    entry.windowID = window
+                    self.keep(entry)
+                }
+                return
+            }
+            entry.windowID = window
+        }
+        keep(entry)
+    }
+
+    private func keep(_ incoming: StageActivity) {
+        guard let id = incoming.windowID, records[id] != nil || takeovers[id] != nil || windowsOnStage().contains(where: { $0.windowID == id }) else { return }
+        if let index = activity.lastIndex(where: { $0.windowID == id }), activity[index].repeated(by: incoming),
+           incoming.at.timeIntervalSince(activity[index].at) < 120 {
+            activity[index].repeats = (activity[index].repeats ?? 1) + 1
+            activity[index].at = incoming.at
+            if let fraction = incoming.fraction { activity[index].fraction = fraction }
+            app?.present(activity[index])
+            return
+        }
+        var entry = incoming
+        activitySeq += 1
+        entry.seq = activitySeq
+        activity.append(entry)
+        if activity.count > 200 { activity.removeFirst(activity.count - 200) }
+        app?.present(entry)
+    }
+
+    private func window(ofTab tab: Int) -> CGWindowID? {
+        tabPairing.first { $0.value.tabs.contains { $0.id == tab } }?.key
+    }
+
+    /// Asks the browser's profiles which tabs are in which of its windows on
+    /// the stage, off the main thread.
+    private func pairTabs(for pid: pid_t, then: @escaping () -> Void) {
+        guard !pairingTabs else { return }
+        let staged = windowsOnStage().filter { $0.pid == pid }.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+            + takeovers.values.filter { $0.pid == pid }.map { (windowID: $0.windowID, pid: $0.pid) }
+        guard !staged.isEmpty else { return }
+        pairingTabs = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let pairing = StageTabs.collect(for: staged)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pairingTabs = false
+                self.tabPairing.merge(pairing) { _, new in new }
+                then()
+            }
+        }
     }
 
     // MARK: - Notes and log
@@ -960,4 +1433,48 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         let stamp = ISO8601DateFormatter().string(from: Date())
         FileHandle.standardError.write(Data("\(stamp) amcu stage[\(getpid())]: \(message)\n".utf8))
     }
+}
+
+/// What a host leaves for the next one on the same display.
+struct StageState: Codable {
+    struct SavedRecord: Codable {
+        let windowID: CGWindowID
+        let pid: pid_t
+        let app: String
+        let bundleID: String?
+        let title: String?
+        let home: FrameJSON?
+        let origin: StageWindow.Origin
+    }
+
+    struct SavedTakeover: Codable {
+        let windowID: CGWindowID
+        let pid: pid_t
+        let app: String
+        let bundleID: String?
+        let title: String?
+        let since: Date
+        let stageFrame: FrameJSON
+        let home: FrameJSON?
+        let origin: StageWindow.Origin
+        let previousFront: pid_t?
+    }
+
+    struct Tabs: Codable {
+        let order: [CGWindowID]
+        let selected: CGWindowID?
+    }
+
+    let version: String
+    let holderPID: Int32
+    let displayID: UInt32
+    let since: Date
+    let records: [SavedRecord]
+    let takeovers: [SavedTakeover]
+    let followers: [StageFollow]
+    let notes: [String]
+    let pullbacks: Int
+    let activity: [StageActivity]
+    let windowShown: Bool
+    let tabs: Tabs?
 }

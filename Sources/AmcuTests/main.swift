@@ -438,6 +438,8 @@ runSecretStoreTests(t)
 runSnapshotDiffTests(t)
 runSafariBridgeTests(t)
 runStageGeometryTests(t)
+runStageActivityTests(t)
+runLinkRoutingTests(t)
 runSessionNameTests(t)
 
 t.finish()

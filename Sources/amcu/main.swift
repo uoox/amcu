@@ -53,8 +53,8 @@ WEB PAGES
 STAGE
   stage        <verb> …                 a display the user never sees, off the corner of their
                                         screen, for the windows you drive: `stage put --app S`
-                                        moves a window there, a menu bar icon lets the user
-                                        watch it — `amcu stage help`
+                                        moves a window there; the stage app in the Dock shows it
+                                        to the user, a tab per window — `amcu stage help`
 
 SELECTORS
   --app accepts a bundle id (com.apple.finder), pid:1234, or an application name.
@@ -137,6 +137,10 @@ if Bundle.main.bundleIdentifier == SafariBridge.appBundleID && arguments.allSati
     exit(0)
 }
 
+if StageHost.isRunningAsApp && arguments.allSatisfy({ $0.hasPrefix("-psn") || $0 == "-NSDocumentRevisionsDebugMode" }) {
+    StageHost.launchedFromFinder()
+}
+
 // The browser launches this binary as the extension's native messaging host
 // with the extension origin as the only argument. Nothing else looks like that.
 if let first = arguments.first, first.hasPrefix("chrome-extension://") || first == "browser-host" {
@@ -167,6 +171,7 @@ do {
 }
 
 func dispatch(_ command: String, _ flags: Flags) throws {
+    StageReport.begin(command)
     switch command {
     case "apps": try Commands.apps(flags)
     case "launch": try Commands.launch(flags)

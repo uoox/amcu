@@ -1789,6 +1789,8 @@
         return snapshot(message.params || {});
       case 'measure':
         return measure(message.params);
+      case 'geometry':
+        return { innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight };
       case 'focus-for-input':
         return focusForInput(message.params);
       case 'value':

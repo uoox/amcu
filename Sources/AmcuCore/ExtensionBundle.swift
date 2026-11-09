@@ -6,7 +6,7 @@
 import Foundation
 
 public enum ExtensionBundle {
-    public static let version = "0.12.1"
+    public static let version = "0.14.0"
     public static let id = "cgpbockoghamineoofoonidkickapbok"
     public static let name = "amcu bridge"
 
@@ -260,6 +260,10 @@ function onHostMessage(message) {
   if (!message || typeof message !== 'object') return;
   if (message.type === 'ping') {
     post({ type: 'pong' });
+    return;
+  }
+  if (message.type === 'callResult') {
+    settleHostCall(message);
     return;
   }
   if (message.type !== 'request') return;
@@ -636,6 +640,172 @@ const createdTabs = [];
 chrome.tabs.onCreated.addListener(tab => {
   createdTabs.push({ id: tab.id, openerTabId: tab.openerTabId, at: Date.now() });
   while (createdTabs.length > 50) createdTabs.shift();
+});
+
+// ---------------------------------------------------------------------------
+// Links the user opens stay off the stage.
+//
+// A link opened from another application (chat, mail, Finder) commits with
+// transition "start_page" in the browser's last active window, which can be
+// one an agent drives on amcu's stage, a display the user never sees. The
+// host knows the stage and every profile's windows; it says where the link
+// belongs: the window the user focused last (in another profile if that is
+// the one), or a new window on their screen. The staged window gets its own
+// tab back in front.
+
+const FOCUS_KEY = 'amcuFocus';
+const STARTUP_KEY = 'amcuStartedAt';
+let focusLog = null;
+const windowBorn = new Map();
+const activeHistory = new Map();
+const routedTabs = new Set();
+const hostCalls = new Map();
+let hostCallSeq = 0;
+
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.session.set({ [STARTUP_KEY]: Date.now() }).catch(() => {});
+});
+
+async function loadFocus() {
+  if (focusLog) return focusLog;
+  const stored = await chrome.storage.session.get(FOCUS_KEY).catch(() => ({}));
+  if (!focusLog) focusLog = Array.isArray(stored[FOCUS_KEY]) ? stored[FOCUS_KEY] : [];
+  return focusLog;
+}
+
+function saveFocus() {
+  chrome.storage.session.set({ [FOCUS_KEY]: focusLog }).catch(() => {});
+}
+
+chrome.windows.onFocusChanged.addListener(windowId => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  loadFocus().then(log => {
+    focusLog = [{ windowId, at: Date.now() }].concat(log.filter(f => f.windowId !== windowId)).slice(0, 40);
+    saveFocus();
+  }).catch(() => {});
+});
+
+chrome.windows.onCreated.addListener(win => {
+  windowBorn.set(win.id, Date.now());
+});
+
+chrome.windows.onRemoved.addListener(windowId => {
+  windowBorn.delete(windowId);
+  activeHistory.delete(windowId);
+  if (focusLog) {
+    focusLog = focusLog.filter(f => f.windowId !== windowId);
+    saveFocus();
+  }
+});
+
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  const list = activeHistory.get(windowId) || [];
+  activeHistory.set(windowId, [tabId].concat(list.filter(id => id !== tabId)).slice(0, 8));
+});
+
+function callHost(method, params, timeoutMs = 5000) {
+  if (!port) return Promise.resolve(null);
+  const id = ++hostCallSeq;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      hostCalls.delete(id);
+      resolve(null);
+    }, timeoutMs);
+    hostCalls.set(id, { resolve, timer });
+    post({ type: 'call', id, method, params });
+  });
+}
+
+function settleHostCall(message) {
+  const pending = hostCalls.get(message.id);
+  if (!pending) return;
+  hostCalls.delete(message.id);
+  clearTimeout(pending.timer);
+  pending.resolve(message.ok ? message.result : null);
+}
+
+async function justStarted() {
+  const stored = await chrome.storage.session.get(STARTUP_KEY).catch(() => ({}));
+  const at = stored[STARTUP_KEY];
+  return typeof at === 'number' && Date.now() - at < 20000;
+}
+
+function bounds(win) {
+  return { left: win.left, top: win.top, width: win.width, height: win.height };
+}
+
+async function userWindows(except) {
+  const log = await loadFocus();
+  const home = await amcuWindowId().catch(() => null);
+  const wins = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  return wins.filter(w => w.id !== except && w.id !== home).map(w => {
+    const seen = log.find(f => f.windowId === w.id);
+    return Object.assign({ windowId: w.id, focusedAt: seen ? seen.at : 0, state: w.state }, bounds(w));
+  });
+}
+
+function previousActive(win, tabId) {
+  const present = new Set((win.tabs || []).map(t => t.id));
+  return (activeHistory.get(win.id) || []).find(id => id !== tabId && present.has(id)) || null;
+}
+
+async function routeLink(tab, url, { dryRun = false } = {}) {
+  const win = await chrome.windows.get(tab.windowId, { populate: true }).catch(() => null);
+  if (!win || win.type !== 'normal') return { onStage: false };
+  const answer = await callHost('link.route', {
+    url, dryRun, window: bounds(win), candidates: await userWindows(win.id), profile: identity ? identity.label : null
+  }, 8000);
+  if (!answer) return { onStage: null, reason: 'the amcu host did not answer: an amcu older than the extension, or no connection' };
+  if (!answer.onStage || dryRun) return answer;
+  const rest = (win.tabs || []).filter(t => t.id !== tab.id);
+  const alone = rest.length === 0;
+  const born = windowBorn.get(win.id);
+  const madeForIt = alone && born !== undefined && Date.now() - born < 15000;
+  const previous = previousActive(win, tab.id);
+  if (answer.target === 'other') {
+    if (alone && !madeForIt) await chrome.tabs.goBack(tab.id).catch(() => {});
+    else await chrome.tabs.remove(tab.id).catch(() => {});
+  } else if (answer.target === 'own') {
+    if (alone && !madeForIt) {
+      await chrome.tabs.create({ windowId: answer.windowId, url, active: true });
+      await chrome.tabs.goBack(tab.id).catch(() => {});
+    } else {
+      await chrome.tabs.move(tab.id, { windowId: answer.windowId, index: -1 });
+      await chrome.tabs.update(tab.id, { active: true });
+    }
+    const target = await chrome.windows.get(answer.windowId).catch(() => null);
+    await chrome.windows.update(answer.windowId, target && target.state === 'minimized' ? { state: 'normal', focused: true } : { focused: true }).catch(() => {});
+  } else if (answer.target === 'new') {
+    if (madeForIt) {
+      await chrome.windows.update(win.id, Object.assign({ focused: true }, answer.frame));
+    } else if (alone) {
+      await chrome.windows.create(Object.assign({ url, focused: true }, answer.frame));
+      await chrome.tabs.goBack(tab.id).catch(() => {});
+    } else {
+      await chrome.windows.create(Object.assign({ tabId: tab.id, focused: true }, answer.frame));
+    }
+  }
+  if (previous && !alone) await chrome.tabs.update(previous, { active: true }).catch(() => {});
+  return Object.assign({ routed: true }, answer);
+}
+
+async function routeIfStaged(tabId, url) {
+  if (routedTabs.has(tabId) || !/^(https?|file):/i.test(url || '')) return;
+  routedTabs.add(tabId);
+  setTimeout(() => routedTabs.delete(tabId), 15000);
+  try {
+    if (await justStarted()) return;
+    const tab = await getTab(tabId);
+    if (!tab || tab.pinned) return;
+    await routeLink(tab, url);
+  } catch (error) {
+    noteError('links', error);
+  }
+}
+
+chrome.webNavigation.onCommitted.addListener(details => {
+  if (details.frameId !== 0 || details.transitionType !== 'start_page') return;
+  routeIfStaged(details.tabId, details.url);
 });
 
 async function openedTabSince(openerId, since, params) {
@@ -1149,6 +1319,26 @@ async function mouseAt(tabId, x, y, options = {}) {
   return { dialog: null };
 }
 
+/// Where a top-frame viewport point lies in the browser window, as a fraction
+/// of the window from its top-left corner: the amcu stage draws a click on
+/// the window's picture there. Page zoom scales the viewport, not the window,
+/// hence the ratio of outer to inner width; the browser's own bars are what
+/// the window has above the viewport.
+async function windowPoint(tabId, point) {
+  try {
+    const g = await callFrame(tabId, 0, 'geometry', {}, 1500);
+    if (!g || !(g.innerWidth > 0) || !(g.innerHeight > 0) || !(g.outerWidth > 0) || !(g.outerHeight > 0)) return null;
+    const zoom = g.outerWidth / g.innerWidth;
+    const top = g.outerHeight - g.innerHeight * zoom;
+    const x = (point.x * zoom) / g.outerWidth;
+    const y = (top + point.y * zoom) / g.outerHeight;
+    if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return null;
+    return { x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 };
+  } catch (error) {
+    return null;
+  }
+}
+
 /// Locates a ref, checks it is reachable by a pointer, and returns the point
 /// in top-frame viewport coordinates.
 async function locate(tabId, ref, options = {}) {
@@ -1552,6 +1742,39 @@ const handlers = {
     return { tab: tabSummary(tab), frames: frames.map(f => ({ frameId: f.frameId, parentFrameId: f.parentFrameId, url: f.url })) };
   },
 
+  async 'links.windows'() {
+    await loadIdentity().catch(() => {});
+    return { windows: await userWindows(null), label: identity ? identity.label : null };
+  },
+
+  async 'links.open'(params) {
+    const win = await chrome.windows.get(params.windowId).catch(() => null);
+    if (!win) throw new BridgeError('window_not_found', `no window with id ${params.windowId}`);
+    const tab = await chrome.tabs.create({ windowId: win.id, url: params.url, active: true });
+    await chrome.windows.update(win.id, win.state === 'minimized' ? { state: 'normal', focused: true } : { focused: true });
+    return { tab: tabSummary(tab) };
+  },
+
+  async 'links.check'(params) {
+    const tab = await resolveTab(params);
+    return routeLink(tab, tab.url || tab.pendingUrl || '', { dryRun: true });
+  },
+
+  async 'sessions.restore'(params) {
+    const restored = [];
+    const gone = [];
+    for (const [session, tabId] of Object.entries(params.sessions || {})) {
+      if (typeof tabId !== 'number' || await currentTabId(session)) continue;
+      if (await getTab(tabId)) {
+        await setCurrentTab(session, tabId);
+        restored.push(session);
+      } else {
+        gone.push(session);
+      }
+    }
+    return { restored, gone };
+  },
+
   async 'tabs.list'(params) {
     const session = params.session || 'default';
     const current = await currentTabId(session);
@@ -1792,6 +2015,7 @@ const handlers = {
       ref: params.ref,
       description: target.description,
       point: { x: Math.round(target.x), y: Math.round(target.y) },
+      windowPoint: await windowPoint(tab.id, target),
       mode,
       fromEarlierSnapshot: target.fromEarlierSnapshot,
       unstable: target.stable === false,
@@ -1806,7 +2030,7 @@ const handlers = {
     await ensureAttached(tab.id);
     const target = await locate(tab.id, params.ref);
     await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: target.x, y: target.y, button: 'none' });
-    return { tab: tabSummary(tab), ref: params.ref, description: target.description, point: { x: Math.round(target.x), y: Math.round(target.y) } };
+    return { tab: tabSummary(tab), ref: params.ref, description: target.description, point: { x: Math.round(target.x), y: Math.round(target.y) }, windowPoint: await windowPoint(tab.id, target) };
   },
 
   async drag(params) {
@@ -1817,7 +2041,7 @@ const handlers = {
     const to = params.by ? null : await locate(tab.id, params.to, { scroll: false });
     const target = dragTarget(from, to, params);
     const press = { x: from.x, y: from.y };
-    const result = { tab: tabSummary(tab), from: from.description, to: to ? to.description : `offset ${Math.round(target.x - from.x)},${Math.round(target.y - from.y)}` };
+    const result = { tab: tabSummary(tab), description: from.description, from: from.description, to: to ? to.description : `offset ${Math.round(target.x - from.x)},${Math.round(target.y - from.y)}`, windowPoint: await windowPoint(tab.id, target) };
     if (!params.human) {
       await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: press.x, y: press.y, button: 'none' });
       await cdpInput(tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: press.x, y: press.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -4143,6 +4367,8 @@ async function executionContextFor(tabId, frameId) {
         return snapshot(message.params || {});
       case 'measure':
         return measure(message.params);
+      case 'geometry':
+        return { innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight };
       case 'focus-for-input':
         return focusForInput(message.params);
       case 'value':
@@ -4216,7 +4442,7 @@ async function executionContextFor(tabId, frameId) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.12.1",
+  "version": "0.14.0",
   "description": "Lets the amcu command-line tool read and drive this browser's tabs through Chrome's native messaging — no tokens, no ports, no remote debugging flags.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArmpx4zHfPTZaX0C1oQHsEwRhOJ1PEm8uvGNFqhBJusjvVOX0qrpGG238e6vRfynnw6Ts84Y6HBBf+DIy7ZHtcPal+i47er2WWntRVqDq9tVH+nc+YaASsp8TGhCH3CwOmSjGvdKv5s8VbKeYCJai9y+exmK+2xcmLq8rMLtpb0vfOyta36JH9fZKydCR6fN2oawIY3+swNfPKO5fTogKJotNJgCoo3igslliULHUNTu4mLUwz4gBy39O0h40HJc3o6CNDjmQKU8AWv3W0cupXt8OKSfwx0pVl6e189TGbhyC0nu6G3QgkM4QpYZgGCexar2GvYcR16tJrSdATb3slQIDAQAB",
   "minimum_chrome_version": "116",

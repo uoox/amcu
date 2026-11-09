@@ -121,7 +121,8 @@ enum BrowserCommands {
         if let path = flags.string("secrets") ?? ProcessInfo.processInfo.environment["AMCU_SECRETS"] {
             try SecretStore.load(path: path)
         }
-        if changesPageOrWindow(verb, flags) { try refuseIfTakenOver(flags) }
+        running = (verb, flags)
+        if changesPageOrWindow(verb, flags) { try handBackIfHeld(flags) }
         switch verb {
         case "install": try install(flags)
         case "uninstall": try uninstall(flags)
@@ -182,14 +183,34 @@ enum BrowserCommands {
         }
     }
 
-    /// While the user holds a window of this browser, taken off the stage,
-    /// page actions are refused like desktop ones. The lock is per browser
-    /// process, not per tab: a window server window and a tab do not match up
-    /// reliably, and every profile's windows belong to the same process.
-    static func refuseIfTakenOver(_ flags: Flags) throws {
-        guard FileManager.default.fileExists(atPath: Stage.takeoversURL.path), !Stage.takeovers().isEmpty,
-              let pid = Stage.browserPID(for: try client(flags).endpoint) else { return }
-        try Stage.refuseIfTakenOver(pid: pid)
+    /// The verb being run, for the stage's activity report.
+    private static var running: (verb: String, flags: Flags)?
+
+    /// A page action in a window the user took off the stage hands that
+    /// window back first, like a desktop verb. The window comes from the
+    /// tab: the browser window the tab is in, paired with a window server
+    /// window the way the stage window pairs them. Other windows of the
+    /// browser — other profiles, other windows of this one — are not touched.
+    static func handBackIfHeld(_ flags: Flags) throws {
+        guard FileManager.default.fileExists(atPath: Stage.takeoversURL.path) else { return }
+        let held = Stage.takeovers()
+        guard !held.isEmpty else { return }
+        let client = try client(flags)
+        guard let pid = Stage.browserPID(for: client.endpoint) else { return }
+        let mine = held.filter { $0.pid == pid }
+        guard !mine.isEmpty else { return }
+        let session = SessionName.resolve(explicit: flags.string("session")).name
+        let tabID: Int
+        if let explicit = try flags.int("tab") {
+            tabID = explicit
+        } else {
+            guard let listed = try? client.request("tabs.list", params: ["session": session], timeout: 3),
+                  let current = listed["current"].int else { return }
+            tabID = current
+        }
+        let pairing = StageTabs.collect(for: mine.map { (windowID: UInt32($0.windowID), pid: $0.pid) })
+        guard let window = pairing.first(where: { $0.value.tabs.contains { $0.id == tabID } })?.key else { return }
+        try Stage.handBackBeforeActing(pid: pid, windowID: window, session: session)
     }
 
     static func client(_ flags: Flags) throws -> BrowserClient {
@@ -351,6 +372,9 @@ enum BrowserCommands {
     }
 
     static func emit(_ client: BrowserClient, action: String, result: JSONValue, text: () -> String) {
+        if let running, changesPageOrWindow(running.verb, running.flags) {
+            StageReport.sendBrowser(running.verb, flags: running.flags, client: client, result: result)
+        }
         let endpoint = client.endpoint
         let connection = ConnectionJSON(pid: endpoint.pid, instanceId: endpoint.instanceId, label: endpoint.label,
                                         profileDir: endpoint.profileDir, profileName: endpoint.profileName)
@@ -358,6 +382,32 @@ enum BrowserCommands {
     }
 
     // MARK: - Setup
+
+    private struct Comeback {
+        var back = false
+        var restored: [String] = []
+        var gone: [String] = []
+    }
+
+    static let comebackWait: TimeInterval = 15
+
+    private static func comeBack(_ sessions: [String: Int], after old: BrowserEndpoint) -> Comeback {
+        guard let instance = old.instanceId else { return Comeback(back: true) }
+        let deadline = Date().addingTimeInterval(comebackWait)
+        var outcome = Comeback()
+        while Date() < deadline {
+            usleep(300_000)
+            guard let fresh = BrowserClient.discover().first(where: { $0.instanceId == instance && $0.pid != old.pid }) else { continue }
+            outcome.back = true
+            if sessions.isEmpty { return outcome }
+            if let reply = try? BrowserClient(endpoint: fresh).request("sessions.restore", params: ["sessions": sessions], timeout: 5) {
+                outcome.restored = reply["restored"].stringArray
+                outcome.gone = reply["gone"].stringArray
+                return outcome
+            }
+        }
+        return outcome
+    }
 
     static func install(_ flags: Flags) throws {
         var browsers = flags.list("browser")
@@ -380,9 +430,20 @@ enum BrowserCommands {
             ? BrowserClient.discover().filter { $0.browser != SafariBridge.browserName }
             : [client(flags).endpoint]
         let skipReload = flags.has("no-reload")
+        var kept: [String] = []
+        var notBack: [String] = []
         for endpoint in running {
-            if !skipReload, (try? BrowserClient(endpoint: endpoint).request("extension.reload", timeout: 5)) != nil {
+            let client = BrowserClient(endpoint: endpoint)
+            let sessions = skipReload ? [:] : ((try? client.request("status", timeout: 5))?["sessions"].dictionary.compactMapValues(\.int) ?? [:])
+            if !skipReload, (try? client.request("extension.reload", timeout: 5)) != nil {
                 reloaded.append(endpoint.summary)
+                let outcome = comeBack(sessions, after: endpoint)
+                if !outcome.back {
+                    notBack.append(endpoint.summary)
+                } else if !sessions.isEmpty {
+                    let closed = outcome.gone.isEmpty ? "" : " (\(outcome.gone.count) were on tabs closed before the reload)"
+                    kept.append("\(endpoint.label ?? endpoint.profileName ?? endpoint.browser): \(outcome.restored.count)/\(sessions.count)\(closed)")
+                }
             } else {
                 notReloaded.append(endpoint.summary)
             }
@@ -392,8 +453,10 @@ enum BrowserCommands {
             let report: BrowserInstall.InstallReport
             let reloaded: [String]
             let notReloaded: [String]
+            let notBack: [String]
+            let keptSessions: [String]
         }
-        Output.emit(Payload(report: report, reloaded: reloaded, notReloaded: notReloaded)) {
+        Output.emit(Payload(report: report, reloaded: reloaded, notReloaded: notReloaded, notBack: notBack, keptSessions: kept)) {
             var lines: [String] = []
             for manifest in report.manifests {
                 lines.append("registered native host for \(manifest.browser): \(manifest.path)")
@@ -406,6 +469,14 @@ enum BrowserCommands {
             lines.append("")
             if !reloaded.isEmpty {
                 lines.append("asked the running extension to reload itself: \(reloaded.joined(separator: "; "))")
+            }
+            if !kept.isEmpty {
+                lines.append("sessions that kept their current tab across the reload: \(kept.joined(separator: "; "))")
+            }
+            if !notBack.isEmpty {
+                lines.append("did not reconnect within \(Int(comebackWait)) s of reloading: \(notBack.joined(separator: "; "))")
+                lines.append("      a Chromium profile with Developer mode off disables an unpacked extension when it reloads (BitBrowser starts its profiles that way):")
+                lines.append("      turn Developer mode on in that profile's chrome://extensions (amcu bridge comes back, still the old version), then `amcu browser install --profile <its label>`")
             }
             if !notReloaded.isEmpty {
                 lines.append((skipReload ? "not reloaded (--no-reload): " : "reload not confirmed: ") + notReloaded.joined(separator: "; "))

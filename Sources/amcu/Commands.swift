@@ -64,7 +64,8 @@ enum Commands {
             }
         }
         let app = try resolveApp(flags, "pid:\(snapshot.app.pid)")
-        try Stage.refuseIfTakenOver(pid: app.processIdentifier)
+        try Stage.handBackBeforeActing(pid: app.processIdentifier, windowID: snapshot.window.windowID, session: sessionName)
+        StageReport.on(node.label)
         return (snapshot, node, app)
     }
 
@@ -141,6 +142,7 @@ enum Commands {
             return ("ax:\(pressed.action)@point", nil)
         }
         if mode == .foreground { try Stage.refuseForegroundPointer(at: global) }
+        StageReport.at(global)
         let focus = focusGuard(app, mode: mode)
         try PointerInput.click(PointerInput.ClickRequest(
             pid: app.processIdentifier,
@@ -190,17 +192,20 @@ enum Commands {
         ])
     }
 
-    /// The acting verbs leave an application alone while the user holds one
-    /// of its windows, taken off the stage; reading is still allowed.
+    /// An acting verb on a window the user took off the stage hands it back
+    /// first (and then reads where it is now); reading verbs leave it be.
     static func actingTarget(_ flags: Flags) throws -> ResolvedTarget {
-        let target = try resolveTarget(flags)
-        try Stage.refuseIfTakenOver(pid: target.app.processIdentifier)
+        var target = try resolveTarget(flags)
+        if try Stage.handBackBeforeActing(pid: target.app.processIdentifier, windowID: target.windowInfo.windowID, session: session(flags)) {
+            target = try resolveTarget(flags)
+        }
+        StageReport.window(target.windowInfo)
         return target
     }
 
     static func actingApp(_ flags: Flags) throws -> NSRunningApplication {
         let app = try resolveApp(flags, try flags.required("app"))
-        try Stage.refuseIfTakenOver(pid: app.processIdentifier)
+        try Stage.handBackBeforeActing(pid: app.processIdentifier, windowID: nil, session: session(flags))
         return app
     }
 
@@ -223,6 +228,15 @@ enum Commands {
     /// success, so the fallback instead pins the window by its recorded index
     /// and cross-checks the title before any path is replayed.
     static func snapshotWindow(
+        for snapshot: Snapshot,
+        app: NSRunningApplication
+    ) throws -> (element: AXUIElement, info: WindowInfo) {
+        let selected = try reselectWindow(for: snapshot, app: app)
+        StageReport.window(selected.info)
+        return selected
+    }
+
+    private static func reselectWindow(
         for snapshot: Snapshot,
         app: NSRunningApplication
     ) throws -> (element: AXUIElement, info: WindowInfo) {
@@ -457,6 +471,7 @@ enum Commands {
             let wantsCoordinates = (flags.string("mode") == "foreground") || flags.has("raw")
             let action = button == .right ? "AXShowMenu" : (kAXPressAction as String)
             if !wantsCoordinates, node.actions.contains(action) {
+                if let frame = AX.frame(element) { StageReport.at(CGPoint(x: frame.midX, y: frame.midY)) }
                 try AX.perform(element, action)
                 var result = ActionResult(action: "click", mode: "ax:\(action)", target: "element \(elementIndex)", detail: combinedDetail(node.label, forcedNote))
                 result.apply(AfterAction.run(flags: flags, app: app, guarded: nil))
@@ -794,6 +809,7 @@ enum Commands {
             }
         }
         let result = ActionResult(action: "window", mode: nil, target: target.windowInfo.title ?? "window", detail: performed.joined(separator: ", "))
+        StageReport.send(flags: flags, app: target.app)
         Output.emit(result) { result.text }
     }
 
@@ -862,6 +878,7 @@ enum Commands {
         }
         let global = globalPoint(point, window: target.windowInfo, isScreenSpace: flags.has("screen"))
         if mode == .foreground { try Stage.refuseForegroundPointer(at: global) }
+        StageReport.at(global)
         let guarded = focusGuard(target.app, mode: mode)
         try PointerInput.scroll(
             pid: target.app.processIdentifier,
@@ -897,6 +914,7 @@ enum Commands {
             try Stage.refuseForegroundPointer(at: start)
             try Stage.refuseForegroundPointer(at: end)
         }
+        StageReport.at(end)
         let guarded = focusGuard(target.app, mode: mode)
         try PointerInput.drag(
             pid: target.app.processIdentifier,

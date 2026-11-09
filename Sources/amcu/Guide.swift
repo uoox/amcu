@@ -191,10 +191,21 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   corner of the user's screen. A window there is fully drawn — `screenshot`
   and `scan` see what it shows now, where a minimised window gives a stale
   frame — and every verb works on it as anywhere else; `amcu windows` marks
-  it "on the stage". The first `put` starts the stage; the user gets a menu
-  bar icon whose window shows every staged window live, a browser window's
-  tabs under its picture (the ones your debugger is on marked "amcu"), and
-  a "take over" button per window.
+  it "on the stage". The first `put` starts the stage; an amcu app appears
+  in the user's Dock (there is no menu bar icon) whose window has a tab per
+  staged window, along the top or down the left as the user likes: the
+  window live, what agents just did to it and which session (your session
+  name shows: $AMCU_SESSION or --session make it readable), a browser
+  window's tabs (the ones your debugger is on marked "amcu"), and a "take
+  over" button. Quitting that app closes the stage. The display is kept by a
+  process of its own: an upgraded amcu takes the stage over by itself, and
+  `amcu stage restart` does it on demand, without the windows leaving the
+  stage.
+  A link the user opens from another application lands in the browser's
+  last active window, which may be one you drive on the stage; the extension
+  moves it to the window they used last (or a new one on their screen) and
+  brings your tab back to the front, so your window is unchanged. Tabs you
+  open and links clicked inside a page stay where they are.
   Windows the application opens later (dialogs, new documents) appear on the
   user's screen first, because macOS opens them where the user is, and are
   moved over within a fraction of a second — except while the user is
@@ -207,17 +218,22 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   the display. An empty stage removes itself after 15 minutes.
   The user can take a window over at any time: clicking its picture in the
   stage window (or its "take over" button) brings it to their screen and
-  switches to it. From then on every acting verb on that application —
-  click, type, set-value, key, scroll, drag, window, menu-item, stage put —
-  fails with `taken_over` until they press "hand back", which returns the
-  window to its place on the stage. On `taken_over`, wait or ask the user
-  whether they are done; never move the window back yourself. Reading
-  (snapshot, scan, screenshot) still works, so after the hand-back look
-  again before you continue: the user may have changed things.
+  switches to it. "Hand back" returns it (or, in the status bar, every
+  window they hold) to its place on the stage; "release" leaves it on
+  their screen for good, off the stage, where amcu still acts on it like
+  on any window. An acting verb
+  on a window the user holds — click, type, set-value, key, scroll, drag,
+  window, menu-item, stage put, a page action in its tab — hands it back to
+  the stage first and then acts: acting is taking it back, so do it only
+  when you need that window now, and look again before you continue (the
+  user may have changed things). Other windows of the same application are
+  not held back, and reading (snapshot, scan, screenshot) works on a held
+  window where it is. `taken_over` means handing back failed: ask the user.
   When the user has to act in a staged window (a password, a 2FA prompt),
   `amcu stage release --app <selector> --activate` hands it to them — ask
-  first; it counts as a take-over — or `amcu stage show` opens the stage window so
-  they can take it over themselves. The cursor is kept off the stage, and
+  first; it counts as a take-over, so do not act on it until they say they
+  are done — or `amcu stage show` opens the stage window so they can take
+  it over themselves. The cursor is kept off the stage, and
   `--mode foreground` is refused there. `amcu stage status` lists what is on
   it, including windows amcu did not put there, and what the user holds.
 

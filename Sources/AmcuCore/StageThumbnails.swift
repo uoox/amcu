@@ -84,6 +84,12 @@ final class StageThumbnails: ObservableObject {
         capture.start(size: size)
     }
 
+    /// A still picture instead of a stream, for `StagePreview`.
+    func still(_ image: CGImage, for id: CGWindowID) {
+        layer(for: id).contents = image
+        states[id] = .live
+    }
+
     private func set(_ state: State, for id: CGWindowID) {
         guard layers[id] != nil, states[id] != state else { return }
         states[id] = state

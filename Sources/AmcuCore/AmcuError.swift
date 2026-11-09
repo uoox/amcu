@@ -37,8 +37,8 @@ public struct AmcuError: Error, CustomStringConvertible {
         case lastWindow = "last_window"
         /// No stage host is running, or it could not be reached or started.
         case stageUnavailable = "stage_unavailable"
-        /// The user took a window of this application off the stage to work
-        /// in it; amcu does not act on the application until it is handed back.
+        /// The user took a window off the stage to work in it, and handing it
+        /// back before acting on it failed.
         case takenOver = "taken_over"
     }
 

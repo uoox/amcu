@@ -4,18 +4,26 @@ import Foundation
 
 /// The stage: a virtual display amcu adds off the corner of the user's
 /// screen, so the windows an agent drives are fully drawn and current without
-/// ever being in front of the user. A resident host process (`amcu stage
-/// serve`) owns the display — it exists only while that process lives — plus
-/// the menu bar icon and the cursor guard; every other amcu process finds the
-/// display by its identity and talks to the host over a Unix socket.
+/// ever being in front of the user. A small holder process (`amcu stage
+/// hold`) keeps the display — it exists only while that process lives — and
+/// a resident host (`amcu stage serve`) does everything else: the stage app
+/// in the Dock and its tabbed window, the cursor guard, moving windows. A new host can take
+/// over a display that stays, so upgrading amcu never drops the windows on
+/// the user's screen. Every other amcu process finds the display by its
+/// identity and talks to the host over a Unix socket.
 public enum Stage {
-    public static let identity = VirtualDisplay.Identity(name: "amcu stage", vendorID: 0x616D, productID: 0x6375, serial: 1)
+    /// `AMCU_STAGE_DIR` and `AMCU_STAGE_SERIAL` give a test a stage of its
+    /// own beside the user's: its own files, its own display.
+    private static let environment = ProcessInfo.processInfo.environment
+
+    public static let identity = VirtualDisplay.Identity(name: "amcu stage", vendorID: 0x616D, productID: 0x6375, serial: environment["AMCU_STAGE_SERIAL"].flatMap(UInt32.init) ?? 1)
 
     /// An empty stage removes itself after this long.
     public static let idleExit: TimeInterval = 15 * 60
 
     static var cacheDirectory: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/amcu", isDirectory: true)
+        if let directory = environment["AMCU_STAGE_DIR"], !directory.isEmpty { return URL(fileURLWithPath: directory, isDirectory: true) }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/amcu", isDirectory: true)
     }
 
     public static var socketURL: URL { cacheDirectory.appendingPathComponent("stage.sock") }
@@ -28,27 +36,39 @@ public enum Stage {
     /// streams, `amcu screenshot` run from the very same path hung in
     /// replayd (4 of 5 runs, and on after the streams stopped), while a copy
     /// anywhere else, even beside it, did not.
-    static var hostExecutableURL: URL { cacheDirectory.appendingPathComponent("stage-host/amcu") }
+    static var hostExecutableURL: URL { StageBundle.executableURL }
+    /// The display holder's record: its pid and display.
+    public static var holderURL: URL { cacheDirectory.appendingPathComponent("stage-display.json") }
+    static var holderExecutableURL: URL { cacheDirectory.appendingPathComponent("stage-display/amcu") }
+    /// What a host knows that the display does not — where put windows came
+    /// from, what is followed and held, what agents did — for the host that
+    /// takes over the display next.
+    static var stateURL: URL { cacheDirectory.appendingPathComponent("stage-state.json") }
     public static var logURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/amcu/stage.log")
+        if environment["AMCU_STAGE_DIR"]?.isEmpty == false { return cacheDirectory.appendingPathComponent("stage.log") }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/amcu/stage.log")
     }
 
-    public static func activeDisplays() -> [CGDirectDisplayID] {
+    /// Online, not active: while the displays sleep (the user away five
+    /// minutes) the active list is empty, and a stage looked up there was
+    /// "gone" — a new host then tried to make a second display with the same
+    /// identity, which the system refused.
+    public static func onlineDisplays() -> [CGDirectDisplayID] {
         var count: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
         return Array(ids.prefix(Int(count)))
     }
 
     /// The stage display, if one is up.
     public static func display() -> (id: CGDirectDisplayID, bounds: CGRect)? {
-        activeDisplays().first(where: identity.matches).map { ($0, CGDisplayBounds($0)) }
+        onlineDisplays().first(where: identity.matches).map { ($0, CGDisplayBounds($0)) }
     }
 
     /// Bounds of every display except the stage.
     public static func userDisplays() -> [CGRect] {
-        activeDisplays().filter { !identity.matches($0) }.map(CGDisplayBounds)
+        onlineDisplays().filter { !identity.matches($0) }.map(CGDisplayBounds)
     }
 
     public static func isOnStage(_ frame: CGRect) -> Bool {
@@ -65,12 +85,54 @@ public enum Stage {
         return file.takeovers
     }
 
-    /// Refuses to act on an application while the user holds one of its
-    /// windows — whatever amcu did now would land in the middle of their work.
-    public static func refuseIfTakenOver(pid: pid_t) throws {
-        guard FileManager.default.fileExists(atPath: takeoversURL.path),
-              let held = takeovers().first(where: { $0.pid == pid }) else { return }
-        throw takenOverError(held)
+    /// An acting verb about to touch a window the user took over hands it
+    /// back to the stage first: the user's rule is that amcu acting means
+    /// amcu wants the window back. Without `windowID` the verb goes to the
+    /// application's focused window. Other windows of the application are not
+    /// locked. Returns whether a window moved, so the caller reads its frame
+    /// again.
+    @discardableResult
+    public static func handBackBeforeActing(pid: pid_t, windowID: CGWindowID?, session: String) throws -> Bool {
+        guard FileManager.default.fileExists(atPath: takeoversURL.path) else { return false }
+        let held = takeovers().filter { $0.pid == pid }
+        guard !held.isEmpty, let target = windowID ?? focusedWindowID(pid: pid),
+              let window = held.first(where: { $0.windowID == target }) else { return false }
+        let reply: StageReply
+        do {
+            reply = try StageClient.request("handback", StageParams(windowIDs: [window.windowID], by: session), timeout: 10)
+        } catch let error as AmcuError {
+            throw takenOverError(window, reason: error.message)
+        }
+        guard let move = reply.moves.first, move.ok else {
+            throw takenOverError(window, reason: reply.moves.first?.note ?? "the stage did not move it")
+        }
+        return true
+    }
+
+    /// The application with keyboard focus now, from the accessibility
+    /// server: NSWorkspace lags, and in a command that does not run its
+    /// run loop it does not update at all.
+    public static func focusedApplicationPID() -> pid_t? {
+        let systemWide = AXUIElementCreateSystemWide()
+        AX.setMessagingTimeout(systemWide, seconds: 0.5)
+        guard let app = AX.element(systemWide, kAXFocusedApplicationAttribute as String) else { return nil }
+        return AX.pid(app)
+    }
+
+    /// The window an application's keystrokes go to.
+    public static func focusedWindowID(pid: pid_t) -> CGWindowID? {
+        let app = AXUIElementCreateApplication(pid)
+        AX.setMessagingTimeout(app, seconds: 0.5)
+        guard let window = AX.element(app, kAXFocusedWindowAttribute as String) else { return nil }
+        return AX.windowID(window)
+    }
+
+    /// A window's frame from the window server, wherever it is.
+    public static func windowFrame(_ id: CGWindowID) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]],
+              let entry = list.first(where: { ($0[kCGWindowNumber as String] as? CGWindowID) == id }),
+              let bounds = entry[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
     }
 
     /// The browser process whose windows a bridge connection drives — what a
@@ -84,6 +146,10 @@ public enum Stage {
         return parentPID(of: endpoint.pid)
     }
 
+    public static var screenIsLocked: Bool {
+        (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+    }
+
     static func parentPID(of pid: pid_t) -> pid_t? {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
@@ -93,15 +159,72 @@ public enum Stage {
         return parent > 1 ? parent : nil
     }
 
-    public static func takenOverError(_ held: StageTakeover) -> AmcuError {
+    public static func takenOverError(_ held: StageTakeover, reason: String) -> AmcuError {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         let window = held.title.map { " (window \"\($0)\")" } ?? ""
-        return AmcuError(.takenOver, "the user took over \(held.app)\(window) from the stage at \(formatter.string(from: held.since)); amcu leaves \(held.app) alone until they hand it back", nextSteps: [
-            "Wait until the user hands it back with the \"hand back\" button in the stage window; `amcu stage status` shows what is still taken over.",
-            "Or ask the user whether they are done with it.",
-            "Reading still works (snapshot, scan, screenshot). Do not move its windows back onto the stage yourself."
+        return AmcuError(.takenOver, "the user took over \(held.app)\(window) from the stage at \(formatter.string(from: held.since)), and handing it back to the stage before acting failed: \(reason)", nextSteps: [
+            "Ask the user to press \"hand back\" in the stage window, or wait; `amcu stage status` shows what is still taken over.",
+            "Reading still works (snapshot, scan, screenshot)."
         ])
+    }
+
+    /// Seconds since the user last touched the keyboard, mouse or trackpad.
+    /// Events amcu posts to a process do not count: they bypass the HID system.
+    public static func secondsSinceUserInput() -> TimeInterval {
+        CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
+    }
+
+    /// Starts a process in a session of its own, so it outlives the command
+    /// and the shell that ran it, with stderr going to the stage log.
+    /// Responsibility is inherited, not disclaimed: it acts with the same
+    /// permissions as the process that started it.
+    static func spawnDetached(_ arguments: [String]) throws -> pid_t {
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
+        posix_spawn_file_actions_addopen(&actions, 2, logURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        // Nothing but the three descriptors above: a holder that inherited
+        // the host's lock file kept the lock after the host left, and the
+        // next host could not start.
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
+        argv.append(nil)
+        defer { argv.forEach { free($0) } }
+        var pid: pid_t = 0
+        let status = posix_spawn(&pid, arguments[0], &actions, &attributes, argv, environ)
+        guard status == 0 else {
+            throw AmcuError(.stageUnavailable, "could not start \(arguments.dropFirst().prefix(2).joined(separator: " ")): \(String(cString: strerror(status)))")
+        }
+        return pid
+    }
+
+    /// A fresh copy of `source` (this binary unless given) at `target` — a
+    /// clone on APFS, signature included — swapped in atomically, so a
+    /// process still running from the old copy keeps its file.
+    static func cloneExecutable(from source: URL = URL(fileURLWithPath: Responsibility.executablePath).resolvingSymlinksInPath(), to target: URL) throws -> String {
+        guard source.path != target.path else { return source.path }
+        let manager = FileManager.default
+        try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let staging = target.deletingLastPathComponent().appendingPathComponent(".amcu-\(getpid())")
+        try? manager.removeItem(at: staging)
+        do {
+            try manager.copyItem(at: source, to: staging)
+        } catch {
+            throw AmcuError(.stageUnavailable, "could not copy \(source.path) to \(target.path) for the stage: \(error.localizedDescription)")
+        }
+        guard rename(staging.path, target.path) == 0 else {
+            let reason = String(cString: strerror(errno))
+            try? manager.removeItem(at: staging)
+            throw AmcuError(.stageUnavailable, "could not put the stage's copy of amcu in place at \(target.path): \(reason)")
+        }
+        return target.path
     }
 
     /// A pointer that moves the user's cursor would have to cross onto a
@@ -201,8 +324,12 @@ public struct StageStatus: Codable, Sendable {
     public let following: [StageFollow]
     /// Recent events worth knowing about, oldest first.
     public let notes: [String]
+    /// What agents did to windows on the stage lately, oldest first.
+    public let activity: [StageActivity]
+    /// The process that keeps the display, when it is not the host itself.
+    public let holderPID: Int32?
 
-    public init(version: String, hostPID: Int32, displayID: UInt32, bounds: FrameJSON, scale: Int, contact: StageGeometry.Contact, since: Date, answersFor: String?, accessibility: Bool, screenRecording: Bool, cursorPullbacks: Int, windows: [StageWindow], takenOver: [StageTakeover], following: [StageFollow], notes: [String]) {
+    public init(version: String, hostPID: Int32, displayID: UInt32, bounds: FrameJSON, scale: Int, contact: StageGeometry.Contact, since: Date, answersFor: String?, accessibility: Bool, screenRecording: Bool, cursorPullbacks: Int, windows: [StageWindow], takenOver: [StageTakeover], following: [StageFollow], notes: [String], activity: [StageActivity] = [], holderPID: Int32? = nil) {
         self.version = version
         self.hostPID = hostPID
         self.displayID = displayID
@@ -218,6 +345,8 @@ public struct StageStatus: Codable, Sendable {
         self.takenOver = takenOver
         self.following = following
         self.notes = notes
+        self.activity = activity
+        self.holderPID = holderPID
     }
 
     /// A host started by an older amcu keeps running across an upgrade, so
@@ -239,6 +368,8 @@ public struct StageStatus: Codable, Sendable {
         takenOver = try c.decodeIfPresent([StageTakeover].self, forKey: .takenOver) ?? []
         following = try c.decodeIfPresent([StageFollow].self, forKey: .following) ?? []
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
+        activity = try c.decodeIfPresent([StageActivity].self, forKey: .activity) ?? []
+        holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
     }
 }
 
@@ -252,12 +383,19 @@ public struct StageParams: Codable, Sendable {
     public var windowIDs: [UInt32]?
     public var follow: Bool?
     public var activate: Bool?
+    /// The session on whose behalf, for what the stage window shows.
+    public var by: String?
+    public var activity: StageActivity?
+    public var text: String?
 
-    public init(pid: Int32? = nil, windowIDs: [UInt32]? = nil, follow: Bool? = nil, activate: Bool? = nil) {
+    public init(pid: Int32? = nil, windowIDs: [UInt32]? = nil, follow: Bool? = nil, activate: Bool? = nil, by: String? = nil, activity: StageActivity? = nil, text: String? = nil) {
         self.pid = pid
         self.windowIDs = windowIDs
         self.follow = follow
         self.activate = activate
+        self.by = by
+        self.activity = activity
+        self.text = text
     }
 }
 
@@ -360,59 +498,48 @@ public enum StageClient {
     }
 
     private static func spawnHost(pointSize: CGSize?, scale: Int?) throws -> pid_t {
-        try FileManager.default.createDirectory(at: Stage.logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: Stage.cacheDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let executable = try hostExecutable()
-        var arguments = [executable, "stage", "serve"]
+        let source = URL(fileURLWithPath: Responsibility.executablePath).resolvingSymlinksInPath()
+        let executable = try StageBundle.install(from: source)
+        // The host watches the binary it was copied from and hands the stage
+        // to a new copy when that changes, so an install takes effect.
+        var arguments = [executable, "stage", "serve", "--source", source.path]
         if let pointSize { arguments += ["--size", "\(Int(pointSize.width))x\(Int(pointSize.height))"] }
         if let scale { arguments += ["--scale", String(scale)] }
-
-        var actions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&actions)
-        defer { posix_spawn_file_actions_destroy(&actions) }
-        posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
-        posix_spawn_file_actions_addopen(&actions, 2, Stage.logURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
-        var attributes: posix_spawnattr_t?
-        posix_spawnattr_init(&attributes)
-        defer { posix_spawnattr_destroy(&attributes) }
-        // Its own session, so it outlives this command and the shell that ran
-        // it. Responsibility is inherited, not disclaimed: the host acts with
-        // the same permissions as the amcu command that started it.
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
-        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
-        argv.append(nil)
-        defer { argv.forEach { free($0) } }
-        var pid: pid_t = 0
-        let status = posix_spawn(&pid, executable, &actions, &attributes, argv, environ)
-        guard status == 0 else {
-            throw AmcuError(.stageUnavailable, "could not start the stage host: \(String(cString: strerror(status)))")
-        }
-        return pid
+        return try Stage.spawnDetached(arguments)
     }
 
-    /// A fresh copy of this binary at `hostExecutableURL` (a clone on APFS,
-    /// signature included), swapped in atomically; a host still running from
-    /// the old copy keeps its file.
-    private static func hostExecutable() throws -> String {
-        let source = URL(fileURLWithPath: Responsibility.executablePath).resolvingSymlinksInPath()
-        let target = Stage.hostExecutableURL
-        guard source.path != target.path else { return source.path }
-        let manager = FileManager.default
-        try manager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let staging = target.deletingLastPathComponent().appendingPathComponent(".amcu-\(getpid())")
-        try? manager.removeItem(at: staging)
-        do {
-            try manager.copyItem(at: source, to: staging)
-        } catch {
-            throw AmcuError(.stageUnavailable, "could not copy amcu to \(target.path) for the stage host: \(error.localizedDescription)")
+    /// Tells the host what an acting verb just did. Never waits for an
+    /// answer and never fails the verb: no stage, no report.
+    public static func report(_ activity: StageActivity) {
+        tell("activity", StageParams(activity: activity))
+    }
+
+    public static func note(_ text: String) {
+        tell("note", StageParams(text: text))
+    }
+
+    private static func tell(_ method: String, _ params: StageParams) {
+        guard let fd = RelaySockets.connectUnix(path: Stage.socketURL.path) else { return }
+        defer { close(fd) }
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        _ = StageWire.writeLine(fd, StageRequest(id: 1, method: method, params: params))
+    }
+
+    /// A new host from this binary takes over the running stage: the display
+    /// and every window on it stay where they are. Returns the new host's
+    /// status, or nil when the running host cannot hand over (it keeps the
+    /// display itself, as amcu before 0.13 did).
+    public static func handOver(wait: TimeInterval = 15) throws -> StageReply? {
+        let before = try request("status")
+        guard before.status.holderPID != nil else { return nil }
+        _ = try request("handover", timeout: 10)
+        let deadline = Date().addingTimeInterval(wait)
+        while Date() < deadline, kill(before.status.hostPID, 0) == 0 || isRunning() {
+            usleep(100_000)
         }
-        guard rename(staging.path, target.path) == 0 else {
-            let reason = String(cString: strerror(errno))
-            try? manager.removeItem(at: staging)
-            throw AmcuError(.stageUnavailable, "could not put the stage host's copy of amcu in place: \(reason)")
-        }
-        return target.path
+        return try start().reply
     }
 
     static func lastLogLine() -> String? {

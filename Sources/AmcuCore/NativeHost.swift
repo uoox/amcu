@@ -333,6 +333,21 @@ final class HostRuntime {
             target.semaphore.signal()
         case "pong":
             break
+        case "call":
+            guard let id = object["id"] as? Int, let method = object["method"] as? String else { return }
+            let params = JSONValue(object["params"] ?? [String: Any]())
+            DispatchQueue.global(qos: .userInitiated).async {
+                var reply: [String: Any] = ["type": "callResult", "id": id]
+                switch method {
+                case "link.route":
+                    reply["ok"] = true
+                    reply["result"] = LinkRouting.route(params, ownSocket: self.socketPath, browser: self.browser)
+                default:
+                    reply["ok"] = false
+                    reply["error"] = ["code": "unsupported", "message": "unknown call '\(method)'", "nextSteps": [String]()]
+                }
+                try? self.writeToExtension(reply)
+            }
         default:
             break
         }

@@ -46,7 +46,7 @@ public enum StageTabs {
     /// stage are asked, each profile over its own socket, so an idle stage
     /// costs no round trip. All of a browser's windows take part in the
     /// pairing, on the stage or not, so a twin elsewhere is told apart.
-    static func collect(for windows: [StageWindow]) -> [CGWindowID: Paired] {
+    public static func collect(for windows: [(windowID: CGWindowID, pid: pid_t)]) -> [CGWindowID: Paired] {
         let pids = Set(windows.map(\.pid))
         let directory = BrowserBridge.socketDirectory
         guard !pids.isEmpty, let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [:] }

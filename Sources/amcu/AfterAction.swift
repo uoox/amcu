@@ -14,6 +14,7 @@ import AmcuCore
 /// check and any read-back depend on it).
 enum AfterAction {
     static func run(flags: Flags, app: NSRunningApplication, guarded: FocusGuard?) -> Aftermath {
+        StageReport.send(flags: flags, app: app)
         var aftermath = Aftermath()
         aftermath.settle = Settle.wait(pid: app.processIdentifier)
         aftermath.focusNote = guarded?.note(settleMicroseconds: 0)
