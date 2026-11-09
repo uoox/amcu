@@ -148,17 +148,30 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     }
 
     private func place() {
-        guard !placed else { return }
-        placed = true
-        defer { _ = window.setFrameAutosaveName(StageApp.frameName) }
-        if window.setFrameUsingName(StageApp.frameName), NSScreen.screens.contains(where: { $0.frame.intersects(window.frame) && !StageApp.isStage($0) }) { return }
-        let visible = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        if !placed {
+            placed = true
+            let restored = window.setFrameUsingName(StageApp.frameName)
+            _ = window.setFrameAutosaveName(StageApp.frameName)
+            if restored, StageApp.seenByUser(window.frame) { return }
+        } else if StageApp.seenByUser(window.frame) {
+            return
+        }
+        guard let visible = NSScreen.screens.first(where: { !StageApp.isStage($0) })?.visibleFrame else { return }
         let size = NSSize(width: min(1280, visible.width - 80), height: min(860, visible.height - 60))
         window.setFrame(NSRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2, width: size.width, height: size.height), display: true)
     }
 
+    func screensChanged() {
+        if isShown { place() }
+    }
+
+    private static func seenByUser(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { !isStage($0) && $0.frame.intersects(frame) }
+    }
+
     private static func isStage(_ screen: NSScreen) -> Bool {
-        Stage.identity.matches((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0)
+        let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        return CGDisplayVendorNumber(id) == Stage.identity.vendorID && CGDisplayModelNumber(id) == Stage.identity.productID
     }
 
     func reopen() {

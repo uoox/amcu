@@ -140,6 +140,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private var userDisplays: [CGRect] = []
     private var records: [CGWindowID: Record] = [:]
     private var unresolved: [StageState.SavedRecord] = []
+    private var promptsRefused: Set<String> = []
     private var followers: [pid_t: Follower] = [:]
     private var takeovers: [CGWindowID: Takeover] = [:]
     private(set) var pullbacks = 0
@@ -1005,6 +1006,46 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         }
     }
 
+    static let promptApps: Set<String> = [
+        "com.apple.UserNotificationCenter", "com.apple.SecurityAgent", "com.apple.coreservices.uiagent", "com.apple.accessibility.universalAccessAuthWarn"
+    ]
+
+    private func returnPrompts() {
+        guard !userDisplays.isEmpty, !Stage.screenIsLocked else { return }
+        let apps = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated && StageRuntime.promptApps.contains($0.bundleIdentifier ?? "") }
+        let pids = Set(apps.map(\.processIdentifier))
+        let list = pids.isEmpty ? [] : CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let showing = Set(list.compactMap { entry -> pid_t? in
+            guard let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pids.contains(pid),
+                  let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  StageGeometry.isOnStage(rect, stage: stageBounds) else { return nil }
+            return pid
+        })
+        guard !showing.isEmpty else {
+            promptsRefused = []
+            return
+        }
+        var moved: [String] = []
+        for app in apps where showing.contains(app.processIdentifier) {
+            for element in AX.windows(Target.appElement(app)) {
+                guard let frame = AX.frame(element), StageGeometry.isOnStage(frame, stage: stageBounds) else { continue }
+                let key = "\(app.processIdentifier) \(Int(frame.minX)),\(Int(frame.minY)) \(Int(frame.width))x\(Int(frame.height))"
+                guard !promptsRefused.contains(key) else { continue }
+                let destination = homeDestination(nil, frame: frame)
+                guard (try? WindowControl.setPosition(element, to: destination)) != nil,
+                      let landed = settledFrame(element, target: destination), !StageGeometry.isOnStage(landed, stage: stageBounds) else {
+                    promptsRefused.insert(key)
+                    continue
+                }
+                moved.append(app.localizedName ?? app.bundleIdentifier ?? "a system prompt")
+            }
+        }
+        if !moved.isEmpty {
+            note("\(moved.count == 1 ? "a prompt" : "\(moved.count) prompts") from \(Set(moved).sorted().joined(separator: ", ")) had landed on the stage, where the user could not answer \(moved.count == 1 ? "it" : "them"); moved to the middle of their screen")
+        }
+    }
+
     // MARK: - The cursor guard
 
     private func startCursorGuard() {
@@ -1065,6 +1106,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             return
         }
         refreshDisplays()
+        app?.screensChanged()
         // Another display was plugged in or rearranged and now shares an edge
         // with the stage: back to the corner, at most every few seconds so a
         // system that keeps refusing cannot make this loop.
@@ -1099,6 +1141,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         }
         prune()
         pruneTakeovers()
+        returnPrompts()
         // Not empty while amcu still holds a put window, even if the window
         // list cannot see it right now: leaving would dump it on the user.
         if windowsOnStage().isEmpty && records.isEmpty && unresolved.isEmpty && takeovers.isEmpty {

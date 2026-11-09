@@ -32,6 +32,12 @@ enum StageCommands {
       open (`amcu browser tab --new`), links clicked inside a page and
       anything in a window the user holds stay where they are.
 
+    PROMPTS GO TO THE USER
+      A permission or password prompt from macOS (UserNotificationCenter,
+      SecurityAgent, …) that lands on the stage, as windows can while the
+      user's display sleeps, is moved to the middle of their screen: it is
+      theirs to answer.
+
     THE USER CAN TAKE A WINDOW OVER
       Clicking a window's picture in the stage window (or its "take over"
       button) brings it to the user's screen, the clicked spot under the
