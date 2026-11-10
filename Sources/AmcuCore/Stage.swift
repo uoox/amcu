@@ -150,6 +150,12 @@ public enum Stage {
         (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
     }
 
+    static func isAmcu(_ pid: pid_t) -> Bool {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
+        return URL(fileURLWithPath: String(cString: buffer)).lastPathComponent == "amcu"
+    }
+
     static func parentPID(of pid: pid_t) -> pid_t? {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
@@ -304,6 +310,36 @@ public struct StageFollow: Codable, Sendable {
     public let bundleID: String?
 }
 
+public struct StageAsk: Codable, Sendable, Equatable, Identifiable {
+    public enum State: String, Codable, Sendable {
+        case open, done
+        case handedBack = "handed-back"
+        case released, gone, cancelled
+    }
+
+    public let id: Int
+    public let session: String
+    public let text: String
+    public let pid: Int32
+    public let windowID: UInt32
+    public let at: Date
+    public var state: State
+    public var endedAt: Date?
+
+    public init(id: Int, session: String, text: String, pid: Int32, windowID: UInt32, at: Date = Date(), state: State = .open, endedAt: Date? = nil) {
+        self.id = id
+        self.session = session
+        self.text = text
+        self.pid = pid
+        self.windowID = windowID
+        self.at = at
+        self.state = state
+        self.endedAt = endedAt
+    }
+
+    public var isOpen: Bool { state == .open }
+}
+
 public struct StageStatus: Codable, Sendable {
     public let version: String
     public let hostPID: Int32
@@ -328,8 +364,9 @@ public struct StageStatus: Codable, Sendable {
     public let activity: [StageActivity]
     /// The process that keeps the display, when it is not the host itself.
     public let holderPID: Int32?
+    public let asks: [StageAsk]
 
-    public init(version: String, hostPID: Int32, displayID: UInt32, bounds: FrameJSON, scale: Int, contact: StageGeometry.Contact, since: Date, answersFor: String?, accessibility: Bool, screenRecording: Bool, cursorPullbacks: Int, windows: [StageWindow], takenOver: [StageTakeover], following: [StageFollow], notes: [String], activity: [StageActivity] = [], holderPID: Int32? = nil) {
+    public init(version: String, hostPID: Int32, displayID: UInt32, bounds: FrameJSON, scale: Int, contact: StageGeometry.Contact, since: Date, answersFor: String?, accessibility: Bool, screenRecording: Bool, cursorPullbacks: Int, windows: [StageWindow], takenOver: [StageTakeover], following: [StageFollow], notes: [String], activity: [StageActivity] = [], holderPID: Int32? = nil, asks: [StageAsk] = []) {
         self.version = version
         self.hostPID = hostPID
         self.displayID = displayID
@@ -347,6 +384,7 @@ public struct StageStatus: Codable, Sendable {
         self.notes = notes
         self.activity = activity
         self.holderPID = holderPID
+        self.asks = asks
     }
 
     /// A host started by an older amcu keeps running across an upgrade, so
@@ -370,12 +408,14 @@ public struct StageStatus: Codable, Sendable {
         notes = try c.decodeIfPresent([String].self, forKey: .notes) ?? []
         activity = try c.decodeIfPresent([StageActivity].self, forKey: .activity) ?? []
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
+        asks = try c.decodeIfPresent([StageAsk].self, forKey: .asks) ?? []
     }
 }
 
 public struct StageReply: Codable, Sendable {
     public let status: StageStatus
     public let moves: [StageMove]
+    public var ask: StageAsk? = nil
 }
 
 public struct StageParams: Codable, Sendable {
@@ -387,8 +427,9 @@ public struct StageParams: Codable, Sendable {
     public var by: String?
     public var activity: StageActivity?
     public var text: String?
+    public var ask: Int?
 
-    public init(pid: Int32? = nil, windowIDs: [UInt32]? = nil, follow: Bool? = nil, activate: Bool? = nil, by: String? = nil, activity: StageActivity? = nil, text: String? = nil) {
+    public init(pid: Int32? = nil, windowIDs: [UInt32]? = nil, follow: Bool? = nil, activate: Bool? = nil, by: String? = nil, activity: StageActivity? = nil, text: String? = nil, ask: Int? = nil) {
         self.pid = pid
         self.windowIDs = windowIDs
         self.follow = follow
@@ -396,6 +437,7 @@ public struct StageParams: Codable, Sendable {
         self.by = by
         self.activity = activity
         self.text = text
+        self.ask = ask
     }
 }
 

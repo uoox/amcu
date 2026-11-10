@@ -150,6 +150,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private let launched = Date()
     private(set) var activity: [StageActivity] = []
     private var activitySeq = 0
+    private var asks: [StageAsk] = []
+    private var askSeq = 0
     /// Which tabs are in which browser window on the stage, for placing a
     /// browser verb's activity; refreshed by the stage window and on demand.
     private var tabPairing: [CGWindowID: StageTabs.Paired] = [:]
@@ -406,6 +408,17 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             case "note":
                 if let text = request.params.text, !text.isEmpty { note(StageActivity.clip(text, 240)) }
                 return StageResponse(id: request.id, ok: true, result: nil, error: nil)
+            case "ask":
+                let made = try ask(request.params)
+                changed()
+                return StageResponse(id: request.id, ok: true, result: StageReply(status: status(), moves: [], ask: made), error: nil)
+            case "answer":
+                guard let id = request.params.ask, asks.contains(where: { $0.id == id }) else {
+                    throw AmcuError(.invalidArgument, "no request to the user has id \(request.params.ask.map(String.init) ?? "?")", nextSteps: ["`amcu stage status` lists the open ones under \"asking the user\"."])
+                }
+                end(ask: id, .cancelled)
+                changed()
+                return StageResponse(id: request.id, ok: true, result: StageReply(status: status(), moves: [], ask: asks.first { $0.id == id }), error: nil)
             case "handover":
                 guard holder != nil else {
                     throw AmcuError(.unsupported, "this stage keeps its display in the host itself (no holder could start), so a new host cannot take it over", nextSteps: [
@@ -450,8 +463,67 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             notes: notes,
             // A folded repeat keeps its place in the list but not its time.
             activity: Array(activity.suffix(20)).sorted { $0.at < $1.at },
-            holderPID: holder?.pid
+            holderPID: holder?.pid,
+            asks: asks
         )
+    }
+
+    private func ask(_ params: StageParams) throws -> StageAsk {
+        let text = (params.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            throw AmcuError(.invalidArgument, "say what the user should do", nextSteps: ["Pass --text, in the user's language: what to do and where, e.g. \"type the SMS code into the login page\"."])
+        }
+        let shown = windowsOnStage().map { (id: CGWindowID($0.windowID), pid: $0.pid) } + takeovers.values.map { (id: $0.windowID, pid: $0.pid) }
+        let chosen: (id: CGWindowID, pid: pid_t)?
+        if let id = params.windowIDs?.first {
+            chosen = shown.first { $0.id == CGWindowID(id) }
+        } else if let pid = params.pid {
+            chosen = records.values.filter { $0.pid == pid }.map { (id: $0.windowID, pid: $0.pid) }.min { $0.id < $1.id }
+                ?? shown.first { $0.pid == pid }
+        } else {
+            chosen = nil
+        }
+        guard let chosen else {
+            throw AmcuError(.windowNotFound, "that window is neither on the stage nor held by the user, so the stage window cannot show the request", nextSteps: [
+                "`amcu stage put --app <selector>` first, or ask the user in your own conversation.",
+                "`amcu stage status` lists the windows on the stage."
+            ])
+        }
+        let session = params.by ?? "default"
+        for open in asks where open.isOpen && open.session == session && open.windowID == UInt32(chosen.id) {
+            end(ask: open.id, .cancelled)
+        }
+        askSeq = max(askSeq, asks.map(\.id).max() ?? 0) + 1
+        let made = StageAsk(id: askSeq, session: session, text: StageActivity.clip(text, 200), pid: chosen.pid, windowID: UInt32(chosen.id))
+        asks.append(made)
+        keep(StageActivity(kind: .ask, session: session, pid: chosen.pid, windowID: chosen.id, detail: made.text))
+        StageRuntime.log("ask \(made.id) from \(session) for window \(chosen.id): \(made.text)")
+        app?.asked(made)
+        return made
+    }
+
+    func end(ask id: Int, _ state: StageAsk.State) {
+        guard let index = asks.firstIndex(where: { $0.id == id && $0.isOpen }) else { return }
+        asks[index].state = state
+        asks[index].endedAt = Date()
+        let ended = asks[index]
+        keep(StageActivity(kind: .answered, session: ended.session, pid: ended.pid, windowID: CGWindowID(ended.windowID), detail: state.rawValue))
+        StageRuntime.log("ask \(id) ended: \(state.rawValue)")
+        changed()
+    }
+
+    private func endAsks(on id: CGWindowID, _ state: StageAsk.State) {
+        for open in asks where open.isOpen && open.windowID == UInt32(id) { end(ask: open.id, state) }
+    }
+
+    private func pruneAsks() {
+        asks.removeAll { !$0.isOpen && Date().timeIntervalSince($0.endedAt ?? $0.at) > 600 }
+        guard asks.contains(where: \.isOpen), !Stage.screenIsLocked else { return }
+        let here = Set(windowsOnStage().map { CGWindowID($0.windowID) }).union(records.keys).union(takeovers.keys)
+        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        for open in asks where open.isOpen && !here.contains(CGWindowID(open.windowID)) {
+            end(ask: open.id, existing.contains(CGWindowID(open.windowID)) ? .released : .gone)
+        }
     }
 
     private func hostNotTrusted() -> AmcuError {
@@ -762,6 +834,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         } else {
             note("\(held.app)\(label) handed back to the stage")
         }
+        endAsks(on: id, .handedBack)
         return finish(StageMove(windowID: id, app: held.app, title: held.title, from: FrameJSON(frame), to: FrameJSON(landed), ok: true, note: session.map { "handed back before \(StageActivity.sessionLabel($0)) acts on it" } ?? "handed back"), release: false)
     }
 
@@ -784,6 +857,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         let staying = Set(records.values.map(\.pid)).union(takeovers.values.map(\.pid))
         if !staying.contains(held.pid) { unfollow(held.pid) }
         note("\(held.app)\(held.title.map { " \"\($0)\"" } ?? "") released\(session.map { " by \(StageActivity.sessionLabel($0))" } ?? ""): it stays on the user's screen and is no longer on the stage")
+        endAsks(on: id, .released)
         changed()
         return StageMove(windowID: id, app: held.app, title: held.title, from: nil, to: nil, ok: true, note: "stays on the user's screen, off the stage")
     }
@@ -945,7 +1019,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                   let rect = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
                   rect.width >= 40, rect.height >= 40,
                   (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                  StageGeometry.isOnStage(rect, stage: stageBounds) else { continue }
+                  StageGeometry.isOnStage(rect, stage: stageBounds), !Stage.isAmcu(pid) else { continue }
             let record = records[id]
             let saved = record == nil ? unresolved.first { $0.windowID == id } : nil
             let title = (entry[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? record?.title ?? saved?.title
@@ -974,11 +1048,19 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         let present = Set(windowsOnStage().map(\.windowID))
         let absent = records.filter { !present.contains($0.key) }
         guard !absent.isEmpty else { return }
-        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        var bounds: [CGWindowID: CGRect] = [:]
+        for entry in CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? [] {
+            guard let id = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
+            bounds[id] = (entry[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) } ?? .null
+        }
+        let locked = Stage.screenIsLocked
         for (id, record) in absent {
-            if existing.contains(id), let frame = AX.frame(record.element), StageGeometry.isOnStage(frame, stage: stageBounds) {
+            guard let rect = bounds[id] else {
+                records[id] = nil
                 continue
             }
+            if locked || StageGeometry.isOnStage(rect, stage: stageBounds) { continue }
+            guard let frame = AX.frame(record.element), !StageGeometry.isOnStage(frame, stage: stageBounds) else { continue }
             records[id] = nil
         }
     }
@@ -1142,6 +1224,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         prune()
         pruneTakeovers()
         returnPrompts()
+        pruneAsks()
         // Not empty while amcu still holds a put window, even if the window
         // list cannot see it right now: leaving would dump it on the user.
         if windowsOnStage().isEmpty && records.isEmpty && unresolved.isEmpty && takeovers.isEmpty {
@@ -1300,7 +1383,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             pullbacks: pullbacks,
             activity: Array(activity.suffix(80)),
             windowShown: app?.isShown ?? false,
-            tabs: app?.tabs
+            tabs: app?.tabs,
+            asks: asks
         )
         guard let data = try? StageWire.encoder().encode(state), data != lastPersisted else { return }
         do {
@@ -1323,6 +1407,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         notes = state.notes
         activity = state.activity
         activitySeq = activity.map(\.seq).max() ?? 0
+        asks = state.asks ?? []
+        askSeq = asks.map(\.id).max() ?? 0
         let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
         for saved in state.records {
             guard let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
@@ -1520,4 +1606,5 @@ struct StageState: Codable {
     let activity: [StageActivity]
     let windowShown: Bool
     let tabs: Tabs?
+    var asks: [StageAsk]? = nil
 }

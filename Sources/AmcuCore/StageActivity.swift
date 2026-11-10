@@ -28,6 +28,7 @@ public struct StageActivity: Codable, Sendable, Equatable, Identifiable {
         case click, press, type, paste, setValue = "set-value", replace, key, scroll, drag, menu, window
         case navigate, back, forward, reload, hover, fill, select, upload, script, dialog, tab, resize
         case handBack = "hand-back"
+        case ask, answered
     }
 
     /// Given by the host, in arrival order.
@@ -143,6 +144,14 @@ public struct StageActivity: Codable, Sendable, Equatable, Identifiable {
             }
         case .resize: return chinese ? "改网页视口大小" : "Resized the viewport"
         case .handBack: return chinese ? "把你接管的窗口收回舞台" : "Took the window back from you"
+        case .ask: return chinese ? "请你帮忙：\(detail ?? "")" : "Needs you: \(detail ?? "")"
+        case .answered:
+            switch StageAsk.State(rawValue: detail ?? "") {
+            case .cancelled?: return chinese ? "撤回了求助" : "Withdrew the request"
+            case .gone?: return chinese ? "窗口没了，求助作废" : "The window went away; request dropped"
+            case .released?: return chinese ? "你把窗口留下了，求助结束" : "You kept the window; request closed"
+            default: return chinese ? "你处理完了" : "You were done"
+            }
         }
     }
 

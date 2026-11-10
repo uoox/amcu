@@ -193,7 +193,8 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   frame — and every verb works on it as anywhere else; `amcu windows` marks
   it "on the stage". The first `put` starts the stage; an amcu app appears
   in the user's Dock (there is no menu bar icon) whose window has a tab per
-  staged window, along the top or down the left as the user likes: the
+  staged window (a browser profile's windows share one), along the top or
+  down the left as the user likes: the
   window live, what agents just did to it and which session (your session
   name shows: $AMCU_SESSION or --session make it readable), a browser
   window's tabs (the ones your debugger is on marked "amcu"), and a "take
@@ -229,13 +230,18 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   user may have changed things). Other windows of the same application are
   not held back, and reading (snapshot, scan, screenshot) works on a held
   window where it is. `taken_over` means handing back failed: ask the user.
-  When the user has to act in a staged window (a password, a 2FA prompt),
-  `amcu stage release --app <selector> --activate` hands it to them — ask
-  first; it counts as a take-over, so do not act on it until they say they
-  are done — or `amcu stage show` opens the stage window so they can take
-  it over themselves. The cursor is kept off the stage, and
+  When the user has to act in a staged window (a password, a 2FA prompt, a
+  code from their phone), `amcu stage ask --app <selector> --text "<what to
+  do>" --wait` (`--tab N` for a browser tab) turns its tab orange with your
+  text and puts a badge on the amcu Dock icon; they take the window over, do
+  it and hand it back, or press "Done", and the command returns. Say it in
+  your conversation too, and look at the window again before you continue.
+  `amcu stage release --app <selector> --activate` hands a window to them at
+  once instead — ask first; it counts as a take-over, so do not act on it
+  until they say they are done. The cursor is kept off the stage, and
   `--mode foreground` is refused there. `amcu stage status` lists what is on
-  it, including windows amcu did not put there, and what the user holds.
+  it, including windows amcu did not put there, what the user holds and what
+  is waiting for them.
 
 WEB PAGES
   `amcu browser …` reads and drives tabs inside the user's own browser through

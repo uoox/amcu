@@ -13,12 +13,13 @@ enum StageCommands {
       screen. Windows on it are fully drawn — screenshots and scans are
       current, unlike a minimised window — every amcu verb works on them as
       usual, and the user does not see them. While a stage runs, an amcu app
-      sits in the user's Dock (no menu bar icon). Its window has a tab per
-      window on the stage, along the top or down the left as the user
-      chooses: a live picture of the window, what agents just did to it and
-      which session did it (a ring where a click landed), a browser window's
-      tabs (the ones amcu's debugger is on marked), and a way to close the
-      stage. Quitting the app closes the stage. The cursor is kept off the
+      sits in the user's Dock (no menu bar icon), one window with a tab per
+      window on the stage (a browser profile's windows share one), along the
+      top or down the left as the user chooses: a live picture of the
+      window, what agents just did to it and which session did it (a ring
+      where a click landed), a browser window's tabs (the ones amcu's
+      debugger is on marked), what an agent asks of the user, and a way to
+      close the stage. Quitting the app closes the stage. The cursor is kept off the
       stage. The display is kept by a process of its own, so upgrading amcu
       or `stage restart` replaces the host without the windows ever leaving
       the stage.
@@ -65,8 +66,19 @@ enum StageCommands {
                instead (ask first): raised and switched to, and taken over —
                acting on it would take it back, so leave it until they say
                they are done.
+      ask      --app S [--window-id N | --tab N] --text T [--wait [--timeout SEC]]
+               ask the user for what only they can do in a staged window (a
+               password, a code from their phone, a captcha): its tab turns
+               orange with T, the Dock icon gets a badge and bounces once. They
+               take the window over, do it and hand it back, or press "Done".
+               --tab names a browser tab, for the window it is in. --wait
+               returns when they are done (exit 0), when the window went away
+               or they kept it (error), or after --timeout (default 600 s; the
+               request is withdrawn then). Look again before you continue.
+      ask      --cancel ID
+               withdraw a request
       status   the display, the windows on it (whoever put them there), who is
-               followed, recent events
+               followed, what is waiting for the user, recent events
       show     [--hide]
                bring up the stage window for the user (a tab per window, live
                pictures, take-over and hand-back buttons) without taking their
@@ -101,6 +113,7 @@ enum StageCommands {
         case "stop": try stop(flags)
         case "restart": try restart(flags)
         case "show": try show(flags)
+        case "ask": try ask(flags)
         // Hidden: the resident process `start` spawns, and the one that keeps
         // the display.
         case "serve":
@@ -151,6 +164,81 @@ enum StageCommands {
             lines += render(reply.status)
             return lines.joined(separator: "\n")
         }
+    }
+
+    private static func ask(_ flags: Flags) throws {
+        let session = Commands.session(flags)
+        if let id = try flags.int("cancel") {
+            guard StageClient.isRunning() else {
+                throw AmcuError(.stageUnavailable, "no stage is running, so there is no request to withdraw")
+            }
+            let reply = try StageClient.request("answer", StageParams(by: session, ask: id))
+            struct Payload: Encodable {
+                let ok = true
+                let ask: StageAsk?
+            }
+            Output.emit(Payload(ask: reply.ask)) { "request \(id) withdrawn" }
+            return
+        }
+        let text = try flags.required("text", hint: "Pass --text with what the user should do, in their language.")
+        let selector = try flags.required("app", hint: "Pass --app with the application whose staged window needs the user. `amcu stage status` lists them.")
+        let app = try Commands.resolveApp(flags, selector)
+        let name = app.localizedName ?? selector
+        guard StageClient.isRunning() else {
+            throw AmcuError(.stageUnavailable, "no stage is running, so there is no stage window to ask in", nextSteps: ["Ask the user in your own conversation."])
+        }
+        var windowIDs = try flags.int("window-id").map { [UInt32($0)] }
+        if windowIDs == nil, let tab = try flags.int("tab") {
+            let status = try StageClient.request("status").status
+            let pid = app.processIdentifier
+            let staged = status.windows.filter { $0.pid == pid }.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+                + status.takenOver.filter { $0.pid == pid }.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+            guard let window = StageTabs.collect(for: staged).first(where: { $0.value.tabs.contains { $0.id == tab } })?.key else {
+                throw AmcuError(.windowNotFound, "tab \(tab) is not in a window of '\(name)' on the stage", nextSteps: [
+                    "`amcu stage status` lists the staged windows; pass --window-id for one of them."
+                ])
+            }
+            windowIDs = [UInt32(window)]
+        }
+        let reply = try StageClient.request("ask", StageParams(pid: app.processIdentifier, windowIDs: windowIDs, by: session, text: text))
+        guard let made = reply.ask else {
+            throw AmcuError(.unsupported, "the running stage is older than this amcu and does not take requests for the user", nextSteps: ["`amcu stage restart` hands it to this version."])
+        }
+        struct Payload: Encodable {
+            let ok: Bool
+            let ask: StageAsk
+        }
+        guard flags.has("wait") else {
+            Output.emit(Payload(ok: true, ask: made)) { "asked the user (request \(made.id)) in the stage window: \(made.text)\nwithdraw it with `amcu stage ask --cancel \(made.id)`" }
+            return
+        }
+        let timeout = try flags.double("timeout") ?? 600
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            usleep(1_000_000)
+            guard let reply = try? StageClient.request("status", timeout: 5) else { continue }
+            guard let now = reply.status.asks.first(where: { $0.id == made.id }) else {
+                throw AmcuError(.stageUnavailable, "the stage no longer knows request \(made.id) (it was stopped or restarted)", nextSteps: ["Look at the window again, then ask again if you still need the user."])
+            }
+            switch now.state {
+            case .open: continue
+            case .done, .handedBack:
+                Output.emit(Payload(ok: true, ask: now)) {
+                    now.state == .done ? "the user is done (pressed Done); look at the window again before you continue" : "the user is done and handed the window back; look at it again before you continue"
+                }
+                return
+            case .released:
+                throw AmcuError(.unsupported, "the user kept the window on their screen (released it from the stage)", nextSteps: ["It is theirs now; amcu still acts on it where it is. Ask in your conversation before you continue in it."])
+            case .gone:
+                throw AmcuError(.windowNotFound, "the window went away before the user was done")
+            case .cancelled:
+                throw AmcuError(.unsupported, "the request was withdrawn")
+            }
+        }
+        _ = try? StageClient.request("answer", StageParams(by: session, ask: made.id))
+        throw AmcuError(.timeout, "the user did not get to it within \(Int(timeout)) s; the request was withdrawn", nextSteps: [
+            "Ask in your own conversation, or ask again with a longer --timeout."
+        ])
     }
 
     private static func status(_ flags: Flags) throws {
@@ -423,6 +511,13 @@ enum StageCommands {
             lines += status.activity.suffix(6).map { entry in
                 "  \(formatter.string(from: entry.at)) \(StageActivity.sessionLabel(entry.session)): \(entry.summary(chinese: false))\(entry.windowID.map { " (id=\($0))" } ?? "")"
             }
+        }
+        let open = status.asks.filter(\.isOpen)
+        if !open.isEmpty {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            lines.append("asking the user (\(open.count)):")
+            lines += open.map { "  ask \($0.id) since \(formatter.string(from: $0.at)) \(StageActivity.sessionLabel($0.session)) on id=\($0.windowID): \($0.text)" }
         }
         if !status.notes.isEmpty {
             lines.append("recent:")

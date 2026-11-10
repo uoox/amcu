@@ -57,6 +57,7 @@ func runStageActivityTests(_ t: Harness) {
     if let status = try? decoder.decode(StageStatus.self, from: Data(older.utf8)) {
         t.expect(status.activity.isEmpty, "no activity from a host that did not report any")
         t.expect(status.holderPID == nil, "no holder: that host keeps its display itself")
+        t.expect(status.asks.isEmpty, "no requests to the user from a host that had none")
     } else {
         t.expect(false, "a 0.12.1 status decodes")
     }
@@ -65,4 +66,21 @@ func runStageActivityTests(_ t: Harness) {
     let entry = StageActivity(kind: .key, session: "s", pid: 3, windowID: 9, keys: "cmd+v", fraction: StagePoint(x: 0.25, y: 0.75), at: Date(timeIntervalSince1970: 1_800_000_000), seq: 4)
     let round = (try? encoder.encode(entry)).flatMap { try? decoder.decode(StageActivity.self, from: $0) }
     t.expectEqual(round, entry, "an activity survives the wire")
+
+    t.suite("asking the user")
+    t.expectEqual(StageActivity(kind: .ask, session: "s", pid: 1, detail: "输入短信验证码").summary(chinese: true), "请你帮忙：输入短信验证码", "an ask says what the user should do")
+    t.expectEqual(StageActivity(kind: .answered, session: "s", pid: 1, detail: "handed-back").summary(chinese: true), "你处理完了", "handing back ends it")
+    t.expectEqual(StageActivity(kind: .answered, session: "s", pid: 1, detail: "cancelled").summary(chinese: true), "撤回了求助", "a withdrawn ask says so")
+    let asked = StageAsk(id: 3, session: "xhs-comments", text: "输入验证码", pid: 9, windowID: 12, at: Date(timeIntervalSince1970: 1_800_000_000))
+    let wire = (try? encoder.encode(asked)).flatMap { try? decoder.decode(StageAsk.self, from: $0) }
+    t.expectEqual(wire, asked, "an ask survives the wire")
+    t.expect(asked.isOpen, "a new ask is open")
+    t.expect((try? encoder.encode(asked)).map { String(decoding: $0, as: UTF8.self).contains("\"open\"") } ?? false, "its state is spelled out")
+
+    t.suite("one tab per browser profile")
+    let groups = StageTabGroups.group(order: [5, 7, 9, 11], profileOf: [5: "bunny", 9: "bunny", 7: "jtf"], pidOf: [5: 100, 7: 100, 9: 100, 11: 200])
+    t.expectEqual(groups.map(\.windows), [[5, 9], [7], [11]], "a profile's windows share a tab, in the order they came")
+    t.expectEqual(StageTabGroups.group(order: [5, 9], profileOf: [5: "bunny", 9: "bunny"], pidOf: [5: 100, 9: 300]).count, 2, "the same profile name in two browsers is two tabs")
+    t.expectEqual(StageTabGroups.group(order: [5, 9], profileOf: [:], pidOf: [5: 100, 9: 100]).count, 2, "windows with no known profile keep a tab each")
+    t.expectEqual(StageTabGroups.group(order: [], profileOf: [:], pidOf: [:]).count, 0, "nothing on the stage, no tabs")
 }

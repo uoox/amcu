@@ -19,18 +19,23 @@ public enum StagePreview {
         let windows = [
             StageWindow(windowID: 9001, pid: 9001, app: "Google Chrome", bundleID: "com.google.Chrome", title: "小红书 - 你的生活兴趣社区", frame: frame(3810, 1110, 1250, 1050), home: frame(1250, 30, 1250, 1050), origin: .put),
             StageWindow(windowID: 9002, pid: 9001, app: "Google Chrome", bundleID: "com.google.Chrome", title: "示例商品详情 - 闲鱼", frame: frame(3137, 1110, 1353, 1050), home: frame(577, 30, 1353, 1050), origin: .put),
-            StageWindow(windowID: 9004, pid: 9004, app: "TextEdit", bundleID: "com.apple.TextEdit", title: "未命名", frame: frame(2700, 1200, 900, 700), home: nil, origin: .found)
+            StageWindow(windowID: 9004, pid: 9004, app: "TextEdit", bundleID: "com.apple.TextEdit", title: "未命名", frame: frame(2700, 1200, 900, 700), home: nil, origin: .found),
+            StageWindow(windowID: 9005, pid: 9001, app: "Google Chrome", bundleID: "com.google.Chrome", title: "笔记管理 - 小红书创作服务平台", frame: frame(2700, 1150, 1200, 900), home: frame(100, 30, 1200, 900), origin: .put)
         ]
         let held = [StageTakeover(windowID: 9003, pid: 9003, app: "计算器", bundleID: "com.apple.calculator", title: "计算器", since: now.addingTimeInterval(-180), stageFrame: frame(4151, 1394, 230, 408))]
         let status = StageStatus(
             version: AmcuVersion.string, hostPID: getpid(), displayID: stage.id, bounds: FrameJSON(stage.bounds), scale: 2,
             contact: .corner, since: now.addingTimeInterval(-3600), answersFor: "aaa-daemon", accessibility: true, screenRecording: true,
-            cursorPullbacks: 2, windows: windows, takenOver: held, following: [], notes: []
+            cursorPullbacks: 2, windows: windows, takenOver: held, following: [], notes: [],
+            asks: [StageAsk(id: 1, session: "xhs-comments", text: "请在登录框里输入手机收到的 6 位验证码", pid: 9001, windowID: 9001, at: now.addingTimeInterval(-50))]
         )
         model.setBrowser([
             9001: StageTabs.Paired(profile: "bunny", tabs: [
                 StageTabs.Tab(id: 1, title: "小红书 - 你的生活兴趣社区", url: "https://www.xiaohongshu.com/explore", active: true, attached: true),
                 StageTabs.Tab(id: 2, title: "创作服务平台", url: "https://creator.xiaohongshu.com/", active: false, attached: false)
+            ]),
+            9005: StageTabs.Paired(profile: "bunny", tabs: [
+                StageTabs.Tab(id: 7, title: "笔记管理 - 小红书创作服务平台", url: "https://creator.xiaohongshu.com/notes", active: true, attached: false)
             ]),
             9002: StageTabs.Paired(profile: "jtf", tabs: [
                 StageTabs.Tab(id: 3, title: "示例商品详情 - 闲鱼", url: "https://www.goofish.com/item", active: true, attached: false)
@@ -44,11 +49,11 @@ public enum StagePreview {
             StageActivity(kind: .script, session: "xhs-comments", pid: 9001, windowID: 9001, at: now.addingTimeInterval(-95), seq: 6),
             StageActivity(kind: .key, session: "0b2c6f3e-8d1a-4c7e-9f00-123456789abc", pid: 9001, windowID: 9002, keys: "cmd+f", at: now.addingTimeInterval(-300), seq: 4)
         ])
-        for (id, size, dark) in [(CGWindowID(9001), CGSize(width: 1250, height: 1050), false), (9002, CGSize(width: 1353, height: 1050), false), (9003, CGSize(width: 230, height: 408), true), (9004, CGSize(width: 900, height: 700), false)] {
+        for (id, size, dark) in [(CGWindowID(9001), CGSize(width: 1250, height: 1050), false), (9002, CGSize(width: 1353, height: 1050), false), (9003, CGSize(width: 230, height: 408), true), (9004, CGSize(width: 900, height: 700), false), (9005, CGSize(width: 1200, height: 900), false)] {
             if let image = sample(size: size, dark: dark, seed: Int(id)) { thumbnails.still(image, for: id) }
         }
 
-        let order = [CGWindowID(9001), 9002, 9004, 9003]
+        let order = [CGWindowID(9001), 9002, 9004, 9003, 9005]
         model.restore(order: order, selected: order[min(max(0, selected), order.count - 1)])
         model.apply(status)
         let content = StageHostingView(rootView: StageView(model: model, thumbnails: thumbnails))

@@ -6,7 +6,7 @@
 import Foundation
 
 public enum SafariExtensionBundle {
-    public static let version = "0.14.1"
+    public static let version = "0.15.0"
     public static let sharedWithChrome = ["content.js", "icon16.png", "icon48.png", "icon128.png"]
 
     public static let files: [ExtensionBundle.File] = [
@@ -1274,7 +1274,7 @@ async function cropImage(dataUrl, rect, viewport, format, quality) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Lets the amcu command-line tool read and drive Safari tabs. Talks only to the amcu relay on this Mac, through the app that carries the extension.",
   "permissions": [
     "nativeMessaging",

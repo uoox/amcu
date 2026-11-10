@@ -68,6 +68,10 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
             self?.runtime.freeAll()
             self?.refresh()
         }
+        model.answer = { [weak self] id in
+            self?.runtime.end(ask: id, .done)
+            self?.refresh()
+        }
         model.closeStage = { [weak self] in
             self?.confirmClose { [weak self] in
                 self?.hide()
@@ -89,14 +93,17 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
 
     var isInUse: Bool { isShown && window.isKeyWindow }
 
-    var tabs: StageState.Tabs { StageState.Tabs(order: model.cards.map(\.id), selected: model.selected) }
+    var tabs: StageState.Tabs { StageState.Tabs(order: model.windowOrder, selected: model.selected) }
 
     func refresh() {
         let status = runtime.status()
         model.apply(status)
         updateTabItems()
+        let open = status.asks.filter(\.isOpen).count
+        let badge = open > 0 ? "\(open)" : nil
+        if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
         guard isShown else { return }
-        let pictured = model.selectedCard.map { [(id: $0.id, size: $0.size)] } ?? []
+        let pictured = model.selectedCard.map { [(id: $0.window, size: $0.size)] } ?? []
         if status.screenRecording {
             thumbnails.run(pictured)
         } else {
@@ -107,6 +114,12 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
 
     func present(_ entry: StageActivity) {
         model.add(entry)
+    }
+
+    func asked(_ ask: StageAsk) {
+        refresh()
+        if !isInUse { model.select(CGWindowID(ask.windowID)) }
+        NSApp.requestUserAttention(.informationalRequest)
     }
 
     private func fetchTabs(for windows: [(windowID: CGWindowID, pid: pid_t)]) {
@@ -170,8 +183,7 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     }
 
     private static func isStage(_ screen: NSScreen) -> Bool {
-        let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-        return CGDisplayVendorNumber(id) == Stage.identity.vendorID && CGDisplayModelNumber(id) == Stage.identity.productID
+        Stage.identity.matches((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0)
     }
 
     func reopen() {
@@ -342,7 +354,8 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
             menu.addItem(.separator())
             for card in model.cards {
                 let name = StageActivity.clip(card.title.isEmpty ? card.app : card.title, 48)
-                let entry = item(card.heldSince == nil ? name : name + t(" · you hold it", " · 你接管着"), #selector(selectFromDock(_:)))
+                let mark = card.ask != nil ? t(" · needs you", " · 需要你") : card.held ? t(" · you hold it", " · 你接管着") : ""
+                let entry = item(name + mark, #selector(selectFromDock(_:)))
                 entry.tag = Int(card.id)
                 entry.image = model.icon(for: card).resizedForMenu()
                 menu.addItem(entry)
@@ -386,9 +399,9 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     @objc private func lastTab(_ sender: Any?) { if let last = model.cards.last { model.select(last.id) } }
     @objc private func tabsOnTop(_ sender: Any?) { model.tabsOnLeft = false }
     @objc private func tabsOnLeft(_ sender: Any?) { model.tabsOnLeft = true }
-    @objc private func takeOverSelected(_ sender: Any?) { if let card = model.selectedCard { model.takeOver(card.id) } }
-    @objc private func handBackSelected(_ sender: Any?) { if let card = model.selectedCard { model.handBack(card.id) } }
-    @objc private func freeSelected(_ sender: Any?) { if let card = model.selectedCard { model.free(card.id) } }
+    @objc private func takeOverSelected(_ sender: Any?) { if let card = model.selectedCard { model.takeOver(card.window) } }
+    @objc private func handBackSelected(_ sender: Any?) { if let card = model.selectedCard { model.handBack(card.window) } }
+    @objc private func freeSelected(_ sender: Any?) { if let card = model.selectedCard { model.free(card.window) } }
     @objc private func handBackAll(_ sender: Any?) { model.handBackAll() }
     @objc private func releaseAll(_ sender: Any?) { model.releaseAll() }
     @objc private func closeStage(_ sender: Any?) { model.closeStage() }

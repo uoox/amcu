@@ -4,6 +4,8 @@ import SwiftUI
 final class StageViewModel: ObservableObject {
     struct Card: Identifiable, Equatable {
         let id: CGWindowID
+        let window: CGWindowID
+        let windows: [CGWindowID]
         let pid: pid_t
         let app: String
         let bundleID: String?
@@ -11,9 +13,22 @@ final class StageViewModel: ObservableObject {
         let size: CGSize
         let origin: StageWindow.Origin
         let heldSince: Date?
+        let held: Bool
+        let ask: StageAsk?
 
         var foreign: Bool { origin == .found }
         var name: String { title.isEmpty ? app : title }
+    }
+
+    struct Member: Equatable {
+        let id: CGWindowID
+        let pid: pid_t
+        let app: String
+        let bundleID: String?
+        let title: String
+        let size: CGSize
+        let origin: StageWindow.Origin
+        let heldSince: Date?
     }
 
     struct Summary: Equatable {
@@ -34,6 +49,8 @@ final class StageViewModel: ObservableObject {
     @Published private(set) var selected: CGWindowID?
     @Published private(set) var browser: [CGWindowID: StageTabs.Paired] = [:]
     @Published private(set) var activity: [CGWindowID: [StageActivity]] = [:]
+    @Published private(set) var asks: [StageAsk] = []
+    @Published private(set) var members: [CGWindowID: Member] = [:]
     @Published private(set) var chrome = StageChrome()
     @Published var fullScreen = false
     @Published var tabsOnLeft: Bool {
@@ -49,6 +66,7 @@ final class StageViewModel: ObservableObject {
     var focusHeld: (CGWindowID) -> Void = { _ in }
     var handBack: (CGWindowID) -> Void = { _ in }
     var free: (CGWindowID) -> Void = { _ in }
+    var answer: (Int) -> Void = { _ in }
     var handBackAll: () -> Void = {}
     var releaseAll: () -> Void = {}
     var closeStage: () -> Void = {}
@@ -56,7 +74,8 @@ final class StageViewModel: ObservableObject {
     var layoutChanged: () -> Void = {}
 
     private let persistsLayout: Bool
-    private var order: [CGWindowID] = []
+    private(set) var windowOrder: [CGWindowID] = []
+    private var picks: [String: CGWindowID] = [:]
     private var icons: [pid_t: NSImage] = [:]
 
     init(tabsOnLeft: Bool? = nil) {
@@ -67,24 +86,23 @@ final class StageViewModel: ObservableObject {
     var selectedCard: Card? { cards.first { $0.id == selected } }
 
     func restore(order: [CGWindowID], selected: CGWindowID?) {
-        self.order = order
+        windowOrder = order
         self.selected = selected
     }
 
     func apply(_ status: StageStatus) {
-        var byID: [CGWindowID: Card] = [:]
+        var byID: [CGWindowID: Member] = [:]
         for window in status.windows {
-            byID[window.windowID] = Card(id: window.windowID, pid: window.pid, app: window.app, bundleID: window.bundleID, title: window.title ?? "", size: window.frame.cgRect.size, origin: window.origin, heldSince: nil)
+            byID[window.windowID] = Member(id: window.windowID, pid: window.pid, app: window.app, bundleID: window.bundleID, title: window.title ?? "", size: window.frame.cgRect.size, origin: window.origin, heldSince: nil)
         }
         for held in status.takenOver {
-            byID[held.windowID] = Card(id: held.windowID, pid: held.pid, app: held.app, bundleID: held.bundleID, title: held.title ?? "", size: held.stageFrame.cgRect.size, origin: .put, heldSince: held.since)
+            byID[held.windowID] = Member(id: held.windowID, pid: held.pid, app: held.app, bundleID: held.bundleID, title: held.title ?? "", size: held.stageFrame.cgRect.size, origin: .put, heldSince: held.since)
         }
-        let before = cards.isEmpty ? order : cards.map(\.id)
-        order = StageTabOrder.merged(order, present: status.windows.map(\.windowID) + status.takenOver.map(\.windowID))
-        let cards = order.compactMap { byID[$0] }
-        if cards != self.cards { self.cards = cards }
-        let chosen = StageTabOrder.selection(selected, previous: before, now: order)
-        if chosen != selected { selected = chosen }
+        if byID != members { members = byID }
+        windowOrder = StageTabOrder.merged(windowOrder, present: status.windows.map(\.windowID) + status.takenOver.map(\.windowID))
+        let open = status.asks.filter(\.isOpen)
+        if open != asks { asks = open }
+        rebuild()
         activity = activity.filter { byID[$0.key] != nil }
         let summary = Summary(
             stage: status.bounds.cgRect.size,
@@ -98,10 +116,62 @@ final class StageViewModel: ObservableObject {
         if summary != self.summary { self.summary = summary }
     }
 
+    private func rebuild() {
+        let before = cards.isEmpty ? windowOrder : cards.map(\.id)
+        let groups = StageTabGroups.group(order: windowOrder, profileOf: browser.compactMapValues(\.profile), pidOf: members.mapValues(\.pid))
+        var built: [Card] = []
+        for group in groups {
+            let shown = picks[group.key].flatMap { group.windows.contains($0) ? $0 : nil } ?? group.windows[0]
+            guard let lead = members[shown] else { continue }
+            let open = asks.filter { group.windows.contains(CGWindowID($0.windowID)) }.max { $0.at < $1.at }
+            built.append(Card(
+                id: group.windows[0], window: shown, windows: group.windows, pid: lead.pid, app: lead.app, bundleID: lead.bundleID,
+                title: lead.title, size: lead.size, origin: lead.origin, heldSince: lead.heldSince,
+                held: group.windows.contains { members[$0]?.heldSince != nil }, ask: open
+            ))
+        }
+        picks = picks.filter { key, window in groups.contains { $0.key == key && $0.windows.contains(window) } }
+        if built != cards { cards = built }
+        let ids = built.map(\.id)
+        let chosen: CGWindowID?
+        if let current = selected, !ids.contains(current), let home = built.first(where: { $0.windows.contains(current) }) {
+            chosen = home.id
+        } else {
+            chosen = StageTabOrder.selection(selected, previous: before, now: ids)
+        }
+        if chosen != selected { selected = chosen }
+    }
+
     func select(_ id: CGWindowID) {
-        guard selected != id, cards.contains(where: { $0.id == id }) else { return }
-        selected = id
+        guard let card = cards.first(where: { $0.windows.contains(id) }) else { return }
+        if id != card.id, id != card.window {
+            pick(id)
+        }
+        guard selected != card.id else { return }
+        selected = card.id
         selectionChanged()
+    }
+
+    func pick(_ window: CGWindowID) {
+        guard let member = members[window] else { return }
+        let key = StageTabGroups.key(window: window, profile: browser[window]?.profile, pid: member.pid)
+        guard picks[key] != window else { return }
+        picks[key] = window
+        rebuild()
+        selectionChanged()
+    }
+
+    func isHeld(_ window: CGWindowID) -> Bool {
+        members[window]?.heldSince != nil
+    }
+
+    func member(_ window: CGWindowID) -> Member? {
+        members[window]
+    }
+
+    func entries(for card: Card) -> [StageActivity] {
+        guard card.windows.count > 1 else { return activity[card.window] ?? [] }
+        return Array(card.windows.flatMap { activity[$0] ?? [] }.sorted { $0.at > $1.at }.prefix(StageViewModel.kept))
     }
 
     func step(_ delta: Int) {
@@ -132,7 +202,9 @@ final class StageViewModel: ObservableObject {
     }
 
     func setBrowser(_ browser: [CGWindowID: StageTabs.Paired]) {
-        if browser != self.browser { self.browser = browser }
+        guard browser != self.browser else { return }
+        self.browser = browser
+        rebuild()
     }
 
     func icon(for card: Card) -> NSImage {
@@ -149,9 +221,15 @@ final class StageViewModel: ObservableObject {
         return date.timeIntervalSince(last.at) < 15
     }
 
+    func isWorking(_ card: Card, at date: Date) -> Bool {
+        card.windows.contains { isWorking($0, at: date) }
+    }
+
     func tooltip(for card: Card) -> String {
-        var lines = [[card.app, browser[card.id]?.profile].compactMap { $0 }.joined(separator: " · ")]
+        var lines = [[card.app, browser[card.window]?.profile].compactMap { $0 }.joined(separator: " · ")]
         if !card.title.isEmpty, card.title != card.app { lines.append(card.title) }
+        if card.windows.count > 1 { lines.append(t("\(card.windows.count) windows of this profile", "这个 profile 的 \(card.windows.count) 个窗口")) }
+        if let ask = card.ask { lines.append(t("Needs you: \(ask.text)", "需要你：\(ask.text)")) }
         if let since = card.heldSince {
             lines.append(t("You hold it, since \(StageClock.minutes.string(from: since))", "你接管着，\(StageClock.minutes.string(from: since)) 起"))
         } else if card.foreign {
@@ -181,6 +259,28 @@ public enum StageTabOrder {
             if let before = previous[..<index].last(where: now.contains) { return before }
         }
         return now.first
+    }
+}
+
+public enum StageTabGroups {
+    public struct Group: Equatable, Sendable {
+        public let key: String
+        public let windows: [CGWindowID]
+    }
+
+    public static func key(window: CGWindowID, profile: String?, pid: Int32) -> String {
+        profile.map { "\(pid) \($0)" } ?? "#\(window)"
+    }
+
+    public static func group(order: [CGWindowID], profileOf: [CGWindowID: String], pidOf: [CGWindowID: Int32]) -> [Group] {
+        var keys: [String] = []
+        var windows: [String: [CGWindowID]] = [:]
+        for window in order {
+            let key = key(window: window, profile: profileOf[window], pid: pidOf[window] ?? 0)
+            if windows[key] == nil { keys.append(key) }
+            windows[key, default: []].append(window)
+        }
+        return keys.map { Group(key: $0, windows: windows[$0] ?? []) }
     }
 }
 
@@ -315,7 +415,7 @@ private struct StageTopTabs: View {
             HStack(spacing: StageTabLayout.topSpacing) {
                 ForEach(Array(model.cards.enumerated()), id: \.element.id) { index, card in
                     let next = index + 1 < model.cards.count ? model.cards[index + 1].id : nil
-                    StageTopTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card.id, at: context.date))
+                    StageTopTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card, at: context.date))
                         .frame(width: width)
                         .overlay(alignment: .trailing) {
                             if let next, card.id != model.selected, next != model.selected {
@@ -339,7 +439,7 @@ private struct StageTopTab: View {
     @State private var hovering = false
 
     var body: some View {
-        let profile = model.browser[card.id]?.profile
+        let profile = model.browser[card.window]?.profile
         HStack(spacing: 6) {
             Image(nsImage: model.icon(for: card))
                 .resizable()
@@ -354,12 +454,12 @@ private struct StageTopTab: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
-            StageTabMark(held: card.heldSince != nil, working: working)
+            StageTabMark(held: card.held, working: working, asking: card.ask != nil)
         }
         .padding(.horizontal, 9)
         .frame(height: StageTabLayout.tabHeight)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (hovering ? Color.primary.opacity(0.07) : Color.clear)))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(selected ? StagePalette.stroke : Color.clear, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (card.ask != nil ? Color.orange.opacity(0.16) : (hovering ? Color.primary.opacity(0.07) : Color.clear))))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(card.ask != nil ? Color.orange.opacity(0.75) : (selected ? StagePalette.stroke : Color.clear), lineWidth: card.ask != nil ? 1.5 : 1))
         .shadow(color: .black.opacity(selected ? 0.10 : 0), radius: 1.5, y: 0.5)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture { model.select(card.id) }
@@ -389,7 +489,7 @@ private struct StageSideTabs: View {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(spacing: 2) {
                             ForEach(model.cards) { card in
-                                StageSideTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card.id, at: context.date))
+                                StageSideTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card, at: context.date))
                             }
                         }
                         .padding(.horizontal, 8)
@@ -426,7 +526,7 @@ private struct StageSideTab: View {
     @State private var hovering = false
 
     var body: some View {
-        let profile = model.browser[card.id]?.profile
+        let profile = model.browser[card.window]?.profile
         HStack(spacing: 9) {
             Image(nsImage: model.icon(for: card))
                 .resizable()
@@ -444,17 +544,17 @@ private struct StageSideTab: View {
                     }
                     Text(subtitle)
                         .font(.system(size: 10.5))
-                        .foregroundStyle(card.heldSince != nil ? Color.orange : Color.secondary)
+                        .foregroundStyle(card.ask != nil || card.heldSince != nil ? Color.orange : Color.secondary)
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
-            StageTabMark(held: card.heldSince != nil, working: working)
+            StageTabMark(held: card.held, working: working, asking: card.ask != nil)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (hovering ? Color.primary.opacity(0.07) : Color.clear)))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(selected ? StagePalette.stroke : Color.clear, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (card.ask != nil ? Color.orange.opacity(0.16) : (hovering ? Color.primary.opacity(0.07) : Color.clear))))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(card.ask != nil ? Color.orange.opacity(0.75) : (selected ? StagePalette.stroke : Color.clear), lineWidth: card.ask != nil ? 1.5 : 1))
         .shadow(color: .black.opacity(selected ? 0.08 : 0), radius: 1.5, y: 0.5)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture { model.select(card.id) }
@@ -464,8 +564,10 @@ private struct StageSideTab: View {
     }
 
     private var subtitle: String {
+        if let ask = card.ask { return t("needs you: \(ask.text)", "需要你：\(ask.text)") }
         if let since = card.heldSince { return t("you hold it · since \(StageClock.minutes.string(from: since))", "你接管着 · \(StageClock.minutes.string(from: since)) 起") }
         if card.foreign { return t("\(card.app) · not put here by amcu", "\(card.app) · 不是 amcu 放的") }
+        if card.windows.count > 1 { return t("\(card.app) · \(card.windows.count) windows", "\(card.app) · \(card.windows.count) 个窗口") }
         return card.app
     }
 }
@@ -489,9 +591,15 @@ private struct StageProfileTag: View {
 private struct StageTabMark: View {
     let held: Bool
     let working: Bool
+    var asking = false
 
     var body: some View {
-        if held {
+        if asking {
+            Image(systemName: "exclamationmark.bubble.fill")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Color.orange)
+                .help(t("An agent needs you here", "agent 在这里需要你"))
+        } else if held {
             Image(systemName: "hand.raised.fill")
                 .font(.system(size: 9.5))
                 .foregroundStyle(Color.orange)
@@ -511,11 +619,14 @@ private struct StageTabMenu: View {
 
     var body: some View {
         if card.heldSince != nil {
-            Button(t("Hand Back", "交还")) { model.handBack(card.id) }
-            Button(t("Release", "释放")) { model.free(card.id) }
-            Button(t("Bring It to the Front", "切到这个窗口")) { model.focusHeld(card.id) }
+            Button(t("Hand Back", "交还")) { model.handBack(card.window) }
+            Button(t("Release", "释放")) { model.free(card.window) }
+            Button(t("Bring It to the Front", "切到这个窗口")) { model.focusHeld(card.window) }
         } else {
-            Button(t("Take Over", "接管")) { model.takeOver(card.id) }
+            Button(t("Take Over", "接管")) { model.takeOver(card.window) }
+        }
+        if let ask = card.ask {
+            Button(t("Done — Let the Agent Continue", "完成，让 agent 继续")) { model.answer(ask.id) }
         }
         Divider()
         Button(model.tabsOnLeft ? t("Show Tabs on Top", "标签放在顶部") : t("Show Tabs on the Left", "标签放在左侧")) {
@@ -531,13 +642,21 @@ private struct StagePane: View {
 
     var body: some View {
         if let card = model.selectedCard {
-            let entries = model.activity[card.id] ?? []
-            let tabs = model.browser[card.id]?.tabs ?? []
+            let entries = model.entries(for: card)
+            let tabs = card.windows.map { (window: $0, tabs: model.browser[$0]?.tabs ?? []) }.filter { !$0.tabs.isEmpty }
             VStack(spacing: 0) {
                 StageWindowBar(card: card, model: model, underTitlebar: underTitlebar)
                 Divider()
+                if card.windows.count > 1 {
+                    StageWindowSwitcher(card: card, model: model)
+                    Divider()
+                }
                 if !model.summary.screenRecording {
                     StagePermissionBanner(answersFor: model.summary.answersFor)
+                        .padding([.horizontal, .top], 12)
+                }
+                if let ask = card.ask {
+                    StageAskBanner(ask: ask, held: model.isHeld(CGWindowID(ask.windowID)), model: model)
                         .padding([.horizontal, .top], 12)
                 }
                 GeometryReader { proxy in
@@ -584,7 +703,7 @@ private struct StageWindowBar: View {
     let underTitlebar: Bool
 
     var body: some View {
-        let profile = model.browser[card.id]?.profile
+        let profile = model.browser[card.window]?.profile
         HStack(spacing: 10) {
             Image(nsImage: model.icon(for: card))
                 .resizable()
@@ -617,19 +736,19 @@ private struct StageWindowBar: View {
                 StageBadge(text: t("you hold it · since \(StageClock.minutes.string(from: since))", "你接管着 · \(StageClock.minutes.string(from: since)) 起"), tint: .orange)
                     .help(t("On your screen now. \"Hand back\" puts it back on the stage; an agent acting on it takes it back too",
                             "现在在你的屏幕上。点「交还」放回舞台；agent 要操作它时也会自动收回"))
-                Button { model.handBack(card.id) } label: {
+                Button { model.handBack(card.window) } label: {
                     Label(t("Hand back", "交还"), systemImage: "arrow.uturn.backward")
                 }
                 .buttonStyle(StageCapsuleButton(prominent: true))
                 .help(t("Put this window back where it was on the stage, and let amcu continue", "把这个窗口放回舞台原处，让 amcu 继续"))
-                Button { model.free(card.id) } label: {
+                Button { model.free(card.window) } label: {
                     Label(t("Release", "释放"), systemImage: "rectangle.portrait.and.arrow.right")
                 }
                 .buttonStyle(StageCapsuleButton(prominent: false))
                 .help(t("Keep this window on your screen for good: it leaves the stage, and amcu still works on it where it is",
                         "窗口留在你的屏幕上，不再属于舞台；amcu 仍可在原地操作它"))
             } else {
-                Button { model.takeOver(card.id) } label: {
+                Button { model.takeOver(card.window) } label: {
                     Label(t("Take over", "接管"), systemImage: "hand.point.up.left")
                 }
                 .buttonStyle(StageCapsuleButton(prominent: false))
@@ -652,17 +771,17 @@ private struct StagePicture: View {
     @State private var hovering = false
 
     var body: some View {
-        let state = thumbnails.state(for: card.id)
+        let state = thumbnails.state(for: card.window)
         let width = max(card.size.width, 1)
         let height = max(card.size.height, 1)
         let held = card.heldSince != nil
         let pointer = entries.first { $0.fraction != nil }
         ZStack {
-            StageLayerView(layer: thumbnails.layer(for: card.id)) { fraction in
+            StageLayerView(layer: thumbnails.layer(for: card.window)) { fraction in
                 if held {
-                    model.focusHeld(card.id)
+                    model.focusHeld(card.window)
                 } else {
-                    model.takeOverAt(card.id, fraction)
+                    model.takeOverAt(card.window, fraction)
                 }
             }
             overlay(for: state, held: held)
@@ -726,7 +845,7 @@ private struct StagePicture: View {
 private struct StageInspector: View {
     let card: StageViewModel.Card
     let entries: [StageActivity]
-    let tabs: [StageTabs.Tab]
+    let tabs: [(window: CGWindowID, tabs: [StageTabs.Tab])]
     @ObservedObject var model: StageViewModel
 
     var body: some View {
@@ -742,8 +861,28 @@ private struct StageInspector: View {
                     }
                 }
                 if !tabs.isEmpty {
-                    StageSection(title: t("\(tabs.count) tab\(tabs.count == 1 ? "" : "s")", "\(tabs.count) 个标签")) {
-                        StageTabList(tabs: tabs)
+                    let count = tabs.reduce(0) { $0 + $1.tabs.count }
+                    StageSection(title: t("\(count) tab\(count == 1 ? "" : "s")", "\(count) 个标签")) {
+                        if tabs.count == 1 {
+                            StageTabList(tabs: tabs[0].tabs)
+                        } else {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(tabs, id: \.window) { group in
+                                    let number = (card.windows.firstIndex(of: group.window) ?? 0) + 1
+                                    let shown = group.window == card.window
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Button { model.pick(group.window) } label: {
+                                            Text(shown ? t("Window \(number) · shown", "窗口 \(number) · 正在显示") : t("Window \(number)", "窗口 \(number)"))
+                                                .font(.system(size: 10.5, weight: .semibold))
+                                                .foregroundStyle(shown ? Color.accentColor : Color.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .padding(.horizontal, 8)
+                                        StageTabList(tabs: group.tabs)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 StageSection(title: t("Window", "窗口")) {
@@ -753,6 +892,99 @@ private struct StageInspector: View {
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private struct StageWindowSwitcher: View {
+    let card: StageViewModel.Card
+    @ObservedObject var model: StageViewModel
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(Array(card.windows.enumerated()), id: \.element) { index, window in
+                        let shown = window == card.window
+                        let title = model.member(window)?.title ?? ""
+                        Button { model.pick(window) } label: {
+                            HStack(spacing: 5) {
+                                Text(t("Window \(index + 1)", "窗口 \(index + 1)"))
+                                    .font(.system(size: 11, weight: .semibold))
+                                if !title.isEmpty {
+                                    Text(title)
+                                        .font(.system(size: 11))
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                        .frame(maxWidth: 180, alignment: .leading)
+                                }
+                                if model.isHeld(window) {
+                                    Image(systemName: "hand.raised.fill")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(Color.orange)
+                                } else if model.isWorking(window, at: context.date) {
+                                    Circle()
+                                        .fill(Color.green)
+                                        .frame(width: 6, height: 6)
+                                }
+                            }
+                            .foregroundStyle(shown ? Color.primary : Color.secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(shown ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06)))
+                            .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help(t("Show this window of the profile", "显示这个 profile 的这个窗口"))
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+            }
+        }
+        .background(StagePalette.card)
+    }
+}
+
+private struct StageAskBanner: View {
+    let ask: StageAsk
+    let held: Bool
+    @ObservedObject var model: StageViewModel
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "exclamationmark.bubble.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(Color.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(t("\(StageActivity.sessionLabel(ask.session)) needs you · \(StageClock.minutes.string(from: ask.at))", "\(StageActivity.sessionLabel(ask.session)) 需要你 · \(StageClock.minutes.string(from: ask.at))"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                Text(ask.text)
+                    .font(.system(size: 13, weight: .medium))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(held
+                     ? t("When you are done, press \"Hand back\" and the agent continues.", "做完点「交还」，agent 会接着做。")
+                     : t("\"Take over\" brings the window to your screen; hand it back when you are done.", "点「接管」把窗口拿到你屏幕上，做完点「交还」。"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if !held {
+                Button { model.takeOver(CGWindowID(ask.windowID)) } label: {
+                    Label(t("Take over", "接管"), systemImage: "hand.point.up.left")
+                }
+                .buttonStyle(StageCapsuleButton(prominent: true))
+            }
+            Button { model.answer(ask.id) } label: {
+                Label(t("Done", "完成"), systemImage: "checkmark")
+            }
+            .buttonStyle(StageCapsuleButton(prominent: false))
+            .help(t("You did it without taking the window over: let the agent continue", "不用接管也已经办好了：让 agent 继续"))
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.orange.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.orange.opacity(0.45), lineWidth: 1))
     }
 }
 
@@ -835,6 +1067,15 @@ private struct StageStatusBar: View {
                 .buttonStyle(StageCapsuleButton(prominent: false))
                 .help(t("Keep the windows you took over on your screen for good: they leave the stage, and amcu still works on them where they are",
                         "接管的窗口留在你的屏幕上，不再属于舞台；amcu 仍可在原地操作它们"))
+            }
+            if !model.asks.isEmpty {
+                Button {
+                    if let first = model.asks.first { model.select(CGWindowID(first.windowID)) }
+                } label: {
+                    Label(t("\(model.asks.count) need\(model.asks.count == 1 ? "s" : "") you", "\(model.asks.count) 件事等你"), systemImage: "exclamationmark.bubble.fill")
+                }
+                .buttonStyle(StageCapsuleButton(prominent: true))
+                .help(t("An agent asked for something only you can do", "agent 有只能你来做的事"))
             }
             Spacer(minLength: 8)
             Text(held > 0
