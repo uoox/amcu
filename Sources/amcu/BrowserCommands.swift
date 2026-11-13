@@ -31,11 +31,19 @@ enum BrowserCommands {
       label       --name L | --clear        name the selected connection (persists in that profile)
       guide                                 operating instructions for an agent
 
+    RECOVERY (explicit, no website actions)
+      profiles    --known                  connected and previously verified profile identities
+      launch      --profile X              reopen a recorded profile; wait for the same identity
+      task        save|status|list|resume   durable read-only workspace declarations;
+                                            `amcu browser task help` gives the flags
+
     TABS
       tabs                                  list tabs (id, window, title, url); marks the current one
       frames                                list the current tab's frames (ids appear in refs as f<id>)
       tab         --new [--url U]           open a tab in amcu's own background window (--activate
                                             to focus that window; --user-window for the user's window)
+                  --stage                   use an isolated, identity-marked window on the stage;
+                                            cannot combine with --activate or --user-window
       tab         --select ID               make ID the session's current tab (--activate to show it)
       tab         --close [--tab ID]        close a tab
       window      [--show|--hide|--close]   amcu's background window: report its state and tabs,
@@ -54,10 +62,18 @@ enum BrowserCommands {
       console     [--level error] [--clear] console messages, including ones logged before attach
       network     [--clear]                 requests seen since the debugger attached
       wait        --text T | --text-gone T | --url U | --url-matches REGEX | --load | --time S
+                  --selector CSS [--state STATE]  wait for an element state (also --role/--name);
+                                            attached/detached, visible/hidden, enabled/disabled,
+                                            checked/unchecked, expanded/collapsed
 
     ACT (by ref from the last snapshot; --target R is a synonym for --ref R,
          and --element "what you think it is" is checked before acting)
       click       --ref R [--button right] [--count 2] [--mod cmd] [--force]
+                  --selector CSS | --role ROLE --name NAME
+                                            unique live locator instead of ref (can intersect);
+                                            names are exact, --frame N scopes the locator
+      check | uncheck  --ref R | --selector CSS | --role ROLE --name NAME
+                                            idempotent desired state; at most one click, verified
       hover       --ref R
       type        --ref R --text T [--submit] [--slowly] [--replace]
       fill        --ref R --value V         replace the value and read it back (verified)
@@ -129,7 +145,10 @@ enum BrowserCommands {
         case "doctor": try doctor(flags)
         case "safari-relay": try safariRelay(flags)
         case "status": try status(flags)
-        case "profiles": try profiles(flags)
+        case "profiles":
+            if flags.has("known") { try BrowserRecoveryCommands.knownProfiles(flags) }
+            else { try profiles(flags) }
+        case "launch", "task": try BrowserRecoveryCommands.run(flags)
         case "label": try label(flags)
         case "guide": print(browserGuideText)
         case "help": print(helpText)
@@ -149,6 +168,8 @@ enum BrowserCommands {
         case "network": try network(flags)
         case "wait": try wait(flags)
         case "click": try click(flags)
+        case "check": try check(flags)
+        case "uncheck": try uncheck(flags)
         case "hover": try hover(flags)
         case "type": try type(flags)
         case "fill": try fill(flags)
@@ -169,7 +190,7 @@ enum BrowserCommands {
 
     static let actingVerbs: Set<String> = [
         "navigate", "goto", "open", "back", "forward", "reload", "eval", "evaluate",
-        "click", "hover", "type", "fill", "select-option", "select", "key", "press",
+        "click", "check", "uncheck", "hover", "type", "fill", "select-option", "select", "key", "press",
         "scroll", "drag", "upload", "dialog", "resize"
     ]
 
@@ -225,7 +246,7 @@ enum BrowserCommands {
     static func baseParams(_ flags: Flags) throws -> [String: Any] {
         var params: [String: Any] = ["session": SessionName.resolve(explicit: flags.string("session")).name]
         if let tab = try flags.int("tab") { params["tab"] = tab }
-        if let seconds = try flags.double("timeout") { params["timeoutMs"] = Int(seconds * 1000) }
+        if flags.string("timeout") != nil { params["timeoutMs"] = Int(try timeout(flags) * 1000) }
         // `--element "Submit button"`: checked against the addressed element
         // before the verb runs; a mismatch is refused as element_mismatch.
         if let expect = flags.string("element"), !expect.trimmingCharacters(in: .whitespaces).isEmpty { params["expect"] = expect }
@@ -233,7 +254,11 @@ enum BrowserCommands {
     }
 
     static func timeout(_ flags: Flags, default fallback: TimeInterval = 30) throws -> TimeInterval {
-        try flags.double("timeout") ?? fallback
+        let seconds = try flags.double("timeout") ?? fallback
+        guard seconds > 0, seconds <= 600 else {
+            throw AmcuError(.invalidArgument, "--timeout must be greater than 0 and at most 600 seconds")
+        }
+        return seconds
     }
 
     /// The element a verb acts on. For the main `ref` flag, `--target` is an
@@ -670,6 +695,7 @@ enum BrowserCommands {
 
     static func profiles(_ flags: Flags) throws {
         let endpoints = BrowserClient.discover()
+        BrowserRecoveryCommands.recordDiscovery(BrowserRegistry(), endpoints: endpoints)
         struct Row: Encodable {
             let connection: BrowserEndpoint
             /// nil when the extension did not answer `status` within 3 s.
@@ -783,6 +809,15 @@ enum BrowserCommands {
         var params = try baseParams(flags)
         let client = try client(flags)
         if flags.has("new") {
+            if flags.has("stage") && (flags.has("activate") || flags.has("user-window")) {
+                throw AmcuError(.invalidArgument, "--stage cannot combine with --activate or --user-window")
+            }
+            if flags.has("stage") {
+                let placement = try BrowserStage.prepare(client: client, session: Commands.session(flags), timeout: try timeout(flags))
+                params["stageWindowId"] = placement.windowID
+                params["stageBounds"] = ["left": Int(placement.bounds.x), "top": Int(placement.bounds.y + 40),
+                    "width": min(1280, Int(placement.bounds.width)), "height": min(850, Int(placement.bounds.height - 40))]
+            }
             if let url = flags.string("url") { params["url"] = url }
             params["activate"] = flags.has("activate")
             params["userWindow"] = flags.has("user-window")
@@ -795,7 +830,7 @@ enum BrowserCommands {
                 }
                 let place = flags.has("user-window")
                     ? (flags.has("activate") ? ", shown in the user's window" : ", in the user's window, unselected")
-                    : (flags.has("activate") ? ", amcu's window focused" : ", in amcu's background window")
+                    : (flags.has("stage") ? ", in this profile's verified stage window" : (flags.has("activate") ? ", amcu's window focused" : ", in amcu's background window"))
                 return "opened \(tabLine(result["tab"])) (now current for this session\(place))"
             }
             return
@@ -1064,6 +1099,9 @@ enum BrowserCommands {
         let client = try client(flags)
         let result = try client.request("evaluate", params: params, timeout: try timeout(flags, default: 40))
         emit(client, action: "eval", result: result) {
+            if result["completed"].bool == false {
+                return (["evaluation incomplete: \(result["reason"].string ?? "blocked by dialog; no value available")"] + afterLines(result["after"])).joined(separator: "\n")
+            }
             let value = result["value"]
             if let string = value.string { return string }
             if value.isNull { return "null" }
@@ -1127,6 +1165,10 @@ enum BrowserCommands {
         if let pattern = flags.string("url-matches") { params["urlPattern"] = pattern }
         if flags.has("load") { params["load"] = true }
         if let time = try flags.double("time") { params["time"] = time }
+        for key in ["selector", "role", "name", "state"] {
+            if let value = flags.string(key) { params[key] = value }
+        }
+        if let frame = try flags.int("frame") { params["frame"] = frame }
         let seconds = try timeout(flags, default: 30)
         params["timeoutMs"] = Int(seconds * 1000)
         let client = try client(flags)
@@ -1138,9 +1180,44 @@ enum BrowserCommands {
 
     // MARK: - Acting
 
-    static func click(_ flags: Flags) throws {
+    static func locatorParams(_ flags: Flags) throws -> [String: Any] {
         var params = try baseParams(flags)
-        params["ref"] = try requiredRef(flags)
+        let ref = try optionalRef(flags)
+        let locator = ["selector", "role", "name"].contains { flags.string($0) != nil }
+        guard (ref != nil) != locator else {
+            throw AmcuError(.invalidArgument, "provide either --ref or --selector/--role/--name (exact), not both")
+        }
+        if let ref { params["ref"] = ref }
+        for key in ["selector", "role", "name"] {
+            if let value = flags.string(key) { params[key] = value }
+        }
+        if let frame = try flags.int("frame") { params["frame"] = frame }
+        return params
+    }
+
+    static func check(_ flags: Flags) throws { try setChecked(flags, desired: true) }
+    static func uncheck(_ flags: Flags) throws { try setChecked(flags, desired: false) }
+
+    static func setChecked(_ flags: Flags, desired: Bool) throws {
+        var params = try locatorParams(flags)
+        guard !flags.has("force"), flags.string("count") == nil, flags.string("button") == nil, flags.string("mod") == nil else {
+            throw AmcuError(.invalidArgument, "check/uncheck require one ordinary click; no force/count/button/mod")
+        }
+        params["timeoutMs"] = Int(try timeout(flags) * 1000)
+        let client = try client(flags)
+        let verb = desired ? "check" : "uncheck"
+        let result = try client.request(verb, params: params, timeout: try timeout(flags))
+        emit(client, action: verb, result: result) {
+            let status = result["verified"].bool == true ? "verified" : "unverified: requested state not confirmed"
+            let changed = result["changed"].bool.map { String($0) } ?? "unknown"
+            var line = "\(verb) \(result["ref"].string ?? "") (\(status), changed=\(changed))"
+            if result["synthetic"].bool == true { line += " (synthetic)" }
+            return ([line] + afterLines(result["after"])).joined(separator: "\n")
+        }
+    }
+
+    static func click(_ flags: Flags) throws {
+        var params = try locatorParams(flags)
         if let button = flags.string("button") {
             guard ["left", "right", "middle"].contains(button) else {
                 throw AmcuError(.invalidArgument, "unknown --button '\(button)'", nextSteps: ["Use one of: left, right, middle."])
@@ -1161,6 +1238,12 @@ enum BrowserCommands {
             if let note = result["obscuredNote"].string { line += " (\(note))" }
             if result["unstable"].bool == true { line += " (target was still moving when clicked)" }
             if result["fromEarlierSnapshot"].bool == true { line += " (ref from an earlier snapshot)" }
+            for key in ["checked", "expanded"] {
+                if let before = result["state"]["before"][key].string {
+                    line += " (\(key): \(before) → \(result["state"]["after"][key].string ?? "unknown"))"
+                }
+            }
+            line += " (\(result["verification"].string ?? "dispatch-only"))"
             return ([line] + afterLines(result["after"])).joined(separator: "\n")
         }
     }
@@ -1356,7 +1439,7 @@ enum BrowserCommands {
             guard result["handled"].bool == true else { return "no dialog is open on \(tabLine(result["tab"]))" }
             let dialog = result["dialog"]
             let what = dialog.isNull ? "the dialog" : "\(dialog["type"].string ?? "dialog") \"\(dialog["message"].string ?? "")\""
-            return "\(result["accepted"].bool == true ? "accepted" : "dismissed") \(what)"
+            return (["\(result["accepted"].bool == true ? "accepted" : "dismissed") \(what)"] + afterLines(result["after"])).joined(separator: "\n")
         }
     }
 

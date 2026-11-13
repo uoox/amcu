@@ -15,6 +15,7 @@ struct Flags {
         "activate", "new", "close", "no-wait", "all-refs", "interactive", "full", "submit", "slowly",
         "replace", "clear", "load", "hard", "all", "accept", "dismiss", "diff",
         "show", "hide", "user-window", "human", "no-reload",
+        "stage", "open-missing", "launch-missing", "known",
         // lab verbs
         "headless", "keep-profile",
         // stage verbs
@@ -85,7 +86,7 @@ struct Flags {
 
     func double(_ name: String) throws -> Double? {
         guard let raw = values[name] else { return nil }
-        guard let value = Double(raw) else {
+        guard let value = Double(raw), value.isFinite else {
             throw AmcuError(.invalidArgument, "--\(name) expects a number, got '\(raw)'")
         }
         return value
@@ -95,7 +96,7 @@ struct Flags {
     func point(_ name: String) throws -> CGPoint? {
         guard let raw = values[name] else { return nil }
         let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]) else {
+        guard parts.count == 2, let x = Double(parts[0]), x.isFinite, let y = Double(parts[1]), y.isFinite else {
             throw AmcuError(.invalidArgument, "--\(name) expects 'x,y', got '\(raw)'")
         }
         return CGPoint(x: x, y: y)

@@ -7,9 +7,10 @@ amcu \(AmcuVersion.string) — browser guide for agents
 
 WHAT THIS IS FOR
   Reading and driving web pages inside the user's own browser — their profile,
-  their logins, their open tabs — while they keep using the machine. Nothing is
-  launched, no debugging port is opened, no token is configured: the browser
-  starts the amcu host itself when the amcu bridge extension is loaded.
+  their logins, their open tabs — while they keep using the machine. Normal
+  commands launch nothing, open no debugging port and configure no token: the
+  browser starts the native host when the bridge extension is loaded.
+  Explicit `browser launch --profile X` can reopen a verified, recorded profile.
   Tabs are read and acted on in the background; the user's active tab, window
   and cursor are left alone unless a flag says otherwise.
 
@@ -50,7 +51,25 @@ THE NORMAL SEQUENCE
   is refused (element_mismatch) when the live element's role or name says
   otherwise. Cheap insurance when a ref is reused from an earlier snapshot.
   (On desktop verbs `--element N` is an index; here it is a description —
-  the browser address is always the ref.)
+  (On desktop verbs `--element N` is an index; here it is a description.)
+
+UNIQUE LOCATORS AND VERIFIED STATE
+  `click`, `check` and `uncheck` accept a ref OR a live locator: --selector CSS,
+  --role ROLE, --name NAME, or their intersection. Names match exactly. The
+  target must be unique; several matches are ambiguous_element, not the first
+  match. --frame N scopes a locator to that frame. Old refs still fail stale
+  rather than quietly targeting a replacement after a re-render.
+  `check --selector '#enabled'` and `uncheck` express a desired checked state.
+  They click at most once, then read back. An already satisfied state is a
+  verified unchanged result, not another toggle. Disabled/unsupported controls
+  are refused. A DOM mutation count is observation, never proof of success.
+  `wait --selector '#enabled' --state checked --timeout 10` polls a fresh
+  locator against one deadline. States: attached/detached, visible/hidden,
+  enabled/disabled, checked/unchecked, expanded/collapsed. Ambiguity fails
+  immediately. A script or bridge failure is not evidence that a target hid.
+  Click results can report checked/expanded before and after. Inspect them.
+  A dialog opened by eval is reported promptly; its value has not completed.
+  Accepting one dialog may reveal another. Each needs a deliberate decision.
 
 REFS AND FRAMES
   e12 lives in the main document. f42e12 lives in frame 42 (an iframe); the
@@ -188,7 +207,30 @@ TABS, WINDOWS AND VISIBILITY
   Each agent has its own session without asking (the same rule as desktop
   commands: $AMCU_SESSION, else $AAA_SESSION or $CLAUDE_CODE_SESSION_ID),
   and so its own current tab; `--session NAME` splits further. Sessions
-  share the one amcu window.
+  share the default amcu window. With `tab --new --stage --profile X`, the
+  profile gets a separate work window created unfocused on the stage itself.
+  A unique extension marker proves which native window it is before the CLI
+  registers it. No title-order guess or application-wide following is used.
+  --stage refuses --activate and --user-window; Safari does not support it.
+  Existing default background windows stay unchanged.
+
+RECOVERY IS EXPLICIT
+  `profiles` remembers verified identities; `profiles --known` lists history.
+  `launch --profile X` reopens only the recorded browser/root/profile/instance.
+  It never installs an extension or logs into a site. A bridge is not proof of
+  website login. Missing or cloned identities and ambiguous selectors refuse.
+  `task save --name daily --profile X --tab N [--stage]` adds one profile entry.
+  Saving another profile adds an entry; each entry has its own session. URLs,
+  including private query tokens, persist in 0600 JSON under ~/.config/amcu/.
+  `task status --name daily` only reads. `task resume --name daily` binds a
+  unique exact URL already open. --launch-missing explicitly permits reopening
+  recorded profiles; --open-missing permits loading missing URLs (GETs may have
+  side effects, so save only intended pages). No site actions are ever replayed.
+  --stage saves placement intent; reuse needs current native-window proof.
+  A page already on the user's screen is not moved or duplicated to satisfy it.
+  Partial results say ok:false and exit nonzero. Inspect each progress item.
+  Chromium can ignore initial stage coordinates: a uniquely marked new window
+  may appear briefly before AX registration moves it; the warning discloses it.
 
 SEVERAL PROFILES
   Every profile with the extension loaded is its own connection, with its own

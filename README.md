@@ -68,6 +68,24 @@ amcu browser fill --ref e7 --value "query" --submit
 
 `--json` on any command gives structured output on stdout and structured errors on stderr. `--session NAME` keeps concurrent agents from sharing snapshot state. `~/.config/amcu/policy.json` extends the deny/allow lists and settle timing; `amcu policy` shows what is in effect.
 
+### Resume a workspace, verify a state
+
+```bash
+amcu browser profiles                         # also remembers verified profile identities
+amcu browser profiles --known                 # includes disconnected recorded profiles
+amcu browser launch --profile shop             # explicit reopen; never installs or logs in
+amcu browser tab --new --stage --profile shop --url https://example.com
+amcu browser task save --name daily --profile shop --tab 123 --stage
+amcu browser task status --name daily           # read-only; never starts a browser
+amcu browser task resume --name daily --launch-missing --open-missing
+amcu browser check --role checkbox --name "Enabled"   # at most one click, read-back verified
+amcu browser wait --selector '#result' --state visible --timeout 10
+```
+
+Task resume only launches explicitly requested missing profiles, opens explicitly requested missing pages, and binds sessions. It never runs site actions or claims the site is logged in. A task can hold one entry per profile; saving another profile adds it. URLs, including query strings, are stored privately under `~/.config/amcu/browser/` and may contain sensitive tokens. Exact-URL ambiguity is refused. A stage work window is owned by one profile and identified with a unique extension marker, never guessed from matching page titles. Existing user windows are not moved by task resume. macOS can ignore a new window’s initial coordinates: its uniquely identified marker window may appear briefly before stage registration; the command warns instead of claiming invisibility.
+
+For `click`, `check` and `uncheck`, use a snapshot ref **or** a unique live locator (`--selector`, exact `--role` / `--name`, or their intersection). Ambiguity and stale refs fail rather than clicking the first match. `check`/`uncheck` are idempotent. Clicks report state read-back separately from mere input delivery; mutation counts are not semantic verification. An eval blocked by a JavaScript dialog returns promptly as incomplete; accepting one dialog never accepts the next for you.
+
 `amcu lab` starts a disposable Chrome with the DevTools protocol exposed, for extension development and network interception. It is not for automating pages that resist the normal path.
 
 ## Development

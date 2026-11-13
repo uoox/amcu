@@ -40,6 +40,15 @@ jobs:
         run: swift --version
       - name: Test
         run: swift run -c release amcu-tests
+      - name: Verify generated contracts and JavaScript
+        run: |
+          for f in extension/*.js safari/extension/*.js; do node --check "$f"; done
+          node --test Tests/node/*.test.cjs
+          bash -n Tests/e2e/browser/run.sh
+          python3 Scripts/embed-extension.py
+          git diff --exit-code -- Sources/AmcuCore/ExtensionBundle.swift Sources/AmcuCore/SafariExtensionBundle.swift
+          swift build -c release
+          .build/release/amcu skill | diff - skills/amcu/SKILL.md
       # Fails if the tag and Sources/AmcuCore/Version.swift disagree, so a
       # binary never ships reporting a version other than the one it is tagged as.
       - name: Package
@@ -54,6 +63,8 @@ jobs:
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "amcu ${TAG#v}" --generate-notes --verify-tag
           fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "dist/amcu-${TAG#v}-macos-universal.tar.gz" \
+            "dist/amcu-${TAG#v}-macos-universal.tar.gz.sha256"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "\(.name)\t\(.size) bytes"'

@@ -421,6 +421,9 @@
   function isDisabled(el) {
     if (el.disabled === true) return true;
     if (attr(el, 'aria-disabled') === 'true') return true;
+    for (let parent = el.parentElement || el.getRootNode?.().host; parent; parent = parent.parentElement || parent.getRootNode?.().host) {
+      if (parent.inert || attr(parent, 'aria-disabled') === 'true') return true;
+    }
     const fieldset = el.closest && el.closest('fieldset[disabled]');
     if (fieldset && !(el.closest('legend') && fieldset.querySelector('legend') === el.closest('legend'))) return true;
     return false;
@@ -609,7 +612,10 @@
     const native = nativeLabel(el);
     if (native) return native;
     if (role && NAME_FROM_CONTENT.has(role)) {
-      const ctx = { visited: new Set(), includeHidden: false, inLabelledBy: false };
+      // Locators also inspect hidden roots. Keep their content-derived names
+      // (and ref identity) instead of silently treating them as unnamed. For a
+      // visible root, hidden descendants still do not contribute to its name.
+      const ctx = { visited: new Set(), includeHidden: !isVisible(el), inLabelledBy: false };
       const content = normalize(textAlternative(el, ctx));
       if (content) return content;
     }
@@ -633,15 +639,70 @@
     return SECRET_MARKERS.some(marker => haystack.includes(marker));
   }
 
-  function checkedState(el, role) {
+  function checkedState(el) {
     if (tagOf(el) === 'input' && (el.type === 'checkbox' || el.type === 'radio')) {
       if (el.indeterminate) return 'mixed';
       return el.checked ? 'true' : 'false';
     }
     const aria = attr(el, 'aria-checked');
     if (aria === 'true' || aria === 'false' || aria === 'mixed') return aria;
-    if (role === 'switch' || role === 'checkbox' || role === 'radio' || role === 'menuitemcheckbox' || role === 'menuitemradio') return 'false';
     return null;
+  }
+
+  // Matching shares snapshot roles/names/shadow traversal. Hidden duplicates
+  // remain ambiguous; visibility is an action precondition, not disambiguation.
+  function isVisible(el) {
+    if (!el.isConnected || !hasBox(el)) return false;
+    if (el.checkVisibility && !el.checkVisibility({ contentVisibilityAuto: true, visibilityProperty: true, opacityProperty: true })) return false;
+    for (let node = el; node; node = node.assignedSlot || node.parentElement || node.getRootNode?.().host) {
+      const style = getComputedStyle(node);
+      if (node.hidden || attr(node, 'aria-hidden') === 'true' || isStyleHidden(style) || parseFloat(style.opacity) === 0) return false;
+    }
+    return true;
+  }
+
+  function targetState(el) {
+    const role = roleOf(el) || 'generic';
+    const expanded = attr(el, 'aria-expanded');
+    return { attached: el.isConnected, visible: isVisible(el), enabled: !isDisabled(el),
+      checked: checkedState(el, role), expanded: ['true', 'false'].includes(expanded) ? expanded :
+        tagOf(el) === 'summary' && tagOf(el.parentElement) === 'details' ? String(el.parentElement.open) : null,
+      role, description: describeElement(el) };
+  }
+
+  function locatorMatches(params) {
+    if (params.ref && ['selector', 'role', 'name'].some(key => params[key] !== undefined)) throw new BridgeError('invalid_argument', 'ref and locator are mutually exclusive');
+    if (params.ref) return [{ ref: params.ref, ...targetState(resolveRef(params.ref).el) }];
+    if (!['selector', 'role', 'name'].some(key => params[key] !== undefined)) throw new BridgeError('invalid_argument', 'provide ref or selector/role/exact name');
+    const matches = [];
+    for (const el of domOrderElements(Infinity)) {
+      if (params.selector !== undefined) {
+        let match;
+        try { match = el.matches(params.selector); } catch (error) { throw new BridgeError('invalid_argument', `invalid CSS selector: ${error.message}`); }
+        if (!match) continue;
+      }
+      const role = roleOf(el) || 'generic';
+      if (params.role !== undefined && role !== params.role) continue;
+      const name = accessibleName(el, role);
+      if (params.name !== undefined && name !== params.name) continue;
+      const ref = state.byElement.get(el) || refFor(el, role, name);
+      matches.push({ ref, ...targetState(el) });
+      if (matches.length > 1) break;
+    }
+    return matches;
+  }
+
+  function actionState(params) {
+    const result = targetState(resolveRef(params.ref).el);
+    if (params.prepare) {
+      if (!result.enabled) throw new BridgeError('unsupported', 'target is disabled');
+      if (!result.visible) throw new BridgeError('element_not_found', 'target is not visible');
+      if (params.desired !== undefined) {
+        if (!['checkbox', 'switch', 'radio', 'menuitemcheckbox', 'menuitemradio'].includes(result.role) || !['true', 'false'].includes(result.checked)) throw new BridgeError('unsupported', 'target has no reliable binary checked state');
+        if (params.desired === false && ['radio', 'menuitemradio'].includes(result.role)) throw new BridgeError('unsupported', 'radio controls cannot be unchecked; check another radio');
+      }
+    }
+    return result;
   }
 
   function headingLevel(el) {
@@ -1787,6 +1848,10 @@
         return { ok: true, version: VERSION, url: location.href, isTop: window === window.top };
       case 'snapshot':
         return snapshot(message.params || {});
+      case 'locator-matches':
+        return { matches: locatorMatches(message.params || {}) };
+      case 'action-state':
+        return actionState(message.params || {});
       case 'measure':
         return measure(message.params);
       case 'geometry':
@@ -1837,7 +1902,7 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || message.__amcu !== true) return false;
     Promise.resolve()
       .then(() => handle(message))

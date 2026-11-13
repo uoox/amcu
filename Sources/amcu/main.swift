@@ -161,7 +161,12 @@ do {
     Output.json = flags.has("json")
 
     if flags.has("help") {
-        print(helpText)
+        if command == "browser" {
+            if flags.positional.first == "task" || flags.positional.first == "launch" { print(BrowserRecoveryCommands.helpText) }
+            else { print(BrowserCommands.helpText) }
+        } else if command == "stage" { print(StageCommands.help) }
+        else if command == "lab" { try LabCommands.run(Flags(["help"])) }
+        else { print(helpText) }
         exit(0)
     }
 

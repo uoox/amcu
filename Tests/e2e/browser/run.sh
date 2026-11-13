@@ -46,7 +46,7 @@ trap cleanup EXIT
 (cd "$ROOT/Tests/e2e/browser/site" && python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1) &
 SERVER_PID=$!
 
-"$AMCU" browser install --manifest-dir "$PROFILE/NativeMessagingHosts" --extension-dir "$EXT" >/dev/null || { echo "install failed" >&2; exit 1; }
+"$AMCU" browser install --no-reload --manifest-dir "$PROFILE/NativeMessagingHosts" --extension-dir "$EXT" >/dev/null || { echo "install failed" >&2; exit 1; }
 
 "$AMCU_E2E_CHROME" --user-data-dir="$PROFILE" --load-extension="$EXT" --no-first-run --no-default-browser-check \
   --disable-features=ExtensionDisableUnsupportedDeveloper,TranslateUI --window-size=1000,800 --window-position=40,40 \
@@ -132,6 +132,46 @@ EMAIL=$(ref_of "$SNAP" 'textbox "Email"')
 "$AMCU" browser fill --ref "$EMAIL" --value 'a@b.co' >/dev/null
 check "type --submit presses Enter" "$("$AMCU" browser type --ref "$NAME" --text '!' --submit)" 'then Enter'
 check "the form submitted" "$("$AMCU" browser snapshot --selector '#log')" 'submitted Ada Lovelace!'
+
+echo "locator / checked state contract"
+check "locator intersection" "$("$AMCU" browser click --selector '#noop-btn' --role button --name Noop)" 'dispatch-only'
+check "ambiguity includes hidden duplicates" "$("$AMCU" browser click --name 'Duplicate target' 2>&1)" 'ambiguous_element'
+check "exact name not substring" "$("$AMCU" browser click --name 'Duplicate' 2>&1)" 'element_not_found'
+check "ref conflicts with locator" "$("$AMCU" browser click --ref e1 --selector '#noop-btn' 2>&1)" 'invalid_argument'
+check "shadow locator" "$("$AMCU" browser click --role button --name 'Shadow target')" 'dispatch-only'
+check "disabled click refuses" "$("$AMCU" browser click --selector '#disabled-btn' 2>&1)" 'disabled'
+check "native check readback" "$("$AMCU" browser check --selector '#agree')" 'changed=true'
+check "native check idempotent" "$("$AMCU" browser check --selector '#agree')" 'changed=false'
+check "native uncheck readback" "$("$AMCU" browser uncheck --selector '#agree')" 'changed=true'
+check "ARIA switch check" "$("$AMCU" browser check --role switch --name Power)" 'verified'
+check "ARIA switch uncheck" "$("$AMCU" browser uncheck --selector '#aria-switch')" 'verified'
+check "missing ARIA state refuses" "$("$AMCU" browser check --selector '#missing-state' 2>&1)" 'reliable binary'
+check "mixed state refuses" "$("$AMCU" browser check --selector '#mixed-state' 2>&1)" 'reliable binary'
+check "radio uncheck refuses" "$("$AMCU" browser uncheck --selector '#r1' 2>&1)" 'cannot be unchecked'
+check "cancelled check not verified" "$("$AMCU" browser check --selector '#cancel-check')" 'unverified'
+check "cancelled check clicked only once" "$("$AMCU" browser eval --js 'window.cancelClicks')" '1'
+for STATE in attached visible enabled unchecked; do
+  check "wait $STATE" "$("$AMCU" browser wait --selector '#agree' --state "$STATE" --timeout 2)" 'wait ok'
+done
+check "wait disabled" "$("$AMCU" browser wait --selector '#disabled-btn' --state disabled --timeout 2)" 'wait ok'
+check "wait hidden" "$("$AMCU" browser wait --selector '#secret' --state hidden --timeout 2)" 'wait ok'
+check "wait detached" "$("$AMCU" browser wait --selector '#not-attached' --state detached --timeout 2)" 'wait ok'
+check "wait ambiguous fails" "$("$AMCU" browser wait --name 'Duplicate target' --state hidden --timeout 2 2>&1)" 'ambiguous_element'
+check "invalid selector is not hidden" "$("$AMCU" browser wait --selector '[' --state hidden --timeout 2 2>&1)" 'invalid_argument'
+check "collapsed before" "$("$AMCU" browser wait --selector '#expand-control' --state collapsed --timeout 2)" 'wait ok'
+check "click reports expanded state" "$("$AMCU" browser click --selector '#expand-control')" 'expanded: false → true'
+check "expanded after" "$("$AMCU" browser wait --selector '#expand-control' --state expanded --timeout 2)" 'wait ok'
+"$AMCU" browser check --selector '#agree' >/dev/null
+check "wait checked" "$("$AMCU" browser wait --selector '#agree' --state checked --timeout 2)" 'wait ok'
+"$AMCU" browser uncheck --selector '#agree' >/dev/null
+
+echo "eval blocked by confirm / chained dialogs"
+check "eval returns incomplete rather than fabricated null" "$("$AMCU" browser eval --js "confirm('eval confirm')" --timeout 5)" 'evaluation incomplete'
+check "dismiss confirm" "$("$AMCU" browser dialog --dismiss)" 'dismissed confirm'
+check "chained eval suspends" "$("$AMCU" browser eval --js "() => { alert('chain-one'); alert('chain-two'); return 42; }" --timeout 5)" 'evaluation incomplete'
+check "accept preserves next alert" "$("$AMCU" browser dialog --accept)" 'chain-two'
+check "next dialog still open" "$("$AMCU" browser snapshot 2>&1)" 'dialog_open'
+"$AMCU" browser dialog --accept >/dev/null
 
 echo "dialogs"
 ALERT=$(ref_of "$SNAP" 'button "Alert"')
@@ -256,6 +296,32 @@ check "tab --new opens in amcu's background window" "$("$AMCU" browser tab --new
 check "wait --text sees late content" "$("$AMCU" browser wait --text 'late content' --timeout 10)" 'wait ok'
 check "tab --close" "$("$AMCU" browser tab --close)" 'closed tab'
 check "detach" "$("$AMCU" browser detach --tab "$TAB")" 'detached from tab'
+
+if [ "${AMCU_E2E_STAGE:-}" = "1" ]; then
+  echo "stage workspace recovery (explicit opt-in)"
+  TASK="browser-e2e-$$"
+  CREATED=$("$AMCU" browser tab --new --stage --url "$BASE/second.html" --json)
+  STAGE_TAB=$(echo "$CREATED" | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["tab"]["id"])' 2>/dev/null)
+  if [ -n "$STAGE_TAB" ]; then
+    ok "stage tab created in isolated marker window"
+    check "save stage task" "$("$AMCU" browser task save --name "$TASK" --browser "$ENDPOINT" --profile Default --tab "$STAGE_TAB" --stage 2>&1)" "saved $TASK"
+    check "read-only task status verifies native stage proof" "$("$AMCU" browser task status --name "$TASK" 2>&1)" 'available'
+    check "resume binds without duplicate" "$("$AMCU" browser task resume --name "$TASK" 2>&1)" 'bound'
+    check "resume remains idempotent" "$("$AMCU" browser task resume --name "$TASK" 2>&1)" 'bound'
+    check "stage refuses foreground activation" "$("$AMCU" browser tab --new --stage --activate --url "$BASE/second.html" 2>&1)" 'invalid_argument'
+    "$AMCU" browser tab --close --tab "$STAGE_TAB" >/dev/null
+    check "missing page needs explicit authorization" "$("$AMCU" browser task status --name "$TASK" 2>&1)" 'missing_page'
+    check "explicit open missing restores stage page" "$("$AMCU" browser task resume --name "$TASK" --open-missing 2>&1)" 'opened'
+    check "restored page remains idempotent" "$("$AMCU" browser task resume --name "$TASK" 2>&1)" 'bound'
+    INSTANCE=$("$AMCU" browser profiles --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(r["connection"]["instanceId"] for r in d["profiles"] if r["connection"]["browser"]=="chrome-for-testing"))')
+    kill "$BROWSER_PID" 2>/dev/null
+    wait "$BROWSER_PID" 2>/dev/null || true
+    check "launch recovers the exact disconnected profile" "$("$AMCU" browser launch --profile "$INSTANCE" --timeout 20 2>&1)" 'connected:'
+    BROWSER_PID=$("$AMCU" apps --json | python3 -c 'import json,sys;d=json.load(sys.stdin);print(next(a["pid"] for a in d.get("apps",[]) if a.get("bundleID")=="com.google.chrome.for.testing"))' 2>/dev/null || true)
+  else
+    fail "stage workspace creation: $CREATED"
+  fi
+fi
 
 echo
 echo "$PASS passed, $FAILS failed"

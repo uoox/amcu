@@ -123,3 +123,14 @@ CLI ─unix socket (native-host protocol)─▶ relay (app executable) ◀─TCP
 | `~/Library/Caches/amcu/stage-state.json` | What the host knows, for the next host on the same display (records, held, followed, notes, activity, window shown, tab order and selection). |
 | `~/Library/Caches/amcu/stage-host/amcu.app`, `stage-display/amcu` | The stage app around the host's copy of the binary, and the holder's copy. The app's defaults (`cc.uoox.amcu.stage`) keep the window frame and the tab position. |
 | `~/Library/Logs/amcu/stage.log` | Stage host stderr: start, placement, follow events, stop. |
+
+## Recoverable browser workspaces (0.16)
+
+- `BrowserRegistry.swift`: canonical full extension identity plus verified profile root/directory, private locked atomic JSON, launch history. Labels are selectors, not identities.
+- `BrowserRecovery.swift`: exact identity reconnect and explicit Launch Services launch. No auto-install/login; one launch attempt and bounded discovery wait.
+- `BrowserTaskStore.swift`: schema-versioned one-entry-per-profile task declarations, isolated sessions, progress, safe URL validation and resume leases. Recovery only discovers, binds, explicitly launches or explicitly opens missing pages.
+- `BrowserStage.swift`: unique extension marker → native window proof → stage registration with `follow:false`. Proofs are bound to host/browser identity and discarded across restarts. Never uses `StageTabs` title-order pairing as authority.
+- `BrowserRecoveryCommands.swift`: launch and task CLI, strict flag allowlists, partial-result reporting and privacy notices.
+- Browser `resolveActionTarget` / content `locate`: selector, role and exact-name intersections; one target only. `action-state` reads checked/expanded before/after. `check`/`uncheck` click at most once; locator waits have a single deadline. Chrome evaluate and dialog handling race against dialog events; incomplete values remain incomplete.
+- `window.stage.prepare` owns a separate `amcuStageWindow`, with `stage-window.html/js` marker. `tabs.create` validates stage ownership and geometry before using it. Safari explicitly refuses this capability.
+- `Tests/node/browser-contract.test.cjs` runs in CI and release gates; live browser fixtures remain opt-in.

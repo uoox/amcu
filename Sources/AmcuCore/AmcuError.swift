@@ -8,6 +8,7 @@ public struct AmcuError: Error, CustomStringConvertible {
         case appNotFound = "app_not_found"
         case windowNotFound = "window_not_found"
         case elementNotFound = "element_not_found"
+        case ambiguousElement = "ambiguous_element"
         case staleSnapshot = "stale_snapshot"
         case permissionDenied = "permission_denied"
         case unsupported = "unsupported"

@@ -1020,6 +1020,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                   rect.width >= 40, rect.height >= 40,
                   (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
                   StageGeometry.isOnStage(rect, stage: stageBounds), !Stage.isAmcu(pid) else { continue }
+            // Mission Control's shields, space bars and app icons are not
+            // application windows. Listing them creates phantom stage tabs.
+            let ownerBundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+            guard ownerBundle != "com.apple.WindowManager", ownerBundle != "com.apple.dock" else { continue }
             let record = records[id]
             let saved = record == nil ? unresolved.first { $0.windowID == id } : nil
             let title = (entry[kCGWindowName as String] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? record?.title ?? saved?.title

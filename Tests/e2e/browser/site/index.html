@@ -57,6 +57,13 @@
     </div>
     <button id="appear-btn">Appear</button>
     <button id="noop-btn">Noop</button>
+    <div role="switch" id="aria-switch" aria-label="Power" aria-checked="false" onclick="this.setAttribute('aria-checked', String(this.getAttribute('aria-checked') !== 'true'))">Power</div>
+    <div role="checkbox" id="missing-state" aria-label="Missing state">Missing state</div>
+    <div role="checkbox" id="mixed-state" aria-label="Mixed state" aria-checked="mixed">Mixed state</div>
+    <input type="checkbox" id="cancel-check" aria-label="Cancelled" onclick="event.preventDefault(); window.cancelClicks=(window.cancelClicks||0)+1">
+    <button id="expand-control" aria-expanded="false" onclick="this.setAttribute('aria-expanded', String(this.getAttribute('aria-expanded') !== 'true'))">Expand control</button>
+    <button class="ambiguous">Duplicate target</button><button class="ambiguous" style="display:none">Duplicate target</button>
+    <div id="locator-shadow"></div>
     <input id="zip" aria-label="Zip" maxlength="5" pattern="[0-9]{5}" inputmode="numeric">
     <p id="ghost" style="opacity:0">ghost opacity text</p>
     <p id="tiny" style="font-size:1px">tiny font text</p>
@@ -80,6 +87,8 @@
 </main>
 <footer><p>Footer text</p></footer>
 <script>
+  const locatorShadow = document.getElementById('locator-shadow').attachShadow({mode:'open'});
+  locatorShadow.innerHTML = '<button aria-label="Shadow target">Shadow target</button>';
   function log(m) { const d = document.createElement('div'); d.textContent = m; document.getElementById('log').appendChild(d); console.log('LOG: ' + m); }
   console.warn('early warning');
   console.log('page loaded');

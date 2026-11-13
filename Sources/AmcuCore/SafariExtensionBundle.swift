@@ -6,7 +6,7 @@
 import Foundation
 
 public enum SafariExtensionBundle {
-    public static let version = "0.15.0"
+    public static let version = "0.16.0"
     public static let sharedWithChrome = ["content.js", "icon16.png", "icon48.png", "icon128.png"]
 
     public static let files: [ExtensionBundle.File] = [
@@ -668,7 +668,81 @@ const WINDOW_REFUSAL = [
   'To watch one: `amcu browser tab --select ID --activate --browser safari` (a visible change).'
 ];
 
+async function resolveActionTarget(tabId, params, deadline = Date.now() + 10000, optional = false) {
+  const locator = ['selector', 'role', 'name'].some(key => params[key] !== undefined);
+  if (params.ref && locator) throw new BridgeError('invalid_argument', 'ref and locator are mutually exclusive');
+  if (params.ref) {
+    const parsed = parseRef(params.ref);
+    if (params.frame !== undefined && params.frame !== parsed.frameId) throw new BridgeError('invalid_argument', '--frame conflicts with ref frame');
+    return { ...parsed, ref: params.ref };
+  }
+  if (!locator) throw new BridgeError('invalid_argument', 'provide ref or selector/role/exact name');
+  const frames = params.frame !== undefined ? [{ frameId: params.frame }] : await listFrames(tabId);
+  const matches = [];
+  for (const frame of frames) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new BridgeError('timeout', 'locator deadline expired');
+    // Read errors are not absence, including for hidden/detached waits.
+    const result = await callFrame(tabId, frame.frameId, 'locator-matches', params, remaining);
+    for (const match of result.matches) matches.push({ ...match, frameId: frame.frameId, local: match.ref,
+      ref: frame.frameId ? `f${frame.frameId}${match.ref}` : match.ref });
+    if (matches.length > 1) throw new BridgeError('ambiguous_element', 'locator matches more than one element; narrow selector/role/name or frame');
+  }
+  if (!matches.length && !optional) throw new BridgeError('element_not_found', 'locator matched no element');
+  return matches[0] || null;
+}
+
+async function readActionState(tabId, target, params = {}) {
+  return callFrame(tabId, target.frameId, 'action-state', { ref: target.local, ...params });
+}
+
+async function verifyClick(tabId, target, before, after) {
+  if (after.dialog || after.navigated || after.closed) return { before, after: null, verified: false,
+    verification: 'unverified', reason: 'target state unavailable after dialog/navigation/close' };
+  try {
+    const current = await readActionState(tabId, target);
+    const keys = ['checked', 'expanded'].filter(key => before[key] !== null);
+    return { before, after: current, verified: keys.length > 0,
+      verification: keys.length ? 'state-readback' : 'dispatch-only',
+      changed: keys.length ? keys.some(key => before[key] !== current[key]) : null };
+  } catch (error) {
+    return { before, after: null, verified: false, verification: 'unverified', reason: error.message };
+  }
+}
+
+async function setChecked(params, desired) {
+  if (params.force || params.count !== undefined || params.button !== undefined || (params.modifiers || []).length) throw new BridgeError('invalid_argument', 'check/uncheck require one ordinary click (no force/count/button/modifiers)');
+  const tab = await resolveTab(params, { acting: true });
+  const target = await resolveActionTarget(tab.id, params);
+  const before = await readActionState(tab.id, target, { prepare: true, desired });
+  if (before.checked === String(desired)) return { tab: tabSummary(tab), ref: target.ref, description: before.description,
+    changed: false, verified: true, verification: 'state-readback', state: { before, after: before }, after: { navigated: false } };
+  // Bind once. Never re-run the locator after any input has been dispatched.
+  const result = await handlers.click({ ...params, selector: undefined, role: undefined, name: undefined, frame: undefined, ref: target.ref });
+  const current = result.state && result.state.after;
+  return { ...result, changed: current ? current.checked !== before.checked : null,
+    verified: !!current && current.checked === String(desired),
+    verification: current && current.checked === String(desired) ? 'state-readback' : 'unverified',
+    expected: String(desired), actual: current ? current.checked : null };
+}
+
+async function waitForElement(tab, params, deadline) {
+  const states = ['visible', 'hidden', 'attached', 'detached', 'enabled', 'disabled', 'checked', 'unchecked', 'expanded', 'collapsed'];
+  const wanted = params.state || 'visible';
+  if (!states.includes(wanted)) throw new BridgeError('invalid_argument', 'invalid element wait state');
+  const target = await resolveActionTarget(tab.id, params, deadline, true);
+  if (!target) return ['hidden', 'detached'].includes(wanted) ? { waited: wanted } : null;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new BridgeError('timeout', 'wait deadline expired');
+  const state = await callFrame(tab.id, target.frameId, 'action-state', { ref: target.local }, remaining);
+  const satisfied = { visible: state.visible, hidden: !state.visible, attached: true, detached: false,
+    enabled: state.enabled, disabled: !state.enabled, checked: state.checked === 'true', unchecked: state.checked === 'false',
+    expanded: state.expanded === 'true', collapsed: state.expanded === 'false' };
+  return satisfied[wanted] ? { waited: wanted, ref: target.ref, state } : null;
+}
+
 const handlers = {
+  async 'window.stage.prepare'() { throw new BridgeError('unsupported', 'Safari does not support stage browser windows'); },
   async hello() {
     return { version: VERSION, extensionId: api.runtime.id };
   },
@@ -710,6 +784,7 @@ const handlers = {
   },
 
   async 'tabs.create'(params) {
+    if (params.stage || params.stageBounds || params.stageWindowId !== undefined) throw new BridgeError('unsupported', 'Safari does not support stage browser windows');
     const session = params.session || 'default';
     const create = { url: params.url || 'about:blank', active: !!params.activate };
     const [front] = await api.tabs.query({ active: true, currentWindow: true });
@@ -866,9 +941,15 @@ const handlers = {
     return { tab: tabSummary(tab), matches, total, gen };
   },
 
+  async check(params) { return setChecked(params, true); },
+  async uncheck(params) { return setChecked(params, false); },
+
   async click(params) {
     const tab = await resolveTab(params, { acting: true });
     const before = { url: tab.url };
+    const resolved = await resolveActionTarget(tab.id, params);
+    params = { ...params, ref: resolved.ref };
+    const stateBefore = await readActionState(tab.id, resolved, { prepare: true });
     const { frameId, local } = parseRef(params.ref);
     const measured = await callFrame(tab.id, frameId, 'measure', { ref: local });
     const description = frameId === 0 ? measured.description : String(measured.description || '').replace(/\[ref=e(\d+)\]/g, `[ref=f${frameId}e$1]`);
@@ -893,7 +974,9 @@ const handlers = {
     if (effect) after.effect = effect;
     const opened = await openedTabSince(tab.id, startedAt, params);
     if (opened) after.openedTab = opened;
+    const state = await verifyClick(tab.id, resolved, stateBefore, after);
     return {
+      state, verified: state.verified, verification: state.verification,
       tab: tabSummary(tab),
       ref: params.ref,
       description,
@@ -1147,11 +1230,13 @@ const handlers = {
     const tab = await resolveTab(params);
     const timeoutMs = params.timeoutMs || 30000;
     const started = Date.now();
+    const deadline = started + timeoutMs;
     if (params.time) {
       await sleep(Math.min(params.time * 1000, timeoutMs));
       return { tab: tabSummary(await getTab(tab.id) || tab), waited: 'time', seconds: params.time };
     }
     const check = async () => {
+      if (['selector', 'role', 'name'].some(key => params[key] !== undefined)) return waitForElement(tab, params, deadline);
       const live = await getTab(tab.id);
       if (!live) throw new BridgeError('tab_not_found', 'the tab closed while waiting');
       if (params.load) return live.status === 'complete' ? { waited: 'load' } : null;
@@ -1167,9 +1252,9 @@ const handlers = {
         let found = false;
         for (const frame of await listFrames(tab.id)) {
           try {
-            const page = await callFrame(tab.id, frame.frameId, 'page-text', {}, 3000);
+            const page = await callFrame(tab.id, frame.frameId, 'page-text', {}, Math.max(1, deadline - Date.now()));
             if (page.text && page.text.includes(params.text || params.textGone)) { found = true; break; }
-          } catch (_) { /* frame not scriptable */ }
+          } catch (error) { if (params.textGone) throw error; }
         }
         if (params.text) return found ? { waited: 'text' } : null;
         return found ? null : { waited: 'text-gone' };
@@ -1187,7 +1272,7 @@ const handlers = {
           'Raise the limit with --timeout SECONDS if the page is legitimately slow.'
         ]);
       }
-      await sleep(attempt < delays.length ? delays[attempt] : 1000);
+      await sleep(Math.max(0, Math.min(deadline - Date.now(), attempt < delays.length ? delays[attempt] : 1000)));
       attempt += 1;
     }
   },
@@ -1274,7 +1359,7 @@ async function cropImage(dataUrl, rect, viewport, format, quality) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Lets the amcu command-line tool read and drive Safari tabs. Talks only to the amcu relay on this Mac, through the app that carries the extension.",
   "permissions": [
     "nativeMessaging",

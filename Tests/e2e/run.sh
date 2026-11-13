@@ -2,8 +2,8 @@
 # End-to-end verification against live AppKit windows.
 #
 # Opt-in (AMCU_E2E=1) because everything here needs what CI does not have: a
-# logged-in window server session, Accessibility permission for this shell's
-# responsible process, and Automation permission for System Events. These
+# logged-in window server session and Accessibility permission for this shell's
+# responsible process. These
 # scenarios exist because they caught real bugs no unit test could — viewport
 # culling against the wrong reference frame, ScreenCaptureKit aborting the
 # process when no window server is reachable.
@@ -13,7 +13,7 @@ set -u
 
 if [ "${AMCU_E2E:-}" != "1" ]; then
     echo "skipped: end-to-end tests need a logged-in UI session with Accessibility and"
-    echo "Automation permissions; set AMCU_E2E=1 to opt in."
+    echo "screen recording permissions; set AMCU_E2E=1 to opt in."
     exit 0
 fi
 
@@ -89,7 +89,7 @@ launch_probe() { # binary-name [stdout-log] -> sets PROBE_PID, waits for its win
 }
 
 frontmost() {
-    osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'
+    "$AMCU" apps --json | python3 -c 'import json,sys; print(next((a["name"] for a in json.load(sys.stdin)["apps"] if a["active"]), "unknown"))'
 }
 
 echo "== building amcu and probes =="

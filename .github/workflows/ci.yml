@@ -32,4 +32,6 @@ jobs:
       - name: Check extension
         run: |
           for f in extension/*.js safari/extension/*.js; do node --check "$f"; done
+          node --test Tests/node/*.test.cjs
+          bash -n Tests/e2e/browser/run.sh
           python3 Scripts/embed-extension.py && git diff --exit-code -- Sources/AmcuCore/ExtensionBundle.swift Sources/AmcuCore/SafariExtensionBundle.swift

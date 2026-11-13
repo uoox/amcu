@@ -1645,7 +1645,137 @@ function wordPresent(word, haystack) {
   return haystack.includes(word);
 }
 
+async function resolveActionTarget(tabId, params, deadline = Date.now() + 10000, optional = false) {
+  const locator = ['selector', 'role', 'name'].some(key => params[key] !== undefined);
+  if (params.ref && locator) throw new BridgeError('invalid_argument', 'ref and locator are mutually exclusive');
+  if (params.ref) {
+    const parsed = parseRef(params.ref);
+    if (params.frame !== undefined && params.frame !== parsed.frameId) throw new BridgeError('invalid_argument', '--frame conflicts with ref frame');
+    return { ...parsed, ref: params.ref };
+  }
+  if (!locator) throw new BridgeError('invalid_argument', 'provide ref or selector/role/exact name');
+  const frames = params.frame !== undefined ? [{ frameId: params.frame }] : await listFrames(tabId);
+  const matches = [];
+  for (const frame of frames) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new BridgeError('timeout', 'locator deadline expired');
+    // Read errors are not absence, including for hidden/detached waits.
+    const result = await callFrame(tabId, frame.frameId, 'locator-matches', params, remaining);
+    for (const match of result.matches) matches.push({ ...match, frameId: frame.frameId, local: match.ref,
+      ref: frame.frameId ? `f${frame.frameId}${match.ref}` : match.ref });
+    if (matches.length > 1) throw new BridgeError('ambiguous_element', 'locator matches more than one element; narrow selector/role/name or frame');
+  }
+  if (!matches.length && !optional) throw new BridgeError('element_not_found', 'locator matched no element');
+  return matches[0] || null;
+}
+
+async function readActionState(tabId, target, params = {}) {
+  return callFrame(tabId, target.frameId, 'action-state', { ref: target.local, ...params });
+}
+
+async function verifyClick(tabId, target, before, after) {
+  if (after.dialog || after.navigated || after.closed) return { before, after: null, verified: false,
+    verification: 'unverified', reason: 'target state unavailable after dialog/navigation/close' };
+  try {
+    const current = await readActionState(tabId, target);
+    const keys = ['checked', 'expanded'].filter(key => before[key] !== null);
+    return { before, after: current, verified: keys.length > 0,
+      verification: keys.length ? 'state-readback' : 'dispatch-only',
+      changed: keys.length ? keys.some(key => before[key] !== current[key]) : null };
+  } catch (error) {
+    return { before, after: null, verified: false, verification: 'unverified', reason: error.message };
+  }
+}
+
+async function setChecked(params, desired) {
+  if (params.force || params.count !== undefined || params.button !== undefined || (params.modifiers || []).length) throw new BridgeError('invalid_argument', 'check/uncheck require one ordinary click (no force/count/button/modifiers)');
+  const tab = await resolveTab(params, { acting: true });
+  const target = await resolveActionTarget(tab.id, params);
+  const before = await readActionState(tab.id, target, { prepare: true, desired });
+  if (before.checked === String(desired)) return { tab: tabSummary(tab), ref: target.ref, description: before.description,
+    changed: false, verified: true, verification: 'state-readback', state: { before, after: before }, after: { navigated: false } };
+  // Bind once. Never re-run the locator after any input has been dispatched.
+  const result = await handlers.click({ ...params, selector: undefined, role: undefined, name: undefined, frame: undefined, ref: target.ref });
+  const current = result.state && result.state.after;
+  return { ...result, changed: current ? current.checked !== before.checked : null,
+    verified: !!current && current.checked === String(desired),
+    verification: current && current.checked === String(desired) ? 'state-readback' : 'unverified',
+    expected: String(desired), actual: current ? current.checked : null };
+}
+
+async function waitForElement(tab, params, deadline) {
+  const states = ['visible', 'hidden', 'attached', 'detached', 'enabled', 'disabled', 'checked', 'unchecked', 'expanded', 'collapsed'];
+  const wanted = params.state || 'visible';
+  if (!states.includes(wanted)) throw new BridgeError('invalid_argument', 'invalid element wait state');
+  const target = await resolveActionTarget(tab.id, params, deadline, true);
+  if (!target) return ['hidden', 'detached'].includes(wanted) ? { waited: wanted } : null;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new BridgeError('timeout', 'wait deadline expired');
+  const state = await callFrame(tab.id, target.frameId, 'action-state', { ref: target.local }, remaining);
+  const satisfied = { visible: state.visible, hidden: !state.visible, attached: true, detached: false,
+    enabled: state.enabled, disabled: !state.enabled, checked: state.checked === 'true', unchecked: state.checked === 'false',
+    expanded: state.expanded === 'true', collapsed: state.expanded === 'false' };
+  return satisfied[wanted] ? { waited: wanted, ref: target.ref, state } : null;
+}
+
+function stageBounds(params) {
+  if (params.activate || params.userWindow) throw new BridgeError('invalid_argument', 'stage refuses activate and userWindow');
+  const bounds = params.stageBounds;
+  if (!bounds || !['left', 'top', 'width', 'height'].every(key => Number.isInteger(bounds[key])) || bounds.width <= 0 || bounds.height <= 0) throw new BridgeError('invalid_argument', 'stageBounds requires integer left/top and positive width/height');
+  return bounds;
+}
+
+function overlapsStage(window, bounds) {
+  const width = Math.max(0, Math.min(window.left + window.width, bounds.left + bounds.width) - Math.max(window.left, bounds.left));
+  const height = Math.max(0, Math.min(window.top + window.height, bounds.top + bounds.height) - Math.max(window.top, bounds.top));
+  return window.state !== 'minimized' && width * height / (window.width * window.height) >= 0.5;
+}
+
+async function registeredStageWindow(params) {
+  const bounds = stageBounds(params);
+  const saved = await chrome.storage.local.get('amcuStageWindow');
+  const record = saved.amcuStageWindow;
+  if (!record || params.stageWindowId !== record.windowId) throw new BridgeError('invalid_argument', 'stageWindowId is not this profile\'s registered stage window; call window.stage.prepare first');
+  let window;
+  try { window = await chrome.windows.get(record.windowId); } catch (_) { throw new BridgeError('window_not_found', 'registered stage window closed; prepare again'); }
+  if (!overlapsStage(window, bounds)) throw new BridgeError('invalid_argument', 'registered window is no longer on the requested stage; prepare again');
+  return window;
+}
+
+async function prepareStageWindow(params) {
+  const bounds = stageBounds(params);
+  const saved = (await chrome.storage.local.get('amcuStageWindow')).amcuStageWindow;
+  if (saved) {
+    const window = await chrome.windows.get(saved.windowId).catch(() => null);
+    const marker = await getTab(saved.markerTabId);
+    if (window && marker && marker.windowId === window.id && overlapsStage(window, bounds) && marker.url === chrome.runtime.getURL(`stage-window.html?stageToken=${saved.token}`)) {
+      await chrome.tabs.update(marker.id, { active: true, autoDiscardable: false });
+      return { window, markerTitle: saved.markerTitle, markerTabId: marker.id, token: saved.token, reused: true };
+    }
+  }
+  const token = nonce();
+  const markerTitle = `amcu-stage-${token}`;
+  const window = await chrome.windows.create({ ...bounds, focused: false, state: 'normal', type: 'normal', url: chrome.runtime.getURL(`stage-window.html?stageToken=${token}`) });
+  // macOS can ignore a new window's initial coordinates. The CLI proves
+  // ownership by this unique marker before moving it; never substitute an
+  // existing window. Working tabs are refused until registration lands.
+  const needsPlacement = !overlapsStage(window, bounds);
+  const tabs = window.tabs || await chrome.tabs.query({ windowId: window.id });
+  const markerTabId = tabs[0]?.id;
+  if (!markerTabId) throw new BridgeError('page_error', 'stage marker tab was not created');
+  await chrome.tabs.update(markerTabId, { autoDiscardable: false }).catch(() => {});
+  await chrome.storage.local.set({ amcuStageWindow: { windowId: window.id, markerTabId, markerTitle, token } });
+  // Title is the unique AX/CGWindow pairing key. Never fall back to tab order.
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if ((await getTab(markerTabId))?.title === markerTitle) return { window, markerTitle, markerTabId, token, reused: false, needsPlacement };
+    await sleep(50);
+  }
+  throw new BridgeError('timeout', 'stage marker title did not become readable; no working tab was created');
+}
+
 const handlers = {
+  async 'window.stage.prepare'(params) { return prepareStageWindow(params); },
   async hello() {
     await loadIdentity();
     return identityInfo();
@@ -1673,7 +1803,7 @@ const handlers = {
     return identityInfo();
   },
 
-  async status(params) {
+  async status() {
     const tabs = await chrome.tabs.query({});
     const sessions = {};
     const stored = await chrome.storage.session.get(null);
@@ -1760,9 +1890,14 @@ const handlers = {
   },
 
   async 'tabs.create'(params) {
+    if (params.stage && !params.stageWindowId) throw new BridgeError('invalid_argument', 'stage requires window.stage.prepare and registration before tabs.create');
     const session = params.session || 'default';
     const create = { url: params.url || 'about:blank' };
-    if (params.userWindow) {
+    if (params.stageBounds || params.stageWindowId !== undefined) {
+      const window = await registeredStageWindow(params);
+      create.windowId = window.id;
+      create.active = true;
+    } else if (params.userWindow) {
       // Explicitly asked for the user's window — the old behaviour.
       create.active = !!params.activate;
     } else {
@@ -1954,10 +2089,16 @@ const handlers = {
     return { tab: tabSummary(tab), matches, total, gen };
   },
 
+  async check(params) { return setChecked(params, true); },
+  async uncheck(params) { return setChecked(params, false); },
+
   async click(params) {
     const tab = await resolveTab(params, { acting: true });
     requireNoDialog(tab.id);
     const before = { url: tab.url };
+    const resolved = await resolveActionTarget(tab.id, params);
+    params = { ...params, ref: resolved.ref };
+    const stateBefore = await readActionState(tab.id, resolved, { prepare: true });
     await ensureAttached(tab.id);
     const target = await locate(tab.id, params.ref);
     if (target.hit === 'obscured' && !params.force) {
@@ -1987,7 +2128,9 @@ const handlers = {
     if (effect) after.effect = effect;
     const opened = await openedTabSince(tab.id, startedAt, params);
     if (opened) after.openedTab = opened;
+    const state = await verifyClick(tab.id, resolved, stateBefore, after);
     return {
+      state, verified: state.verified, verification: state.verification,
       tab: tabSummary(tab),
       ref: params.ref,
       description: target.description,
@@ -2293,11 +2436,14 @@ const handlers = {
       const run = async expression => {
         const evalParams = { expression, returnByValue: true, awaitPromise: true, userGesture: true, generatePreview: false };
         if (contextId) evalParams.contextId = contextId;
-        return cdp(tab.id, 'Runtime.evaluate', evalParams, params.timeoutMs || 30000);
+        const outcome = await cdpInput(tab.id, 'Runtime.evaluate', evalParams, params.timeoutMs || 30000);
+        return outcome.dialog ? { blockedDialog: outcome.dialog } : outcome.result;
       };
       let result = await run(asExpression);
+      if (result.blockedDialog) return { tab: tabSummary(tab), completed: false, verification: 'unverified', after: { dialog: result.blockedDialog }, reason: 'evaluation is suspended by a dialog; no value is available' };
       if (result.exceptionDetails && /SyntaxError/.test(formatRemoteObject(result.exceptionDetails.exception) || result.exceptionDetails.text || '')) {
         result = await run(asBody);
+        if (result.blockedDialog) return { tab: tabSummary(tab), completed: false, verification: 'unverified', after: { dialog: result.blockedDialog }, reason: 'evaluation is suspended by a dialog; no value is available' };
       }
       if (result.exceptionDetails) {
         const details = result.exceptionDetails;
@@ -2307,9 +2453,10 @@ const handlers = {
         ]);
       }
       const value = result.result;
-      return { tab: tabSummary(tab), value: value.value !== undefined ? value.value : (value.unserializableValue || value.description || null), type: value.type };
+      return { tab: tabSummary(tab), completed: true, value: value.value !== undefined ? value.value : (value.unserializableValue || value.description || null), type: value.type };
     } finally {
-      if (cleanup) await cleanup();
+      // Cleanup uses the blocked renderer too: do not hold the CLI behind it.
+      if (cleanup) cleanup();
     }
   },
 
@@ -2317,11 +2464,13 @@ const handlers = {
     const tab = await resolveTab(params);
     const timeoutMs = params.timeoutMs || 30000;
     const started = Date.now();
+    const deadline = started + timeoutMs;
     if (params.time) {
       await sleep(Math.min(params.time * 1000, timeoutMs));
       return { tab: tabSummary(await getTab(tab.id) || tab), waited: 'time', seconds: params.time };
     }
     const check = async () => {
+      if (['selector', 'role', 'name'].some(key => params[key] !== undefined)) return waitForElement(tab, params, deadline);
       const live = await getTab(tab.id);
       if (!live) throw new BridgeError('tab_not_found', 'the tab closed while waiting');
       if (params.load) return live.status === 'complete' ? { waited: 'load' } : null;
@@ -2340,9 +2489,9 @@ const handlers = {
         let found = false;
         for (const frame of frames) {
           try {
-            const page = await callFrame(tab.id, frame.frameId, 'page-text', {}, 3000);
+            const page = await callFrame(tab.id, frame.frameId, 'page-text', {}, Math.max(1, deadline - Date.now()));
             if (page.text && page.text.includes(params.text || params.textGone)) { found = true; break; }
-          } catch (_) { /* frame not scriptable */ }
+          } catch (error) { if (params.textGone) throw error; }
         }
         if (params.text) return found ? { waited: 'text' } : null;
         return found ? null : { waited: 'text-gone' };
@@ -2361,7 +2510,7 @@ const handlers = {
           'Raise the limit with --timeout SECONDS if the page is legitimately slow.'
         ]);
       }
-      await sleep(attempt < delays.length ? delays[attempt] : 1000);
+      await sleep(Math.max(0, Math.min(deadline - Date.now(), attempt < delays.length ? delays[attempt] : 1000)));
       attempt += 1;
     }
   },
@@ -2413,8 +2562,11 @@ const handlers = {
       if (/No dialog is showing/i.test(bridge.message)) return { tab: tabSummary(tab), dialog: null, handled: false };
       throw bridge;
     }
-    entry.dialog = null;
-    return { tab: tabSummary(tab), dialog, handled: true, accepted: accept };
+    // DialogClosed owns clearing; clearing here can erase the next alert
+    // opened synchronously while handleJavaScriptDialog is completing.
+    await sleep(100);
+    const after = entry.dialog ? { dialog: entry.dialog } : await settle(tab.id, { url: tab.url }, 1500);
+    return { tab: tabSummary(tab), dialog, handled: true, accepted: accept, after };
   },
 
   async upload(params) {
