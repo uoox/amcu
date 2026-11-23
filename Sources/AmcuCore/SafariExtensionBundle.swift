@@ -6,7 +6,7 @@
 import Foundation
 
 public enum SafariExtensionBundle {
-    public static let version = "0.16.0"
+    public static let version = "0.17.0"
     public static let sharedWithChrome = ["content.js", "icon16.png", "icon48.png", "icon128.png"]
 
     public static let files: [ExtensionBundle.File] = [
@@ -234,10 +234,40 @@ api.tabs.onUpdated.addListener(() => pollLoop());
 api.tabs.onActivated.addListener(() => pollLoop());
 api.runtime.onStartup.addListener(() => pollLoop());
 api.runtime.onInstalled.addListener(() => pollLoop());
+async function stageCurrentWindow(windowId) {
+  const win = windowId !== undefined && windowId !== null
+    ? await api.windows.get(windowId, { populate: true }).catch(() => null)
+    : await api.windows.getCurrent({ populate: true }).catch(() => null);
+  if (!win || win.type !== 'normal') {
+    return { ok: false, error: { code: 'window_not_found', message: 'current window cannot be moved to the stage' } };
+  }
+  if (win.state === 'fullscreen') {
+    return { ok: false, error: { code: 'unsupported', message: 'exit full screen before moving this window to the stage' } };
+  }
+  const activeTab = (win.tabs || []).find(t => t.active) || (win.tabs || [])[0] || null;
+  return api.runtime.sendNativeMessage(APP_ID, {
+    type: 'stage.putWindow',
+    params: {
+      window: { left: win.left, top: win.top, width: win.width, height: win.height },
+      state: win.state,
+      focused: !!win.focused,
+      title: activeTab && activeTab.title ? activeTab.title : '',
+      url: activeTab && activeTab.url ? activeTab.url : ''
+    }
+  });
+}
+
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.__amcuPopup) {
     pollLoop();
     sendResponse({ status, recentErrors, hostAccess });
+    return false;
+  }
+  if (message && message.__amcuStageCurrent) {
+    stageCurrentWindow(message.windowId)
+      .then(reply => sendResponse(reply))
+      .catch(error => sendResponse({ ok: false, error: asBridgeError(error).toJSON() }));
+    return true;
   }
   return false;
 });
@@ -813,6 +843,20 @@ const handlers = {
     return { closed: tabSummary(tab) };
   },
 
+  async 'stage.tab.activate'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    await api.tabs.update(tab.id, { active: true });
+    return { tab: tabSummary(await getTab(tab.id) || tab) };
+  },
+
+  async 'stage.tab.close'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    await api.tabs.remove(tab.id);
+    return { closed: tabSummary(tab) };
+  },
+
   async navigate(params) {
     const tab = await resolveTab(params, { acting: true });
     if (!params.url) throw new BridgeError('invalid_argument', '--url is required');
@@ -1359,7 +1403,7 @@ async function cropImage(dataUrl, rect, viewport, format, quality) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Lets the amcu command-line tool read and drive Safari tabs. Talks only to the amcu relay on this Mac, through the app that carries the extension.",
   "permissions": [
     "nativeMessaging",
@@ -1392,6 +1436,10 @@ async function cropImage(dataUrl, rect, viewport, format, quality) {
   .ok { color: #1a7f37; } .bad { color: #b42318; }
   code { font: 12px ui-monospace, Menlo, monospace; background: #f3f3f3; padding: 1px 4px; border-radius: 3px; }
   p { margin: 8px 0 0; color: #555; }
+  button { margin-top: 10px; font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid #d14e1f; background: #e85d2a; color: #fff; font-weight: 500; cursor: pointer; }
+  button:disabled { opacity: 0.55; cursor: default; }
+  #stage-status { margin-top: 6px; font-size: 12px; }
+  #stage-status:empty { display: none; }
   @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } code { background: #333; } p { color: #aaa; } .ok { color: #4caf50; } .bad { color: #ff6b6b; } }
 </style>
 </head>
@@ -1401,6 +1449,8 @@ async function cropImage(dataUrl, rect, viewport, format, quality) {
 <div class="row"><span>website access</span><span id="access">…</span></div>
 <div class="row"><span>requests served</span><span id="requests">0</span></div>
 <p id="hint"></p>
+<button id="stage">收入舞台</button>
+<p id="stage-status"></p>
 <script src="popup.js"></script>
 </body>
 </html>
@@ -1411,6 +1461,12 @@ async function cropImage(dataUrl, rect, viewport, format, quality) {
 // the extension has website access; opening it also wakes the poll loop.
 
 const api = globalThis.browser || globalThis.chrome;
+const zh = /^zh/i.test(api.i18n && api.i18n.getUILanguage ? api.i18n.getUILanguage() : '')
+  || (navigator.languages || [navigator.language || '']).some(l => /^zh/i.test(l));
+const tr = (en, cn) => (zh ? cn : en);
+const stageButton = document.getElementById('stage');
+const stageStatus = document.getElementById('stage-status');
+stageButton.textContent = tr('Move to Stage', '收入舞台');
 
 async function refresh() {
   document.getElementById('version').textContent = 'v' + api.runtime.getManifest().version;
@@ -1436,6 +1492,31 @@ async function refresh() {
   access.className = reply && reply.hostAccess === true ? 'ok' : 'bad';
   document.getElementById('requests').textContent = status && status.requests ? String(status.requests) : '0';
 }
+
+stageButton.addEventListener('click', async () => {
+  stageButton.disabled = true;
+  stageButton.textContent = tr('Moving…', '收入中…');
+  stageStatus.textContent = '';
+  stageStatus.className = '';
+  try {
+    const win = await api.windows.getCurrent();
+    const reply = await api.runtime.sendMessage({ __amcuStageCurrent: true, windowId: win ? win.id : null });
+    if (reply && reply.ok) {
+      stageStatus.textContent = reply.result && reply.result.alreadyOnStage ? tr('Already on the stage.', '已在舞台上。') : tr('Moved to the stage.', '已收入舞台。');
+      stageStatus.className = 'ok';
+      setTimeout(() => window.close(), 350);
+      return;
+    }
+    stageStatus.textContent = (reply && reply.error && reply.error.message) || (reply && reply.message) || tr('Could not move this window to the stage.', '收入舞台失败。');
+    stageStatus.className = 'bad';
+  } catch (error) {
+    stageStatus.textContent = String(error && error.message || error);
+    stageStatus.className = 'bad';
+  } finally {
+    stageButton.disabled = false;
+    stageButton.textContent = tr('Move to Stage', '收入舞台');
+  }
+});
 
 refresh();
 setInterval(refresh, 2000);

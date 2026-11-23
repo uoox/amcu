@@ -130,4 +130,15 @@ public enum StageGeometry {
               (640...8192).contains(width), (480...8192).contains(height) else { return nil }
         return CGSize(width: width, height: height)
     }
+
+    /// Default virtual display logical size: follows the main display up to
+    /// `maxSize` (default 1920×1080) so 5K/ultrawide screens do not allocate an
+    /// unnecessarily large offscreen framebuffer.
+    public static func defaultStageSize(main: CGSize, maxSize: CGSize?) -> CGSize {
+        let maxW = maxSize?.width ?? main.width
+        let maxH = maxSize?.height ?? main.height
+        let width = max(640, min(main.width, maxW)).rounded()
+        let height = max(480, min(main.height, maxH)).rounded()
+        return CGSize(width: width, height: height)
+    }
 }

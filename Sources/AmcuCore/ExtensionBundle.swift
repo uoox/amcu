@@ -6,7 +6,7 @@
 import Foundation
 
 public enum ExtensionBundle {
-    public static let version = "0.16.0"
+    public static let version = "0.17.0"
     public static let id = "cgpbockoghamineoofoonidkickapbok"
     public static let name = "amcu bridge"
 
@@ -703,17 +703,22 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   activeHistory.set(windowId, [tabId].concat(list.filter(id => id !== tabId)).slice(0, 8));
 });
 
-function callHost(method, params, timeoutMs = 5000) {
-  if (!port) return Promise.resolve(null);
+function callHostRaw(method, params, timeoutMs = 5000) {
+  if (!port) return Promise.resolve({ ok: false, error: { code: 'bridge_unavailable', message: 'native host is not connected' } });
   const id = ++hostCallSeq;
   return new Promise(resolve => {
     const timer = setTimeout(() => {
       hostCalls.delete(id);
-      resolve(null);
+      resolve({ ok: false, error: { code: 'timeout', message: 'the amcu host did not answer in time' } });
     }, timeoutMs);
     hostCalls.set(id, { resolve, timer });
     post({ type: 'call', id, method, params });
   });
+}
+
+async function callHost(method, params, timeoutMs = 5000) {
+  const reply = await callHostRaw(method, params, timeoutMs);
+  return reply && reply.ok ? reply.result : null;
 }
 
 function settleHostCall(message) {
@@ -721,8 +726,42 @@ function settleHostCall(message) {
   if (!pending) return;
   hostCalls.delete(message.id);
   clearTimeout(pending.timer);
-  pending.resolve(message.ok ? message.result : null);
+  pending.resolve({ ok: !!message.ok, result: message.result || null, error: message.error || null });
 }
+
+async function stageCurrentWindow(windowId) {
+  const win = windowId !== undefined && windowId !== null
+    ? await chrome.windows.get(windowId, { populate: true }).catch(() => null)
+    : await chrome.windows.getCurrent({ populate: true }).catch(() => null);
+  if (!win || win.type !== 'normal') {
+    return { ok: false, error: { code: 'window_not_found', message: 'current window cannot be moved to the stage' } };
+  }
+  if (win.state === 'fullscreen') {
+    return { ok: false, error: { code: 'unsupported', message: 'exit full screen before moving this window to the stage' } };
+  }
+  if (!port) {
+    connect();
+    const deadline = Date.now() + 1500;
+    while (!port && Date.now() < deadline) await sleep(50);
+  }
+  const activeTab = (win.tabs || []).find(t => t.active) || (win.tabs || [])[0] || null;
+  return callHostRaw('stage.putWindow', {
+    window: bounds(win),
+    state: win.state,
+    focused: !!win.focused,
+    title: activeTab && activeTab.title ? activeTab.title : '',
+    url: activeTab && activeTab.url ? activeTab.url : '',
+    profile: identity ? identity.label : null
+  }, 10000);
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || !message.__amcuStageCurrent) return false;
+  stageCurrentWindow(message.windowId)
+    .then(reply => sendResponse(reply))
+    .catch(error => sendResponse({ ok: false, error: asBridgeError(error).toJSON() }));
+  return true;
+});
 
 async function justStarted() {
   const stored = await chrome.storage.session.get(STARTUP_KEY).catch(() => ({}));
@@ -1959,6 +1998,25 @@ const handlers = {
 
   async 'tabs.close'(params) {
     const tab = await resolveTab(params, { acting: true });
+    await chrome.tabs.remove(tab.id);
+    return { closed: tabSummary(tab) };
+  },
+
+  async 'stage.tab.activate'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    await chrome.tabs.update(tab.id, { active: true });
+    return { tab: tabSummary(await getTab(tab.id) || tab) };
+  },
+
+  async 'stage.tab.close'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    const wins = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+    const owner = wins.find(w => w.id === tab.windowId);
+    if (wins.length <= 1 && owner && (owner.tabs || []).length <= 1) {
+      throw new BridgeError('last_window', 'cannot close the last tab of the profile\'s only window');
+    }
     await chrome.tabs.remove(tab.id);
     return { closed: tabSummary(tab) };
   },
@@ -4659,7 +4717,7 @@ async function executionContextFor(tabId, frameId) {
 {
   "manifest_version": 3,
   "name": "amcu bridge",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Lets the amcu command-line tool read and drive this browser's tabs through Chrome's native messaging — no tokens, no ports, no remote debugging flags.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArmpx4zHfPTZaX0C1oQHsEwRhOJ1PEm8uvGNFqhBJusjvVOX0qrpGG238e6vRfynnw6Ts84Y6HBBf+DIy7ZHtcPal+i47er2WWntRVqDq9tVH+nc+YaASsp8TGhCH3CwOmSjGvdKv5s8VbKeYCJai9y+exmK+2xcmLq8rMLtpb0vfOyta36JH9fZKydCR6fN2oawIY3+swNfPKO5fTogKJotNJgCoo3igslliULHUNTu4mLUwz4gBy39O0h40HJc3o6CNDjmQKU8AWv3W0cupXt8OKSfwx0pVl6e189TGbhyC0nu6G3QgkM4QpYZgGCexar2GvYcR16tJrSdATb3slQIDAQAB",
   "minimum_chrome_version": "116",
@@ -4694,8 +4752,14 @@ async function executionContextFor(tabId, frameId) {
   .ok { color: #1a7f37; } .bad { color: #b42318; }
   code { font: 12px ui-monospace, Menlo, monospace; background: #f3f3f3; padding: 1px 4px; border-radius: 3px; }
   p { margin: 8px 0 0; color: #555; }
-  button { margin-top: 10px; font: inherit; padding: 4px 10px; }
-  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } code { background: #333; } p { color: #aaa; } .ok { color: #4caf50; } .bad { color: #ff6b6b; } }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button { font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid #d0d7de; background: #f6f8fa; color: inherit; cursor: pointer; }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button.primary { background: #e85d2a; border-color: #d14e1f; color: #fff; font-weight: 500; }
+  button.primary:hover:not(:disabled) { background: #d64f1e; }
+  #stage-status { margin-top: 6px; font-size: 12px; min-height: 0; }
+  #stage-status:empty { display: none; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } code { background: #333; } p { color: #aaa; } .ok { color: #4caf50; } .bad { color: #ff6b6b; } button { background: #2d2d2d; border-color: #444; } button.primary { background: #e85d2a; border-color: #e85d2a; color: #fff; } }
 </style>
 </head>
 <body>
@@ -4706,7 +4770,11 @@ async function executionContextFor(tabId, frameId) {
 <div class="row"><span>requests served</span><span id="requests">0</span></div>
 <div class="row"><span>debugger attached to</span><span id="attached">no tabs</span></div>
 <p id="hint"></p>
-<button id="detach">Detach debugger from all tabs</button>
+<div class="actions">
+  <button id="stage" class="primary">收入舞台</button>
+  <button id="detach">Detach debugger</button>
+</div>
+<p id="stage-status"></p>
 <script src="popup.js"></script>
 </body>
 </html>
@@ -4715,6 +4783,14 @@ async function executionContextFor(tabId, frameId) {
         File(name: "popup.js", isBase64: false, content: #"""
 // amcu bridge — popup. Shows whether the native host is connected and lets the
 // user drop debugger attachments (and the infobar that comes with them).
+
+const zh = /^zh/i.test(chrome.i18n && chrome.i18n.getUILanguage ? chrome.i18n.getUILanguage() : '')
+  || (navigator.languages || [navigator.language || '']).some(l => /^zh/i.test(l));
+const tr = (en, cn) => (zh ? cn : en);
+
+const stageButton = document.getElementById('stage');
+const stageStatus = document.getElementById('stage-status');
+stageButton.textContent = tr('Move to Stage', '收入舞台');
 
 async function refresh() {
   document.getElementById('version').textContent = 'v' + chrome.runtime.getManifest().version;
@@ -4754,6 +4830,33 @@ document.getElementById('detach').addEventListener('click', async () => {
     }
   }
   refresh();
+});
+
+stageButton.addEventListener('click', async () => {
+  stageButton.disabled = true;
+  stageButton.textContent = tr('Moving…', '收入中…');
+  stageStatus.textContent = '';
+  stageStatus.className = '';
+  try {
+    const win = await chrome.windows.getCurrent();
+    const reply = await chrome.runtime.sendMessage({ __amcuStageCurrent: true, windowId: win ? win.id : null });
+    if (reply && reply.ok) {
+      const already = reply.result && reply.result.alreadyOnStage;
+      stageStatus.textContent = already ? tr('Already on the stage.', '已在舞台上。') : tr('Moved to the stage.', '已收入舞台。');
+      stageStatus.className = 'ok';
+      setTimeout(() => window.close(), 350);
+      return;
+    }
+    const msg = reply && reply.error && reply.error.message ? reply.error.message : tr('Could not move this window to the stage.', '收入舞台失败。');
+    stageStatus.textContent = msg;
+    stageStatus.className = 'bad';
+  } catch (error) {
+    stageStatus.textContent = String(error && error.message || error);
+    stageStatus.className = 'bad';
+  } finally {
+    stageButton.disabled = false;
+    stageButton.textContent = tr('Move to Stage', '收入舞台');
+  }
 });
 
 refresh();

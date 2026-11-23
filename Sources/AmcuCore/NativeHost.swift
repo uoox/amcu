@@ -103,29 +103,7 @@ final class HostRuntime {
 
         let url = BrowserBridge.socketURL(browser: browser, pid: getpid())
         socketPath = url.path
-        unlink(socketPath)
-
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw AmcuError(.unsupported, "socket() failed: \(String(cString: strerror(errno)))") }
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(socketPath.utf8CString)
-        guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            throw AmcuError(.unsupported, "socket path too long: \(socketPath)")
-        }
-        withUnsafeMutablePointer(to: &address.sun_path) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
-                for (index, byte) in pathBytes.enumerated() { dest[index] = byte }
-            }
-        }
-        let length = socklen_t(MemoryLayout<sockaddr_un>.size)
-        let bound = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, length) }
-        }
-        guard bound == 0 else { throw AmcuError(.unsupported, "bind() failed: \(String(cString: strerror(errno)))") }
-        chmod(socketPath, 0o600)
-        guard listen(fd, 16) == 0 else { throw AmcuError(.unsupported, "listen() failed: \(String(cString: strerror(errno)))") }
-        listenFD = fd
+        listenFD = try RelaySockets.listenUnix(path: socketPath)
         globalSocketPath = strdup(socketPath)
     }
 
@@ -150,8 +128,7 @@ final class HostRuntime {
                 sleep(1)
                 continue
             }
-            var one: Int32 = 1
-            setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            RelaySockets.setNoSigPipe(client)
             let worker = Thread { self.serve(client: client) }
             worker.name = "amcu-host-client"
             worker.start()
@@ -163,18 +140,11 @@ final class HostRuntime {
     private func serve(client fd: Int32) {
         defer { close(fd) }
         var buffer = Data()
-        var chunk = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let count = read(fd, &chunk, chunk.count)
-            if count <= 0 { return }
-            buffer.append(chunk, count: count)
-            while let newline = buffer.firstIndex(of: 0x0A) {
-                let line = buffer.subdata(in: 0..<newline)
-                buffer.removeSubrange(0...newline)
-                guard !line.isEmpty else { continue }
-                let response = handle(clientLine: line)
-                guard writeAll(fd, response + Data([0x0A])) else { return }
-            }
+        while let line = RelaySockets.readLine(fd, buffer: &buffer, timeout: 0) {
+            guard !line.isEmpty else { continue }
+            var response = handle(clientLine: line)
+            response.append(0x0A)
+            guard RelaySockets.writeAll(fd, response) else { return }
         }
     }
 
@@ -235,7 +205,7 @@ final class HostRuntime {
             "extensionVersion": extensionVersion ?? NSNull(),
             "extensionId": extensionID ?? NSNull(),
             "brands": brands,
-            "since": ISO8601DateFormatter().string(from: startedAt),
+            "since": StageClock.iso8601(startedAt),
             "socket": socketPath
         ]
     }
@@ -283,7 +253,7 @@ final class HostRuntime {
         }
         let framed = BrowserBridge.frame(json)
         stdoutLock.lock(); defer { stdoutLock.unlock() }
-        guard writeAll(1, framed) else {
+        guard RelaySockets.writeAll(1, framed) else {
             throw AmcuError(.bridgeUnavailable, "stdout closed")
         }
     }
@@ -342,6 +312,11 @@ final class HostRuntime {
                 case "link.route":
                     reply["ok"] = true
                     reply["result"] = LinkRouting.route(params, ownSocket: self.socketPath, browser: self.browser)
+                case "stage.putWindow":
+                    let outcome = StageClient.putBrowserWindow(pid: getppid(), params: params)
+                    reply["ok"] = outcome["ok"] ?? false
+                    if let result = outcome["result"] { reply["result"] = result }
+                    if let error = outcome["error"] { reply["error"] = error }
                 default:
                     reply["ok"] = false
                     reply["error"] = ["code": "unsupported", "message": "unknown call '\(method)'", "nextSteps": [String]()]
@@ -366,22 +341,6 @@ final class HostRuntime {
 
     private func encode(_ object: [String: Any]) -> Data {
         (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{\"ok\":false}".utf8)
-    }
-
-    private func writeAll(_ fd: Int32, _ data: Data) -> Bool {
-        var offset = 0
-        let bytes = [UInt8](data)
-        while offset < bytes.count {
-            let written = bytes.withUnsafeBufferPointer { pointer -> Int in
-                write(fd, pointer.baseAddress! + offset, bytes.count - offset)
-            }
-            if written < 0 {
-                if errno == EINTR { continue }
-                return false
-            }
-            offset += written
-        }
-        return true
     }
 
     private func log(_ message: String) {

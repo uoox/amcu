@@ -59,7 +59,7 @@ public enum StagePreview {
         let content = StageHostingView(rootView: StageView(model: model, thumbnails: thumbnails))
         let window = StageWindowController(content: content)
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == stage.id }
+        let screen = NSScreen.forDisplay(stage.id)
         let origin = screen.map { NSPoint(x: $0.frame.minX + 40, y: $0.frame.maxY - 60 - size.height) } ?? .zero
         window.setFrame(NSRect(origin: origin, size: size), display: true)
         window.orderFrontRegardless()

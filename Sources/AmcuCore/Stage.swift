@@ -18,8 +18,8 @@ public enum Stage {
 
     public static let identity = VirtualDisplay.Identity(name: "amcu stage", vendorID: 0x616D, productID: 0x6375, serial: environment["AMCU_STAGE_SERIAL"].flatMap(UInt32.init) ?? 1)
 
-    /// An empty stage removes itself after this long.
-    public static let idleExit: TimeInterval = 15 * 60
+    /// Default idle auto-exit duration (seconds); 0 means stay running.
+    public static var idleExit: TimeInterval { Policy.current.stage.idleExit }
 
     static var cacheDirectory: URL {
         if let directory = environment["AMCU_STAGE_DIR"], !directory.isEmpty { return URL(fileURLWithPath: directory, isDirectory: true) }
@@ -166,13 +166,19 @@ public enum Stage {
     }
 
     public static func takenOverError(_ held: StageTakeover, reason: String) -> AmcuError {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
         let window = held.title.map { " (window \"\($0)\")" } ?? ""
-        return AmcuError(.takenOver, "the user took over \(held.app)\(window) from the stage at \(formatter.string(from: held.since)), and handing it back to the stage before acting failed: \(reason)", nextSteps: [
+        return AmcuError(.takenOver, "the user took over \(held.app)\(window) from the stage at \(StageClock.hhmm(held.since)), and handing it back to the stage before acting failed: \(reason)", nextSteps: [
             "Ask the user to press \"hand back\" in the stage window, or wait; `amcu stage status` shows what is still taken over.",
             "Reading still works (snapshot, scan, screenshot)."
         ])
+    }
+
+    static func windowList(_ options: CGWindowListOption) -> [[String: Any]] {
+        CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+    }
+
+    static func existingWindowIDs(from list: [[String: Any]]? = nil) -> Set<CGWindowID> {
+        Set((list ?? windowList([.optionAll])).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
     }
 
     /// Seconds since the user last touched the keyboard, mouse or trackpad.
@@ -365,8 +371,9 @@ public struct StageStatus: Codable, Sendable {
     /// The process that keeps the display, when it is not the host itself.
     public let holderPID: Int32?
     public let asks: [StageAsk]
+    public let keepAlive: Bool
 
-    public init(version: String, hostPID: Int32, displayID: UInt32, bounds: FrameJSON, scale: Int, contact: StageGeometry.Contact, since: Date, answersFor: String?, accessibility: Bool, screenRecording: Bool, cursorPullbacks: Int, windows: [StageWindow], takenOver: [StageTakeover], following: [StageFollow], notes: [String], activity: [StageActivity] = [], holderPID: Int32? = nil, asks: [StageAsk] = []) {
+    public init(version: String, hostPID: Int32, displayID: UInt32, bounds: FrameJSON, scale: Int, contact: StageGeometry.Contact, since: Date, answersFor: String?, accessibility: Bool, screenRecording: Bool, cursorPullbacks: Int, windows: [StageWindow], takenOver: [StageTakeover], following: [StageFollow], notes: [String], activity: [StageActivity] = [], holderPID: Int32? = nil, asks: [StageAsk] = [], keepAlive: Bool = false) {
         self.version = version
         self.hostPID = hostPID
         self.displayID = displayID
@@ -385,6 +392,7 @@ public struct StageStatus: Codable, Sendable {
         self.activity = activity
         self.holderPID = holderPID
         self.asks = asks
+        self.keepAlive = keepAlive
     }
 
     /// A host started by an older amcu keeps running across an upgrade, so
@@ -409,6 +417,7 @@ public struct StageStatus: Codable, Sendable {
         activity = try c.decodeIfPresent([StageActivity].self, forKey: .activity) ?? []
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
         asks = try c.decodeIfPresent([StageAsk].self, forKey: .asks) ?? []
+        keepAlive = try c.decodeIfPresent(Bool.self, forKey: .keepAlive) ?? false
     }
 }
 
@@ -416,6 +425,26 @@ public struct StageReply: Codable, Sendable {
     public let status: StageStatus
     public let moves: [StageMove]
     public var ask: StageAsk? = nil
+
+    public init(status: StageStatus, moves: [StageMove], ask: StageAsk? = nil) {
+        self.status = status
+        self.moves = moves
+        self.ask = ask
+    }
+}
+
+public struct StageBrowserWindowMatch: Codable, Sendable, Equatable {
+    public let bounds: FrameJSON
+    public let title: String?
+    public let url: String?
+    public let focused: Bool
+
+    public init(bounds: FrameJSON, title: String? = nil, url: String? = nil, focused: Bool = true) {
+        self.bounds = bounds
+        self.title = title
+        self.url = url
+        self.focused = focused
+    }
 }
 
 public struct StageParams: Codable, Sendable {
@@ -428,8 +457,11 @@ public struct StageParams: Codable, Sendable {
     public var activity: StageActivity?
     public var text: String?
     public var ask: Int?
+    public var browserWindow: StageBrowserWindowMatch?
+    public var restoreMinimized: Bool?
+    public var keepAlive: Bool?
 
-    public init(pid: Int32? = nil, windowIDs: [UInt32]? = nil, follow: Bool? = nil, activate: Bool? = nil, by: String? = nil, activity: StageActivity? = nil, text: String? = nil, ask: Int? = nil) {
+    public init(pid: Int32? = nil, windowIDs: [UInt32]? = nil, follow: Bool? = nil, activate: Bool? = nil, by: String? = nil, activity: StageActivity? = nil, text: String? = nil, ask: Int? = nil, browserWindow: StageBrowserWindowMatch? = nil, restoreMinimized: Bool? = nil, keepAlive: Bool? = nil) {
         self.pid = pid
         self.windowIDs = windowIDs
         self.follow = follow
@@ -438,6 +470,9 @@ public struct StageParams: Codable, Sendable {
         self.activity = activity
         self.text = text
         self.ask = ask
+        self.browserWindow = browserWindow
+        self.restoreMinimized = restoreMinimized
+        self.keepAlive = keepAlive
     }
 }
 
@@ -495,8 +530,7 @@ public enum StageClient {
             ])
         }
         defer { close(fd) }
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        RelaySockets.setNoSigPipe(fd)
         guard StageWire.writeLine(fd, StageRequest(id: 1, method: method, params: params)) else {
             throw AmcuError(.stageUnavailable, "could not write to the stage host")
         }
@@ -514,14 +548,19 @@ public enum StageClient {
 
     /// Starts the host unless one answers already, and waits for its display.
     /// Returns the host's status and whether this call started it.
-    public static func start(pointSize: CGSize? = nil, scale: Int? = nil, wait: TimeInterval = 15) throws -> (reply: StageReply, started: Bool) {
-        if isRunning() { return (try request("status"), false) }
+    public static func start(pointSize: CGSize? = nil, scale: Int? = nil, keepAlive: Bool? = nil, wait: TimeInterval = 15) throws -> (reply: StageReply, started: Bool) {
+        if isRunning() {
+            if let keepAlive {
+                return (try request("config", StageParams(keepAlive: keepAlive)), false)
+            }
+            return (try request("status"), false)
+        }
         if let reason = VirtualDisplay.unavailableReason {
             throw AmcuError(.unsupported, "this macOS cannot create a virtual display: \(reason)", nextSteps: [
                 "Work without the stage: windows on another desktop are still driven in the background."
             ])
         }
-        let pid = try spawnHost(pointSize: pointSize, scale: scale)
+        let pid = try spawnHost(pointSize: pointSize, scale: scale, keepAlive: keepAlive)
         let deadline = Date().addingTimeInterval(wait)
         while Date() < deadline {
             usleep(150_000)
@@ -539,7 +578,7 @@ public enum StageClient {
         ])
     }
 
-    private static func spawnHost(pointSize: CGSize?, scale: Int?) throws -> pid_t {
+    private static func spawnHost(pointSize: CGSize?, scale: Int?, keepAlive: Bool? = nil) throws -> pid_t {
         try FileManager.default.createDirectory(at: Stage.cacheDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let source = URL(fileURLWithPath: Responsibility.executablePath).resolvingSymlinksInPath()
         let executable = try StageBundle.install(from: source)
@@ -548,7 +587,28 @@ public enum StageClient {
         var arguments = [executable, "stage", "serve", "--source", source.path]
         if let pointSize { arguments += ["--size", "\(Int(pointSize.width))x\(Int(pointSize.height))"] }
         if let scale { arguments += ["--scale", String(scale)] }
+        if keepAlive == true { arguments.append("--keep-alive") }
         return try Stage.spawnDetached(arguments)
+    }
+
+    /// Launches `~/Applications/amcu Stage.app` via LaunchServices in the
+    /// background so it runs under its own TCC attribution rather than Chrome's.
+    static func launchStandaloneApp(wait: TimeInterval = 8) -> Bool {
+        let appURL = StageBundle.installedAppURL
+        guard FileManager.default.fileExists(atPath: appURL.path) else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-g", "-j", "-a", appURL.path, "--args", "stage", "serve", "--keep-alive"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        process.waitUntilExit()
+        let deadline = Date().addingTimeInterval(wait)
+        while Date() < deadline {
+            if isRunning() { return true }
+            usleep(150_000)
+        }
+        return isRunning()
     }
 
     /// Tells the host what an acting verb just did. Never waits for an
@@ -564,9 +624,69 @@ public enum StageClient {
     private static func tell(_ method: String, _ params: StageParams) {
         guard let fd = RelaySockets.connectUnix(path: Stage.socketURL.path) else { return }
         defer { close(fd) }
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        RelaySockets.setNoSigPipe(fd)
         _ = StageWire.writeLine(fd, StageRequest(id: 1, method: method, params: params))
+    }
+
+    /// Moves a browser window requested by the extension popup onto the stage.
+    /// Starts the stage only when this process has Accessibility trust; browser
+    /// native hosts usually do not, and spawning an untrusted host would fail
+    /// every later move.
+    static func putBrowserWindow(pid: pid_t, params: JSONValue) -> [String: Any] {
+        func fail(_ code: String, _ message: String) -> [String: Any] {
+            ["ok": false, "error": ["code": code, "message": message, "nextSteps": [String]()]]
+        }
+        if params["state"].string == "fullscreen" {
+            return fail("unsupported", StageText.t(
+                "Exit full screen before moving this window to the stage.",
+                "全屏窗口无法直接收入舞台，请先退出全屏。"
+            ))
+        }
+        guard let frame = LinkRouting.rect(params["window"]) else {
+            return fail("invalid_argument", "missing browser window bounds")
+        }
+        if !isRunning() {
+            if AXIsProcessTrusted() {
+                do {
+                    _ = try start(keepAlive: true)
+                } catch {
+                    let message = (error as? AmcuError)?.message ?? String(describing: error)
+                    return fail("stage_unavailable", message)
+                }
+            } else if !launchStandaloneApp() {
+                return fail("stage_unavailable", StageText.t(
+                    "Stage is not running. Run `amcu stage install-app` (or `amcu stage start`) first.",
+                    "舞台未启动，请先运行 `amcu stage install-app`（或 `amcu stage start`）。"
+                ))
+            }
+        }
+        let match = StageBrowserWindowMatch(
+            bounds: FrameJSON(frame),
+            title: params["title"].string,
+            url: params["url"].string,
+            focused: params["focused"].bool ?? true
+        )
+        do {
+            let reply = try request("putBrowserWindow", StageParams(pid: pid, follow: false, by: "extension", browserWindow: match), timeout: 10)
+            guard let move = reply.moves.first else {
+                return fail("window_not_found", StageText.t("Could not find this window to move.", "未能识别要收入的窗口。"))
+            }
+            guard move.ok else {
+                return fail("unsupported", move.note ?? StageText.t("Could not move this window to the stage.", "无法将此窗口收入舞台。"))
+            }
+            return [
+                "ok": true,
+                "result": [
+                    "moved": true,
+                    "windowId": Int(move.windowID),
+                    "alreadyOnStage": move.note == "already on the stage",
+                    "note": move.note ?? ""
+                ]
+            ]
+        } catch {
+            let amcu = error as? AmcuError
+            return fail(amcu?.code.rawValue ?? "stage_unavailable", amcu?.message ?? String(describing: error))
+        }
     }
 
     /// A new host from this binary takes over the running stage: the display
@@ -587,5 +707,47 @@ public enum StageClient {
     static func lastLogLine() -> String? {
         guard let text = try? String(contentsOf: Stage.logURL, encoding: .utf8) else { return nil }
         return text.split(separator: "\n").last.map(String.init)
+    }
+}
+
+public enum StageClock {
+    private static let lock = NSLock()
+    private static let minutesFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+    private static let secondsFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+    private static let isoFormatter = ISO8601DateFormatter()
+
+    public static func hhmm(_ date: Date) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return minutesFormatter.string(from: date)
+    }
+
+    public static func hhmmss(_ date: Date) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return secondsFormatter.string(from: date)
+    }
+
+    public static func iso8601(_ date: Date) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return isoFormatter.string(from: date)
+    }
+}
+
+extension NSScreen {
+    var displayID: CGDirectDisplayID {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+    }
+
+    var isStage: Bool { Stage.identity.matches(displayID) }
+
+    static func forDisplay(_ id: CGDirectDisplayID) -> NSScreen? {
+        screens.first { $0.displayID == id }
     }
 }

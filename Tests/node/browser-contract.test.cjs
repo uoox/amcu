@@ -213,3 +213,86 @@ test('stage overlap uses window area and rejects minimized/off-stage windows', (
   assert.equal(c.overlapsStage({ left: 1100, top: 0, width: 500, height: 500, state: 'minimized' }, bounds), false);
   assert.throws(() => c.stageBounds({ stageBounds: bounds, activate: true }), e => e.code === 'invalid_argument');
 });
+
+test('extension popup stageCurrentWindow validates window state and preserves host errors', async () => {
+  const source = fs.readFileSync(path.join(root, 'extension/background.js'), 'utf8');
+  const start = source.indexOf('function callHostRaw(');
+  const end = source.indexOf('chrome.runtime.onMessage.addListener', start);
+  assert.ok(start >= 0 && end > start);
+  const posted = [];
+  let win;
+  const context = {
+    console, setTimeout, clearTimeout, Date, Promise, Map,
+    hostCalls: new Map(), hostCallSeq: 0, port: {}, identity: { label: 'bunny' },
+    bounds: w => ({ left: w.left, top: w.top, width: w.width, height: w.height }),
+    sleep: async () => {},
+    connect: () => {},
+    post: msg => {
+      posted.push(msg);
+      if (msg.method === 'stage.putWindow') {
+        setTimeout(() => context.settleHostCall({
+          id: msg.id,
+          ok: msg.params.title !== 'Fail',
+          result: msg.params.title !== 'Fail' ? { moved: true, windowId: 77 } : null,
+          error: msg.params.title === 'Fail' ? { code: 'stage_unavailable', message: 'stage is not running' } : null
+        }), 0);
+      }
+    },
+    chrome: { windows: { get: async () => win, getCurrent: async () => win } }
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+
+  win = { id: 5, type: 'normal', state: 'fullscreen', left: 0, top: 0, width: 1200, height: 800, focused: true, tabs: [] };
+  const fsRes = await context.stageCurrentWindow(5);
+  assert.equal(fsRes.ok, false);
+  assert.equal(fsRes.error.code, 'unsupported');
+  assert.equal(posted.length, 0);
+
+  win = { id: 6, type: 'normal', state: 'normal', left: 100, top: 50, width: 1280, height: 850, focused: true, tabs: [{ active: true, title: 'Docs', url: 'https://example.test' }] };
+  const okRes = await context.stageCurrentWindow(6);
+  assert.equal(okRes.ok, true);
+  assert.equal(okRes.result.windowId, 77);
+  assert.equal(posted[0].method, 'stage.putWindow');
+  assert.equal(posted[0].params.profile, 'bunny');
+
+  win = { id: 7, type: 'normal', state: 'normal', left: 100, top: 50, width: 1280, height: 850, focused: true, tabs: [{ active: true, title: 'Fail', url: 'https://example.test' }] };
+  const errRes = await context.stageCurrentWindow(7);
+  assert.equal(errRes.ok, false);
+  assert.equal(errRes.error.code, 'stage_unavailable');
+  assert.equal(errRes.error.message, 'stage is not running');
+});
+
+test('extension stage.tab.activate and stage.tab.close keep profile alive on last tab', async () => {
+  const source = fs.readFileSync(path.join(root, 'extension/background.js'), 'utf8');
+  const start = source.indexOf("async 'stage.tab.activate'(params)");
+  const end = source.indexOf('async navigate(params)', start);
+  assert.ok(start >= 0 && end > start);
+  const updated = [];
+  const removed = [];
+  let windows = [{ id: 10, tabs: [{ id: 1, windowId: 10 }] }];
+  const context = {
+    BridgeError: class extends Error { constructor(code, message) { super(message); this.code = code; } },
+    getTab: async id => windows.flatMap(w => w.tabs).find(t => t.id === id) || null,
+    tabSummary: t => t,
+    chrome: {
+      tabs: {
+        update: async (id, patch) => { updated.push({ id, patch }); },
+        remove: async id => { removed.push(id); }
+      },
+      windows: { getAll: async () => windows }
+    }
+  };
+  vm.createContext(context);
+  const obj = vm.runInContext(`({ ${source.slice(start, end)} })`, context);
+  await obj['stage.tab.activate']({ tab: 1 });
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].id, 1);
+  assert.equal(updated[0].patch.active, true);
+  await assert.rejects(obj['stage.tab.close']({ tab: 1 }), e => e.code === 'last_window');
+  assert.equal(removed.length, 0);
+  windows = [{ id: 10, tabs: [{ id: 1, windowId: 10 }, { id: 2, windowId: 10 }] }];
+  await obj['stage.tab.close']({ tab: 2 });
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0], 2);
+});

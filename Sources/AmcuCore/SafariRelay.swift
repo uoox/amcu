@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// The relay process (`amcu browser safari-relay`, normally the copy of amcu
@@ -173,7 +174,6 @@ final class SafariRelayRuntime {
 
     private func hostInfo() -> [String: Any] {
         let info = core.extensionInfo
-        let formatter = ISO8601DateFormatter()
         return [
             "browser": SafariBridge.browserName,
             "pid": Int(getpid()),
@@ -181,10 +181,10 @@ final class SafariRelayRuntime {
             "extensionVersion": info.version ?? NSNull(),
             "extensionId": SafariBridge.extensionBundleID,
             "brands": [String](),
-            "since": formatter.string(from: startedAt),
+            "since": StageClock.iso8601(startedAt),
             "socket": socketPath,
             "ready": core.isReady,
-            "lastPoll": info.lastPoll.map { formatter.string(from: $0) } ?? NSNull(),
+            "lastPoll": info.lastPoll.map(StageClock.iso8601) ?? NSNull(),
             "lastPollAgoSeconds": info.lastPoll.map { Int(Date().timeIntervalSince($0)) } ?? NSNull(),
             "hostAccess": info.hostAccess ?? NSNull(),
             "userAgent": info.userAgent ?? NSNull(),
@@ -221,14 +221,20 @@ final class SafariRelayRuntime {
             guard let id = message["id"] as? Int else { return }
             let delivered = core.respond(id: id, payload: message)
             _ = RelaySockets.writeLine(fd, ["type": "ack", "delivered": delivered])
+        case "stage.putWindow":
+            let params = JSONValue(message["params"] ?? [String: Any]())
+            guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari").first?.processIdentifier else {
+                _ = RelaySockets.writeLine(fd, ["ok": false, "error": ["code": "app_not_found", "message": "Safari is not running", "nextSteps": [String]()]])
+                return
+            }
+            _ = RelaySockets.writeLine(fd, StageClient.putBrowserWindow(pid: pid, params: params))
         default:
             _ = RelaySockets.writeLine(fd, ["type": "error", "message": "unknown message type"])
         }
     }
 
     private func log(_ message: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        FileHandle.standardError.write(Data("\(stamp) amcu safari relay: \(message)\n".utf8))
+        FileHandle.standardError.write(Data("\(StageClock.iso8601(Date())) amcu safari relay: \(message)\n".utf8))
     }
 }
 
@@ -239,23 +245,33 @@ private func relayRemoveSocketAndExit(_ signalNumber: Int32) {
     _exit(0)
 }
 
-/// Minimal blocking socket helpers shared by the relay and the appex.
+/// Minimal blocking socket helpers shared by the bridges and the stage.
 enum RelaySockets {
-    static func listenUnix(path: String) throws -> Int32 {
-        unlink(path)
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw AmcuError(.unsupported, "socket() failed: \(String(cString: strerror(errno)))") }
+    static func setNoSigPipe(_ fd: Int32) {
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    private static func unixAddress(path: String) -> sockaddr_un? {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8CString)
-        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            close(fd)
-            throw AmcuError(.unsupported, "socket path too long: \(path)")
-        }
+        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { return nil }
         withUnsafeMutablePointer(to: &address.sun_path) { pointer in
             pointer.withMemoryRebound(to: CChar.self, capacity: bytes.count) { dest in
                 for (index, byte) in bytes.enumerated() { dest[index] = byte }
             }
+        }
+        return address
+    }
+
+    static func listenUnix(path: String) throws -> Int32 {
+        unlink(path)
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw AmcuError(.unsupported, "socket() failed: \(String(cString: strerror(errno)))") }
+        guard var address = unixAddress(path: path) else {
+            close(fd)
+            throw AmcuError(.unsupported, "socket path too long: \(path)")
         }
         let bound = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
@@ -267,6 +283,18 @@ enum RelaySockets {
         }
         chmod(path, 0o600)
         guard listen(fd, 16) == 0 else { close(fd); throw AmcuError(.unsupported, "listen() failed") }
+        return fd
+    }
+
+    static func connectUnix(path: String) -> Int32? {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        setNoSigPipe(fd)
+        guard var address = unixAddress(path: path) else { close(fd); return nil }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        guard result == 0 else { close(fd); return nil }
         return fd
     }
 

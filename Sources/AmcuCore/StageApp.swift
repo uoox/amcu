@@ -27,11 +27,16 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
         return window
     }()
     private let tabQueue = DispatchQueue(label: "amcu.stage.tabs")
+    private let pickerQueue = DispatchQueue(label: "amcu.stage.picker")
     private var fetchingTabs = false
+    private var scanningPicker = false
     private var tabsFetched = Date.distantPast
     private var placed = false
     private var confirming = false
     private var windowMenu = NSMenu()
+    private var presetsMenu = NSMenu()
+    private var keepAliveItem: NSMenuItem?
+    private var hotkeysItem: NSMenuItem?
     private var viewItems: (top: NSMenuItem, left: NSMenuItem)?
     private var tabItems: [NSMenuItem] = []
     private var tabSignature: [String] = []
@@ -85,8 +90,35 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
         model.layoutChanged = { [weak self] in
             self?.updateViewItems()
         }
+        model.refreshCandidates = { [weak self] in
+            self?.scanCandidates()
+        }
+        model.stageWindows = { [weak self] items, follow in
+            guard let self else { return [] }
+            return self.runtime.putFromPicker(items, follow: follow)
+        }
+        model.activateTab = { [weak self] windowID, tabID in
+            self?.performTabAction(windowID: windowID, tabID: tabID, close: false)
+        }
+        model.closeTab = { [weak self] windowID, tabID in
+            self?.performTabAction(windowID: windowID, tabID: tabID, close: true)
+        }
+        model.savePreset = { [weak self] name, items in
+            self?.savePreset(name: name, items: items)
+        }
+        model.applyPreset = { [weak self] preset in
+            self?.applyPreset(preset)
+        }
+        model.releasePreset = { [weak self] preset in
+            self?.releasePreset(preset)
+        }
+        model.deletePreset = { [weak self] name in
+            self?.deletePreset(name: name)
+        }
+        reloadPresets()
         NSApp.applicationIconImage = StageIcon.image()
         installMainMenu()
+        updateStageItems()
     }
 
     var isShown: Bool { window.isVisible && !window.isMiniaturized }
@@ -95,10 +127,11 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
 
     var tabs: StageState.Tabs { StageState.Tabs(order: model.windowOrder, selected: model.selected) }
 
-    func refresh() {
-        let status = runtime.status()
+    func refresh(pruneFirst: Bool = true, onScreen: [[String: Any]]? = nil) {
+        let status = runtime.status(pruneFirst: pruneFirst, onScreen: onScreen)
         model.apply(status)
         updateTabItems()
+        updateStageItems()
         let open = status.asks.filter(\.isOpen).count
         let badge = open > 0 ? "\(open)" : nil
         if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
@@ -112,6 +145,30 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
         fetchTabs(for: status.windows.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) } + status.takenOver.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) })
     }
 
+    private func scanCandidates() {
+        if window.isVisible, !window.isKeyWindow {
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+        }
+        guard !scanningPicker else { return }
+        scanningPicker = true
+        model.scanningCandidates = true
+        let status = runtime.status()
+        let stageBounds = status.bounds.cgRect
+        let onStageIDs = Set(status.windows.map { CGWindowID($0.windowID) })
+        let heldIDs = Set(status.takenOver.map { CGWindowID($0.windowID) })
+        let ownPID = getpid()
+        pickerQueue.async { [weak self] in
+            let scanned = StageWindowScanner.scan(stageBounds: stageBounds, onStageIDs: onStageIDs, heldIDs: heldIDs, ownPID: ownPID)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scanningPicker = false
+                self.model.scanningCandidates = false
+                self.model.candidates = scanned
+            }
+        }
+    }
+
     func present(_ entry: StageActivity) {
         model.add(entry)
     }
@@ -122,8 +179,8 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
         NSApp.requestUserAttention(.informationalRequest)
     }
 
-    private func fetchTabs(for windows: [(windowID: CGWindowID, pid: pid_t)]) {
-        guard !fetchingTabs, Date().timeIntervalSince(tabsFetched) >= 1.5 else { return }
+    private func fetchTabs(for windows: [(windowID: CGWindowID, pid: pid_t)], force: Bool = false) {
+        guard !fetchingTabs, (force || Date().timeIntervalSince(tabsFetched) >= 1.5) else { return }
         guard !windows.isEmpty else {
             model.setBrowser([:])
             return
@@ -138,6 +195,91 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
                 self.runtime.updateTabPairing(browser)
                 self.model.setBrowser(browser)
             }
+        }
+    }
+
+    private func performTabAction(windowID: CGWindowID, tabID: Int, close: Bool) {
+        guard let socket = model.browser[windowID]?.socket else { return }
+        tabQueue.async { [weak self] in
+            let ok = close ? StageTabs.close(tabID: tabID, socket: socket) : StageTabs.activate(tabID: tabID, socket: socket)
+            guard ok else { return }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let status = self.runtime.status()
+                let list = status.windows.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+                    + status.takenOver.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+                self.fetchTabs(for: list, force: true)
+            }
+        }
+    }
+
+    private func reloadPresets() {
+        model.presets = StagePresetStore.load()
+        rebuildPresetsMenu()
+    }
+
+    private func savePreset(name: String, items: [StagePreset.Item]) {
+        let resolved: [StagePreset.Item]
+        if items.isEmpty {
+            let status = runtime.status()
+            let pairing = runtime.tabPairing
+            let raw: [(app: String, bundleID: String?, profile: String?, title: String?)] = status.windows.map {
+                ($0.app, $0.bundleID, pairing[CGWindowID($0.windowID)]?.profile, $0.title)
+            } + status.takenOver.map {
+                ($0.app, $0.bundleID, pairing[CGWindowID($0.windowID)]?.profile, $0.title)
+            }
+            resolved = StagePresetStore.buildItems(from: raw)
+        } else {
+            resolved = items
+        }
+        guard !resolved.isEmpty else { return }
+        if let updated = try? StagePresetStore.save(StagePreset(name: name, items: resolved)) {
+            model.presets = updated
+            rebuildPresetsMenu()
+            runtime.note("saved stage workspace preset '\(name)' (\(resolved.count) item\(resolved.count == 1 ? "" : "s"))")
+        }
+    }
+
+    private func applyPreset(_ preset: StagePreset) {
+        let status = runtime.status()
+        let stageBounds = status.bounds.cgRect
+        let onStageIDs = Set(status.windows.map { CGWindowID($0.windowID) })
+        let heldIDs = Set(status.takenOver.map { CGWindowID($0.windowID) })
+        let ownPID = getpid()
+        pickerQueue.async { [weak self] in
+            let available = StageWindowScanner.scan(stageBounds: stageBounds, onStageIDs: onStageIDs, heldIDs: heldIDs, ownPID: ownPID)
+            let matched = StagePresetStore.matchCandidates(preset, in: available)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if matched.isEmpty {
+                    self.model.pickerError = t("No matching open windows found for '\(preset.name)'.", "没有找到匹配工作组「\(preset.name)」的舞台外窗口。")
+                    return
+                }
+                let moves = self.runtime.putFromPicker(matched.map { (pid: $0.pid, windowID: $0.id) }, follow: false)
+                let failed = moves.filter { !$0.ok }
+                if failed.isEmpty {
+                    self.model.pickerError = nil
+                    if self.model.showingPicker { self.model.showingPicker = false }
+                } else {
+                    self.model.pickerError = failed.map { "\($0.app): \($0.note ?? t("could not move", "无法移动"))" }.joined(separator: "；")
+                    if self.model.showingPicker { self.scanCandidates() }
+                }
+            }
+        }
+    }
+
+    private func releasePreset(_ preset: StagePreset) {
+        let status = runtime.status()
+        let ids = StagePresetStore.matchStaged(preset, windows: status.windows, takenOver: status.takenOver, browser: runtime.tabPairing)
+        guard !ids.isEmpty else { return }
+        _ = runtime.releaseWindowIDs(ids)
+        refresh()
+    }
+
+    private func deletePreset(name: String) {
+        if let updated = try? StagePresetStore.delete(name: name) {
+            model.presets = updated
+            rebuildPresetsMenu()
         }
     }
 
@@ -169,7 +311,7 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
         } else if StageApp.seenByUser(window.frame) {
             return
         }
-        guard let visible = NSScreen.screens.first(where: { !StageApp.isStage($0) })?.visibleFrame else { return }
+        guard let visible = NSScreen.screens.first(where: { !$0.isStage })?.visibleFrame else { return }
         let size = NSSize(width: min(1280, visible.width - 80), height: min(860, visible.height - 60))
         window.setFrame(NSRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2, width: size.width, height: size.height), display: true)
     }
@@ -179,20 +321,28 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     }
 
     private static func seenByUser(_ frame: NSRect) -> Bool {
-        NSScreen.screens.contains { !isStage($0) && $0.frame.intersects(frame) }
-    }
-
-    private static func isStage(_ screen: NSScreen) -> Bool {
-        Stage.identity.matches((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0)
+        NSScreen.screens.contains { !$0.isStage && $0.frame.intersects(frame) }
     }
 
     func reopen() {
         show(activate: true)
     }
 
+    func toggleVisibility() {
+        if isShown && isInUse {
+            hide()
+        } else {
+            show(activate: true)
+        }
+    }
+
     func select(windowID: CGWindowID, activate: Bool) {
         model.select(windowID)
         show(activate: activate)
+    }
+
+    func selectIfShown(windowID: CGWindowID) {
+        if isShown { model.select(windowID) }
     }
 
     func uninstall() {
@@ -269,18 +419,59 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
 
     private func stageMenu() -> NSMenu {
         let menu = NSMenu()
+        let addWindows = item(t("Move Windows to Stage…", "收入窗口…"), #selector(openPicker(_:)), "n")
+        let presetsHolder = holder(for: presetsMenu, title: t("Workspaces", "工作组"))
+        rebuildPresetsMenu()
         let takeOver = item(t("Take Over This Window", "接管这个窗口"), #selector(takeOverSelected(_:)), "\r")
         let handBack = item(t("Hand This Window Back", "交还这个窗口"), #selector(handBackSelected(_:)), "\r", [.command, .shift])
         let free = item(t("Release This Window", "释放这个窗口"), #selector(freeSelected(_:)))
         let handBackAll = item(t("Hand Back All", "全部交还"), #selector(handBackAll(_:)))
         let releaseAll = item(t("Release All", "全部释放"), #selector(releaseAll(_:)))
+        let keepAlive = item(t("Keep Stage Running When Empty", "空舞台时保持常驻"), #selector(toggleKeepAlive(_:)))
+        let policy = Policy.current.stage
+        let hotkeyDesc = "\(StageActivity.keyLabel(policy.putFrontHotkey)) / \(StageActivity.keyLabel(policy.toggleWindowHotkey))"
+        let hotkeys = item(t("Global Hotkeys (\(hotkeyDesc))", "全局快捷键（\(hotkeyDesc)）"), #selector(toggleHotkeys(_:)))
+        keepAliveItem = keepAlive
+        hotkeysItem = hotkeys
         let close = item(t("Close Stage…", "关闭舞台…"), #selector(closeStage(_:)))
+        menu.addItem(addWindows)
+        menu.addItem(presetsHolder)
+        menu.addItem(.separator())
         [takeOver, handBack, free].forEach(menu.addItem)
         menu.addItem(.separator())
         [handBackAll, releaseAll].forEach(menu.addItem)
         menu.addItem(.separator())
+        [keepAlive, hotkeys].forEach(menu.addItem)
+        menu.addItem(.separator())
         menu.addItem(close)
         return menu
+    }
+
+    private func updateStageItems() {
+        keepAliveItem?.state = runtime.keepAlive ? .on : .off
+        hotkeysItem?.state = runtime.hotkeysEnabled ? .on : .off
+    }
+
+    private func rebuildPresetsMenu() {
+        presetsMenu.removeAllItems()
+        presetsMenu.addItem(item(t("Save Current Stage as Workspace…", "将当前舞台保存为工作组…"), #selector(promptSavePreset(_:))))
+        if !model.presets.isEmpty {
+            presetsMenu.addItem(.separator())
+            for preset in model.presets {
+                let sub = NSMenu()
+                let stageItem = item(t("Move All to Stage", "一键收入舞台"), #selector(applyPresetFromMenu(_:)))
+                stageItem.representedObject = preset.name
+                let releaseItem = item(t("Release All from Stage", "一键释放回屏幕"), #selector(releasePresetFromMenu(_:)))
+                releaseItem.representedObject = preset.name
+                let deleteItem = item(t("Delete Workspace", "删除工作组"), #selector(deletePresetFromMenu(_:)))
+                deleteItem.representedObject = preset.name
+                sub.addItem(stageItem)
+                sub.addItem(releaseItem)
+                sub.addItem(.separator())
+                sub.addItem(deleteItem)
+                presetsMenu.addItem(holder(for: sub, title: "\(preset.name) (\(preset.items.count))"))
+            }
+        }
     }
 
     private func viewMenu() -> NSMenu {
@@ -350,6 +541,19 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     func dockMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(item(t("Show Stage Window", "显示舞台窗口"), #selector(showWindow(_:))))
+        menu.addItem(item(t("Move Windows to Stage…", "收入窗口…"), #selector(openPicker(_:))))
+        if !model.presets.isEmpty {
+            let sub = NSMenu()
+            for preset in model.presets {
+                let entry = item(t("Stage: \(preset.name)", "收入：\(preset.name)"), #selector(applyPresetFromMenu(_:)))
+                entry.representedObject = preset.name
+                sub.addItem(entry)
+                let rel = item(t("Release: \(preset.name)", "释放：\(preset.name)"), #selector(releasePresetFromMenu(_:)))
+                rel.representedObject = preset.name
+                sub.addItem(rel)
+            }
+            menu.addItem(holder(for: sub, title: t("Workspaces", "工作组")))
+        }
         if !model.cards.isEmpty {
             menu.addItem(.separator())
             for card in model.cards {
@@ -376,6 +580,7 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
         case #selector(handBackSelected(_:)), #selector(freeSelected(_:)): return card?.heldSince != nil
         case #selector(handBackAll(_:)), #selector(releaseAll(_:)): return model.summary.held > 0
         case #selector(nextTab(_:)), #selector(previousTab(_:)), #selector(lastTab(_:)): return model.cards.count > 1
+        case #selector(promptSavePreset(_:)): return !model.cards.isEmpty
         default: return true
         }
     }
@@ -392,6 +597,10 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     }
 
     @objc private func showWindow(_ sender: Any?) { show(activate: true) }
+    @objc private func openPicker(_ sender: Any?) {
+        show(activate: true)
+        model.openPicker()
+    }
     @objc private func selectFromDock(_ sender: NSMenuItem) { select(windowID: CGWindowID(sender.tag), activate: true) }
     @objc private func selectTab(_ sender: NSMenuItem) { select(windowID: CGWindowID(sender.tag), activate: true) }
     @objc private func nextTab(_ sender: Any?) { model.step(1) }
@@ -405,6 +614,48 @@ final class StageApp: NSObject, NSWindowDelegate, NSMenuItemValidation {
     @objc private func handBackAll(_ sender: Any?) { model.handBackAll() }
     @objc private func releaseAll(_ sender: Any?) { model.releaseAll() }
     @objc private func closeStage(_ sender: Any?) { model.closeStage() }
+    @objc private func toggleKeepAlive(_ sender: Any?) {
+        runtime.setKeepAlive(!runtime.keepAlive)
+        updateStageItems()
+    }
+    @objc private func toggleHotkeys(_ sender: Any?) {
+        runtime.setHotkeysEnabled(!runtime.hotkeysEnabled)
+        updateStageItems()
+    }
+    @objc private func promptSavePreset(_ sender: Any?) {
+        show(activate: true)
+        let alert = NSAlert()
+        alert.messageText = t("Save Current Stage as Workspace", "将当前舞台保存为工作组")
+        alert.informativeText = t(
+            "Give this group of windows a name so you can stage or release them together in one click.",
+            "给当前舞台上的窗口起个组名，之后可一键批量收入或释放。"
+        )
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = t("e.g. Shops, Monitoring", "例如：店铺号、监控面板")
+        alert.accessoryView = field
+        alert.addButton(withTitle: t("Save", "保存"))
+        alert.addButton(withTitle: t("Cancel", "取消")).keyEquivalent = "\u{1b}"
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            self?.savePreset(name: name, items: [])
+        }
+    }
+    @objc private func applyPresetFromMenu(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let preset = model.presets.first(where: { $0.name == name }) else { return }
+        applyPreset(preset)
+    }
+    @objc private func releasePresetFromMenu(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let preset = model.presets.first(where: { $0.name == name }) else { return }
+        releasePreset(preset)
+    }
+    @objc private func deletePresetFromMenu(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        deletePreset(name: name)
+    }
 
     // MARK: - Window
 

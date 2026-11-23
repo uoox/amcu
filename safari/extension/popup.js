@@ -2,6 +2,12 @@
 // the extension has website access; opening it also wakes the poll loop.
 
 const api = globalThis.browser || globalThis.chrome;
+const zh = /^zh/i.test(api.i18n && api.i18n.getUILanguage ? api.i18n.getUILanguage() : '')
+  || (navigator.languages || [navigator.language || '']).some(l => /^zh/i.test(l));
+const tr = (en, cn) => (zh ? cn : en);
+const stageButton = document.getElementById('stage');
+const stageStatus = document.getElementById('stage-status');
+stageButton.textContent = tr('Move to Stage', '收入舞台');
 
 async function refresh() {
   document.getElementById('version').textContent = 'v' + api.runtime.getManifest().version;
@@ -27,6 +33,31 @@ async function refresh() {
   access.className = reply && reply.hostAccess === true ? 'ok' : 'bad';
   document.getElementById('requests').textContent = status && status.requests ? String(status.requests) : '0';
 }
+
+stageButton.addEventListener('click', async () => {
+  stageButton.disabled = true;
+  stageButton.textContent = tr('Moving…', '收入中…');
+  stageStatus.textContent = '';
+  stageStatus.className = '';
+  try {
+    const win = await api.windows.getCurrent();
+    const reply = await api.runtime.sendMessage({ __amcuStageCurrent: true, windowId: win ? win.id : null });
+    if (reply && reply.ok) {
+      stageStatus.textContent = reply.result && reply.result.alreadyOnStage ? tr('Already on the stage.', '已在舞台上。') : tr('Moved to the stage.', '已收入舞台。');
+      stageStatus.className = 'ok';
+      setTimeout(() => window.close(), 350);
+      return;
+    }
+    stageStatus.textContent = (reply && reply.error && reply.error.message) || (reply && reply.message) || tr('Could not move this window to the stage.', '收入舞台失败。');
+    stageStatus.className = 'bad';
+  } catch (error) {
+    stageStatus.textContent = String(error && error.message || error);
+    stageStatus.className = 'bad';
+  } finally {
+    stageButton.disabled = false;
+    stageButton.textContent = tr('Move to Stage', '收入舞台');
+  }
+});
 
 refresh();
 setInterval(refresh, 2000);

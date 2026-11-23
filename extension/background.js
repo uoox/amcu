@@ -680,17 +680,22 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   activeHistory.set(windowId, [tabId].concat(list.filter(id => id !== tabId)).slice(0, 8));
 });
 
-function callHost(method, params, timeoutMs = 5000) {
-  if (!port) return Promise.resolve(null);
+function callHostRaw(method, params, timeoutMs = 5000) {
+  if (!port) return Promise.resolve({ ok: false, error: { code: 'bridge_unavailable', message: 'native host is not connected' } });
   const id = ++hostCallSeq;
   return new Promise(resolve => {
     const timer = setTimeout(() => {
       hostCalls.delete(id);
-      resolve(null);
+      resolve({ ok: false, error: { code: 'timeout', message: 'the amcu host did not answer in time' } });
     }, timeoutMs);
     hostCalls.set(id, { resolve, timer });
     post({ type: 'call', id, method, params });
   });
+}
+
+async function callHost(method, params, timeoutMs = 5000) {
+  const reply = await callHostRaw(method, params, timeoutMs);
+  return reply && reply.ok ? reply.result : null;
 }
 
 function settleHostCall(message) {
@@ -698,8 +703,42 @@ function settleHostCall(message) {
   if (!pending) return;
   hostCalls.delete(message.id);
   clearTimeout(pending.timer);
-  pending.resolve(message.ok ? message.result : null);
+  pending.resolve({ ok: !!message.ok, result: message.result || null, error: message.error || null });
 }
+
+async function stageCurrentWindow(windowId) {
+  const win = windowId !== undefined && windowId !== null
+    ? await chrome.windows.get(windowId, { populate: true }).catch(() => null)
+    : await chrome.windows.getCurrent({ populate: true }).catch(() => null);
+  if (!win || win.type !== 'normal') {
+    return { ok: false, error: { code: 'window_not_found', message: 'current window cannot be moved to the stage' } };
+  }
+  if (win.state === 'fullscreen') {
+    return { ok: false, error: { code: 'unsupported', message: 'exit full screen before moving this window to the stage' } };
+  }
+  if (!port) {
+    connect();
+    const deadline = Date.now() + 1500;
+    while (!port && Date.now() < deadline) await sleep(50);
+  }
+  const activeTab = (win.tabs || []).find(t => t.active) || (win.tabs || [])[0] || null;
+  return callHostRaw('stage.putWindow', {
+    window: bounds(win),
+    state: win.state,
+    focused: !!win.focused,
+    title: activeTab && activeTab.title ? activeTab.title : '',
+    url: activeTab && activeTab.url ? activeTab.url : '',
+    profile: identity ? identity.label : null
+  }, 10000);
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || !message.__amcuStageCurrent) return false;
+  stageCurrentWindow(message.windowId)
+    .then(reply => sendResponse(reply))
+    .catch(error => sendResponse({ ok: false, error: asBridgeError(error).toJSON() }));
+  return true;
+});
 
 async function justStarted() {
   const stored = await chrome.storage.session.get(STARTUP_KEY).catch(() => ({}));
@@ -1936,6 +1975,25 @@ const handlers = {
 
   async 'tabs.close'(params) {
     const tab = await resolveTab(params, { acting: true });
+    await chrome.tabs.remove(tab.id);
+    return { closed: tabSummary(tab) };
+  },
+
+  async 'stage.tab.activate'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    await chrome.tabs.update(tab.id, { active: true });
+    return { tab: tabSummary(await getTab(tab.id) || tab) };
+  },
+
+  async 'stage.tab.close'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    const wins = await chrome.windows.getAll({ populate: true, windowTypes: ['normal'] });
+    const owner = wins.find(w => w.id === tab.windowId);
+    if (wins.length <= 1 && owner && (owner.tabs || []).length <= 1) {
+      throw new BridgeError('last_window', 'cannot close the last tab of the profile\'s only window');
+    }
     await chrome.tabs.remove(tab.id);
     return { closed: tabSummary(tab) };
   },

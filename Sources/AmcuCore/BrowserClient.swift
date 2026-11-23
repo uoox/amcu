@@ -130,7 +130,7 @@ public final class BrowserClient {
         for name in names.sorted() {
             guard let parsed = BrowserBridge.parseSocketName(name) else { continue }
             let path = directory.appendingPathComponent(name).path
-            guard let fd = connect(path: path) else {
+            guard let fd = RelaySockets.connectUnix(path: path) else {
                 if kill(parsed.pid, 0) != 0 && errno == ESRCH { unlink(path) }
                 continue
             }
@@ -156,7 +156,7 @@ public final class BrowserClient {
     /// Sends one request and returns the extension's result. Errors the
     /// extension reports come back as AmcuError with its code and next steps.
     public func request(_ method: String, params: [String: Any] = [:], timeout: TimeInterval = 30) throws -> JSONValue {
-        guard let fd = BrowserClient.connect(path: endpoint.socket) else {
+        guard let fd = RelaySockets.connectUnix(path: endpoint.socket) else {
             throw AmcuError(.bridgeUnavailable, "the \(endpoint.browser) host went away", nextSteps: [
                 "The browser or the extension was probably closed or reloaded; run `amcu browser tabs` to reconnect."
             ])
@@ -178,41 +178,11 @@ public final class BrowserClient {
 
     // MARK: - Plumbing
 
-    private static func connect(path: String) -> Int32? {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8CString)
-        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { close(fd); return nil }
-        withUnsafeMutablePointer(to: &address.sun_path) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: bytes.count) { dest in
-                for (index, byte) in bytes.enumerated() { dest[index] = byte }
-            }
-        }
-        let result = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard result == 0 else { close(fd); return nil }
-        return fd
-    }
-
     private static func roundTrip(fd: Int32, request: [String: Any], timeoutSeconds: TimeInterval) throws -> [String: Any] {
         var line = try JSONSerialization.data(withJSONObject: request)
         line.append(0x0A)
-        var offset = 0
-        let bytes = [UInt8](line)
-        while offset < bytes.count {
-            let written = bytes.withUnsafeBufferPointer { write(fd, $0.baseAddress! + offset, bytes.count - offset) }
-            if written < 0 {
-                if errno == EINTR { continue }
-                throw AmcuError(.bridgeUnavailable, "could not write to the host socket: \(String(cString: strerror(errno)))")
-            }
-            offset += written
+        guard RelaySockets.writeAll(fd, line) else {
+            throw AmcuError(.bridgeUnavailable, "could not write to the host socket: \(String(cString: strerror(errno)))")
         }
 
         var timeout = timeval(tv_sec: Int(timeoutSeconds), tv_usec: 0)

@@ -16,6 +16,7 @@ public struct Policy: Sendable {
     public var sensitiveAllow: [String] = []
     public var immune: [String] = []
     public var settle = SettleTiming()
+    public var stage = StagePolicy()
 
     public struct SettleTiming: Sendable {
         /// Never return before this much time has passed after the action.
@@ -24,6 +25,17 @@ public struct Policy: Sendable {
         public var quiet: Double = 0.3
         /// Give up waiting after this long and report `settled: false`.
         public var max: Double = 5.0
+    }
+
+    public struct StagePolicy: Sendable {
+        /// Seconds an empty stage waits before auto-exiting; 0 keeps it running.
+        public var idleExit: Double = 900
+        /// Default logical size cap for the virtual display ("none" disables the cap).
+        public var maxDisplaySize: String? = "1920x1080"
+        /// Global hotkeys in the stage host (⌥⌘S put front window, ⌥⌘W toggle window).
+        public var hotkeys: Bool = true
+        public var putFrontHotkey: String = "opt+cmd+s"
+        public var toggleWindowHotkey: String = "opt+cmd+w"
     }
 
     public static var path: String {
@@ -67,6 +79,26 @@ public struct Policy: Sendable {
             policy.settle.quiet = number("quiet", 0.05, 5, policy.settle.quiet)
             policy.settle.max = number("max", 0.2, 30, policy.settle.max)
         }
+        if let stage = root["stage"] as? [String: Any] {
+            if let raw = stage["idleExit"] as? NSNumber {
+                policy.stage.idleExit = Swift.min(86_400, Swift.max(0, raw.doubleValue))
+            }
+            if let cap = stage["maxDisplaySize"] as? String {
+                let trimmed = cap.trimmingCharacters(in: .whitespacesAndNewlines)
+                policy.stage.maxDisplaySize = (trimmed.isEmpty || trimmed.lowercased() == "none") ? nil : trimmed
+            } else if stage["maxDisplaySize"] is NSNull {
+                policy.stage.maxDisplaySize = nil
+            }
+            if let enabled = stage["hotkeys"] as? Bool {
+                policy.stage.hotkeys = enabled
+            }
+            if let spec = stage["putFrontHotkey"] as? String, !spec.isEmpty {
+                policy.stage.putFrontHotkey = spec
+            }
+            if let spec = stage["toggleWindowHotkey"] as? String, !spec.isEmpty {
+                policy.stage.toggleWindowHotkey = spec
+            }
+        }
         return policy
     }
 
@@ -82,7 +114,14 @@ public struct Policy: Sendable {
                 "allow": sensitiveAllow
             ],
             "immune": ["builtin": SensitiveApps.builtinImmune.sorted(), "extra": immune],
-            "settle": ["min": settle.min, "quiet": settle.quiet, "max": settle.max]
+            "settle": ["min": settle.min, "quiet": settle.quiet, "max": settle.max],
+            "stage": [
+                "idleExit": stage.idleExit,
+                "maxDisplaySize": stage.maxDisplaySize ?? "none",
+                "hotkeys": stage.hotkeys,
+                "putFrontHotkey": stage.putFrontHotkey,
+                "toggleWindowHotkey": stage.toggleWindowHotkey
+            ]
         ]
     }
 }

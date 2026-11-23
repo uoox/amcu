@@ -57,7 +57,7 @@ public struct WindowInfo: Codable, Sendable {
     }
 }
 
-public struct FrameJSON: Codable, Sendable {
+public struct FrameJSON: Codable, Sendable, Equatable {
     public let x: Double
     public let y: Double
     public let width: Double

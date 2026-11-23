@@ -162,7 +162,6 @@ private final class HolderDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func log(_ message: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        FileHandle.standardError.write(Data("\(stamp) amcu stage-display[\(getpid())]: \(message)\n".utf8))
+        FileHandle.standardError.write(Data("\(StageClock.iso8601(Date())) amcu stage-display[\(getpid())]: \(message)\n".utf8))
     }
 }

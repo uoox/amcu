@@ -23,10 +23,18 @@ public enum StageTabs {
     }
 
     /// What the stage window shows for a browser window: the profile it
-    /// belongs to (its amcu label, else the profile's name) and its tabs.
+    /// belongs to (its amcu label, else the profile's name), its tabs, and the
+    /// native-host socket used for switching or closing tabs directly.
     public struct Paired: Equatable, Sendable {
         public let profile: String?
         public let tabs: [Tab]
+        public let socket: String?
+
+        public init(profile: String?, tabs: [Tab], socket: String? = nil) {
+            self.profile = profile
+            self.tabs = tabs
+            self.socket = socket
+        }
     }
 
     /// A browser's own window: its id there, which only grows, and its tabs.
@@ -34,11 +42,13 @@ public enum StageTabs {
         public let id: Int
         public let tabs: [Tab]
         public let profile: String?
+        public let socket: String?
 
-        public init(id: Int, tabs: [Tab], profile: String? = nil) {
+        public init(id: Int, tabs: [Tab], profile: String? = nil, socket: String? = nil) {
             self.id = id
             self.tabs = tabs
             self.profile = profile
+            self.socket = socket
         }
     }
 
@@ -73,16 +83,34 @@ public enum StageTabs {
                     attached: item["attached"].bool == true
                 ))
             }
-            browserWindows[browserPID, default: []] += order.map { BrowserWindow(id: $0, tabs: tabs[$0] ?? [], profile: profile) }
+            browserWindows[browserPID, default: []] += order.map { BrowserWindow(id: $0, tabs: tabs[$0] ?? [], profile: profile, socket: endpoint.socket) }
         }
         var result: [CGWindowID: Paired] = [:]
         for (pid, known) in browserWindows {
             let pairs = pair(namedWindows(pid: pid), with: known)
             for window in windows where window.pid == pid {
-                if let index = pairs[window.windowID] { result[window.windowID] = Paired(profile: known[index].profile, tabs: known[index].tabs) }
+                if let index = pairs[window.windowID] {
+                    result[window.windowID] = Paired(profile: known[index].profile, tabs: known[index].tabs, socket: known[index].socket)
+                }
             }
         }
         return result
+    }
+
+    /// Activates a tab inside its staged browser window without focusing the
+    /// browser or touching any agent session's current tab.
+    @discardableResult
+    public static func activate(tabID: Int, socket: String) -> Bool {
+        let client = BrowserClient(endpoint: BrowserEndpoint(browser: "browser", pid: 0, socket: socket))
+        return (try? client.request("stage.tab.activate", params: ["tab": tabID], timeout: 3)) != nil
+    }
+
+    /// Closes a tab inside a staged browser window (refused by the extension
+    /// when it is the profile's last tab of its last window).
+    @discardableResult
+    public static func close(tabID: Int, socket: String) -> Bool {
+        let client = BrowserClient(endpoint: BrowserEndpoint(browser: "browser", pid: 0, socket: socket))
+        return (try? client.request("stage.tab.close", params: ["tab": tabID], timeout: 3)) != nil
     }
 
     /// Pairs window server windows with a browser's windows: a window is
@@ -163,5 +191,67 @@ public enum StageTabs {
     public static func host(of url: String) -> String {
         guard let host = URL(string: url)?.host, !host.isEmpty else { return "" }
         return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+}
+
+/// Identifies which native macOS window corresponds to a browser extension's
+/// `chrome.windows.Window` snapshot, refusing when candidates stay ambiguous.
+public enum StageBrowserMatcher {
+    public struct Candidate: Equatable, Sendable {
+        public let id: CGWindowID
+        public let frame: CGRect
+        public let title: String
+        public let main: Bool
+        public let zOrder: Int
+
+        public init(id: CGWindowID, frame: CGRect, title: String, main: Bool, zOrder: Int) {
+            self.id = id
+            self.frame = frame
+            self.title = title
+            self.main = main
+            self.zOrder = zOrder
+        }
+    }
+
+    public static func match(candidates: [Candidate], target: StageBrowserWindowMatch) -> CGWindowID? {
+        guard !candidates.isEmpty else { return nil }
+        let wanted = target.bounds.cgRect
+        let tab = StageTabs.Tab(id: 0, title: target.title ?? "", url: target.url ?? "", active: true, attached: false)
+        let hasTab = !tab.title.isEmpty || !tab.url.isEmpty
+
+        func within(_ rect: CGRect, _ tolerance: CGFloat) -> Bool {
+            abs(rect.minX - wanted.minX) <= tolerance
+                && abs(rect.minY - wanted.minY) <= tolerance
+                && abs(rect.width - wanted.width) <= tolerance
+                && abs(rect.height - wanted.height) <= tolerance
+        }
+
+        func narrow(_ pool: [Candidate]) -> CGWindowID? {
+            if pool.count == 1 { return pool[0].id }
+            guard pool.count > 1 else { return nil }
+            let byTitle = hasTab ? pool.filter { StageTabs.titled($0.title, by: tab) } : pool
+            if byTitle.count == 1 { return byTitle[0].id }
+            let active = byTitle.isEmpty ? pool : byTitle
+            guard target.focused else { return nil }
+            let mains = active.filter(\.main)
+            if mains.count == 1 { return mains[0].id }
+            return active.min { $0.zOrder < $1.zOrder }?.id
+        }
+
+        let exact = candidates.filter { within($0.frame, 4) }
+        if !exact.isEmpty { return narrow(exact) }
+
+        if hasTab {
+            let near = candidates.filter { within($0.frame, 20) && StageTabs.titled($0.title, by: tab) }
+            if let hit = narrow(near) { return hit }
+        }
+        if target.focused {
+            let mainSized = candidates.filter {
+                $0.main && abs($0.frame.width - wanted.width) <= 24 && abs($0.frame.height - wanted.height) <= 24
+                    && (!hasTab || StageTabs.titled($0.title, by: tab))
+            }
+            if mainSized.count == 1 { return mainSized[0].id }
+        }
+        return nil
     }
 }

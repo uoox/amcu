@@ -19,7 +19,7 @@ struct Flags {
         // lab verbs
         "headless", "keep-profile",
         // stage verbs
-        "no-follow", "dark", "wait"
+        "no-follow", "dark", "wait", "keep-alive"
     ]
 
     init(_ arguments: [String]) throws {

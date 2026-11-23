@@ -9,8 +9,14 @@
   .ok { color: #1a7f37; } .bad { color: #b42318; }
   code { font: 12px ui-monospace, Menlo, monospace; background: #f3f3f3; padding: 1px 4px; border-radius: 3px; }
   p { margin: 8px 0 0; color: #555; }
-  button { margin-top: 10px; font: inherit; padding: 4px 10px; }
-  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } code { background: #333; } p { color: #aaa; } .ok { color: #4caf50; } .bad { color: #ff6b6b; } }
+  .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  button { font: inherit; padding: 5px 11px; border-radius: 6px; border: 1px solid #d0d7de; background: #f6f8fa; color: inherit; cursor: pointer; }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button.primary { background: #e85d2a; border-color: #d14e1f; color: #fff; font-weight: 500; }
+  button.primary:hover:not(:disabled) { background: #d64f1e; }
+  #stage-status { margin-top: 6px; font-size: 12px; min-height: 0; }
+  #stage-status:empty { display: none; }
+  @media (prefers-color-scheme: dark) { body { background: #1e1e1e; color: #ddd; } code { background: #333; } p { color: #aaa; } .ok { color: #4caf50; } .bad { color: #ff6b6b; } button { background: #2d2d2d; border-color: #444; } button.primary { background: #e85d2a; border-color: #e85d2a; color: #fff; } }
 </style>
 </head>
 <body>
@@ -21,7 +27,11 @@
 <div class="row"><span>requests served</span><span id="requests">0</span></div>
 <div class="row"><span>debugger attached to</span><span id="attached">no tabs</span></div>
 <p id="hint"></p>
-<button id="detach">Detach debugger from all tabs</button>
+<div class="actions">
+  <button id="stage" class="primary">收入舞台</button>
+  <button id="detach">Detach debugger</button>
+</div>
+<p id="stage-status"></p>
 <script src="popup.js"></script>
 </body>
 </html>

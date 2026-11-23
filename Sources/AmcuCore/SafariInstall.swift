@@ -144,15 +144,26 @@ public enum SafariInstall {
     /// can then load the extension without "Allow unsigned extensions"), an
     /// explicitly requested AMCU_SIGN_IDENTITY if it exists, else ad-hoc.
     public static func chooseSigner(identityListing: String, requested: String?) -> Signer {
-        let names = identityListing.split(separator: "\n").compactMap { line -> String? in
+        let entries = identityListing.split(separator: "\n").compactMap { line -> (hash: String, name: String)? in
             guard let open = line.firstIndex(of: "\""), let close = line.lastIndex(of: "\""), open < close else { return nil }
-            return String(line[line.index(after: open)..<close])
+            let name = String(line[line.index(after: open)..<close])
+            let prefix = line[..<open].split(whereSeparator: \.isWhitespace)
+            let hash = prefix.last.map(String.init) ?? ""
+            return (hash, name)
         }
-        if let requested, !requested.isEmpty, names.contains(where: { $0 == requested || $0.contains(requested) }) {
-            return .identity(names.first { $0 == requested } ?? names.first { $0.contains(requested) }!)
+        if let requested, !requested.isEmpty {
+            if let byHash = entries.first(where: { $0.hash.caseInsensitiveCompare(requested) == .orderedSame }) {
+                return .identity(byHash.hash)
+            }
+            if let exact = entries.first(where: { $0.name == requested }) {
+                return .identity(exact.name)
+            }
+            if let partial = entries.first(where: { $0.name.contains(requested) }) {
+                return .identity(partial.name)
+            }
         }
-        if let developerID = names.first(where: { $0.hasPrefix("Developer ID Application") }) {
-            return .identity(developerID)
+        if let developerID = entries.first(where: { $0.name.hasPrefix("Developer ID Application") }) {
+            return .identity(developerID.name)
         }
         return .adHoc
     }
@@ -490,28 +501,5 @@ public enum SafariInstall {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
-    }
-}
-
-extension RelaySockets {
-    static func connectUnix(path: String) -> Int32? {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8CString)
-        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { close(fd); return nil }
-        withUnsafeMutablePointer(to: &address.sun_path) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: bytes.count) { dest in
-                for (index, byte) in bytes.enumerated() { dest[index] = byte }
-            }
-        }
-        let result = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
-        }
-        guard result == 0 else { close(fd); return nil }
-        return fd
     }
 }

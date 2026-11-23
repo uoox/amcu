@@ -1,6 +1,14 @@
 // amcu bridge — popup. Shows whether the native host is connected and lets the
 // user drop debugger attachments (and the infobar that comes with them).
 
+const zh = /^zh/i.test(chrome.i18n && chrome.i18n.getUILanguage ? chrome.i18n.getUILanguage() : '')
+  || (navigator.languages || [navigator.language || '']).some(l => /^zh/i.test(l));
+const tr = (en, cn) => (zh ? cn : en);
+
+const stageButton = document.getElementById('stage');
+const stageStatus = document.getElementById('stage-status');
+stageButton.textContent = tr('Move to Stage', '收入舞台');
+
 async function refresh() {
   document.getElementById('version').textContent = 'v' + chrome.runtime.getManifest().version;
   const { status } = await chrome.storage.session.get('status');
@@ -39,6 +47,33 @@ document.getElementById('detach').addEventListener('click', async () => {
     }
   }
   refresh();
+});
+
+stageButton.addEventListener('click', async () => {
+  stageButton.disabled = true;
+  stageButton.textContent = tr('Moving…', '收入中…');
+  stageStatus.textContent = '';
+  stageStatus.className = '';
+  try {
+    const win = await chrome.windows.getCurrent();
+    const reply = await chrome.runtime.sendMessage({ __amcuStageCurrent: true, windowId: win ? win.id : null });
+    if (reply && reply.ok) {
+      const already = reply.result && reply.result.alreadyOnStage;
+      stageStatus.textContent = already ? tr('Already on the stage.', '已在舞台上。') : tr('Moved to the stage.', '已收入舞台。');
+      stageStatus.className = 'ok';
+      setTimeout(() => window.close(), 350);
+      return;
+    }
+    const msg = reply && reply.error && reply.error.message ? reply.error.message : tr('Could not move this window to the stage.', '收入舞台失败。');
+    stageStatus.textContent = msg;
+    stageStatus.className = 'bad';
+  } catch (error) {
+    stageStatus.textContent = String(error && error.message || error);
+    stageStatus.className = 'bad';
+  } finally {
+    stageButton.disabled = false;
+    stageButton.textContent = tr('Move to Stage', '收入舞台');
+  }
 });
 
 refresh();

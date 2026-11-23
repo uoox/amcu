@@ -50,7 +50,6 @@ THE NORMAL SEQUENCE
   selects the element, it states what you believe the ref is, and the action
   is refused (element_mismatch) when the live element's role or name says
   otherwise. Cheap insurance when a ref is reused from an earlier snapshot.
-  (On desktop verbs `--element N` is an index; here it is a description —
   (On desktop verbs `--element N` is an index; here it is a description.)
 
 UNIQUE LOCATORS AND VERIFIED STATE

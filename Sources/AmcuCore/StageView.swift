@@ -39,6 +39,7 @@ final class StageViewModel: ObservableObject {
         var following: [String] = []
         var onStage = 0
         var held = 0
+        var keepAlive = false
     }
 
     static let leftKey = "amcu.stage.tabsOnLeft"
@@ -53,6 +54,11 @@ final class StageViewModel: ObservableObject {
     @Published private(set) var members: [CGWindowID: Member] = [:]
     @Published private(set) var chrome = StageChrome()
     @Published var fullScreen = false
+    @Published var showingPicker = false
+    @Published var candidates: [StageAvailableWindow] = []
+    @Published var scanningCandidates = false
+    @Published var pickerError: String?
+    @Published var presets: [StagePreset] = []
     @Published var tabsOnLeft: Bool {
         didSet {
             guard tabsOnLeft != oldValue else { return }
@@ -72,6 +78,14 @@ final class StageViewModel: ObservableObject {
     var closeStage: () -> Void = {}
     var selectionChanged: () -> Void = {}
     var layoutChanged: () -> Void = {}
+    var refreshCandidates: () -> Void = {}
+    var stageWindows: ([(pid: pid_t, windowID: CGWindowID)], Bool) -> [StageMove] = { _, _ in [] }
+    var activateTab: (CGWindowID, Int) -> Void = { _, _ in }
+    var closeTab: (CGWindowID, Int) -> Void = { _, _ in }
+    var savePreset: (String, [StagePreset.Item]) -> Void = { _, _ in }
+    var applyPreset: (StagePreset) -> Void = { _ in }
+    var releasePreset: (StagePreset) -> Void = { _ in }
+    var deletePreset: (String) -> Void = { _ in }
 
     private let persistsLayout: Bool
     private(set) var windowOrder: [CGWindowID] = []
@@ -111,7 +125,8 @@ final class StageViewModel: ObservableObject {
             answersFor: status.answersFor,
             following: status.following.map(\.app),
             onStage: status.windows.count,
-            held: status.takenOver.count
+            held: status.takenOver.count,
+            keepAlive: status.keepAlive
         )
         if summary != self.summary { self.summary = summary }
     }
@@ -208,12 +223,30 @@ final class StageViewModel: ObservableObject {
     }
 
     func icon(for card: Card) -> NSImage {
-        if let icon = icons[card.pid] { return icon }
-        let icon = NSRunningApplication(processIdentifier: card.pid)?.icon
-            ?? card.bundleID.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.map { NSWorkspace.shared.icon(forFile: $0.path) }
+        icon(forPID: card.pid, bundleID: card.bundleID)
+    }
+
+    func icon(forPID pid: pid_t, bundleID: String?) -> NSImage {
+        if let icon = icons[pid] { return icon }
+        let icon = NSRunningApplication(processIdentifier: pid)?.icon
+            ?? bundleID.flatMap { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }.map { NSWorkspace.shared.icon(forFile: $0.path) }
             ?? NSWorkspace.shared.icon(for: .application)
-        icons[card.pid] = icon
+        icons[pid] = icon
         return icon
+    }
+
+    func openPicker() {
+        pickerError = nil
+        showingPicker = true
+        refreshCandidates()
+    }
+
+    func latestActivityDate(for windows: [CGWindowID]) -> Date? {
+        windows.compactMap { activity[$0]?.first?.at }.max()
+    }
+
+    var latestActivityDate: Date? {
+        activity.values.compactMap { $0.first?.at }.max()
     }
 
     func isWorking(_ id: CGWindowID, at date: Date) -> Bool {
@@ -231,7 +264,7 @@ final class StageViewModel: ObservableObject {
         if card.windows.count > 1 { lines.append(t("\(card.windows.count) windows of this profile", "这个 profile 的 \(card.windows.count) 个窗口")) }
         if let ask = card.ask { lines.append(t("Needs you: \(ask.text)", "需要你：\(ask.text)")) }
         if let since = card.heldSince {
-            lines.append(t("You hold it, since \(StageClock.minutes.string(from: since))", "你接管着，\(StageClock.minutes.string(from: since)) 起"))
+            lines.append(t("You hold it, since \(StageClock.hhmm(since))", "你接管着，\(StageClock.hhmm(since)) 起"))
         } else if card.foreign {
             lines.append(t("Not put here by amcu", "不是 amcu 放上来的"))
         }
@@ -361,6 +394,47 @@ struct StageView: View {
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 620, minHeight: 420)
         .background(StagePalette.background.ignoresSafeArea())
+        .sheet(isPresented: $model.showingPicker) {
+            StageWindowPickerSheet(model: model)
+        }
+    }
+}
+
+/// Runs a 1 Hz timeline only while a recent activity could still change visual
+/// state (< window seconds old), avoiding idle wakeups on a quiet stage.
+private struct StageActivityClock<Content: View>: View {
+    let latest: Date?
+    let window: TimeInterval
+    @ViewBuilder let content: (Date) -> Content
+
+    var body: some View {
+        if let latest, Date().timeIntervalSince(latest) < window {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                content(context.date)
+            }
+        } else {
+            content(Date())
+        }
+    }
+}
+
+private struct StageTabChrome: ViewModifier {
+    let card: StageViewModel.Card
+    @ObservedObject var model: StageViewModel
+    let selected: Bool
+    let shadowOpacity: Double
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (card.ask != nil ? Color.orange.opacity(0.16) : (hovering ? Color.primary.opacity(0.07) : Color.clear))))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(card.ask != nil ? Color.orange.opacity(0.75) : (selected ? StagePalette.stroke : Color.clear), lineWidth: card.ask != nil ? 1.5 : 1))
+            .shadow(color: .black.opacity(selected ? shadowOpacity : 0), radius: 1.5, y: 0.5)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .onTapGesture { model.select(card.id) }
+            .onHover { hovering = $0 }
+            .help(model.tooltip(for: card))
+            .contextMenu { StageTabMenu(card: card, model: model) }
     }
 }
 
@@ -372,7 +446,7 @@ private struct StageTopTabs: View {
         let top = StageTabLayout.tabTop(lightsCenter: model.chrome.center, fullScreen: model.fullScreen)
         let leading = model.fullScreen ? 10 : model.chrome.leading
         GeometryReader { proxy in
-            let room = max(0, proxy.size.width - leading - 42)
+            let room = max(0, proxy.size.width - leading - 76)
             let width = StageTabLayout.topWidth(count: model.cards.count, room: room)
             HStack(alignment: .top, spacing: 0) {
                 Color.clear.frame(width: leading, height: 1)
@@ -390,14 +464,24 @@ private struct StageTopTabs: View {
                     tabs(width: width)
                     Spacer(minLength: 0)
                 }
-                Button {
-                    model.tabsOnLeft = true
-                } label: {
-                    Image(systemName: "sidebar.left")
+                HStack(spacing: 2) {
+                    Button {
+                        model.openPicker()
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(StageIconButton())
+                    .help(t("Pick open windows to move onto the stage (⌘N)", "识别所有窗口并选择收入舞台（⌘N）"))
+                    .frame(height: StageTabLayout.tabHeight)
+                    Button {
+                        model.tabsOnLeft = true
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                    }
+                    .buttonStyle(StageIconButton())
+                    .help(t("Show the tabs on the left", "把标签放到左侧"))
+                    .frame(height: StageTabLayout.tabHeight)
                 }
-                .buttonStyle(StageIconButton())
-                .help(t("Show the tabs on the left", "把标签放到左侧"))
-                .frame(height: StageTabLayout.tabHeight)
                 .padding(.horizontal, 8)
             }
             .padding(.top, top)
@@ -406,16 +490,18 @@ private struct StageTopTabs: View {
         .background(StageDragArea())
         .background(StagePalette.strip)
         .contextMenu {
+            Button(t("Move Windows to Stage…", "收入窗口…")) { model.openPicker() }
+            Divider()
             Button(t("Show Tabs on the Left", "标签放在左侧")) { model.tabsOnLeft = true }
         }
     }
 
     private func tabs(width: CGFloat) -> some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        StageActivityClock(latest: model.latestActivityDate, window: 16) { now in
             HStack(spacing: StageTabLayout.topSpacing) {
                 ForEach(Array(model.cards.enumerated()), id: \.element.id) { index, card in
                     let next = index + 1 < model.cards.count ? model.cards[index + 1].id : nil
-                    StageTopTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card, at: context.date))
+                    StageTopTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card, at: now))
                         .frame(width: width)
                         .overlay(alignment: .trailing) {
                             if let next, card.id != model.selected, next != model.selected {
@@ -436,7 +522,6 @@ private struct StageTopTab: View {
     @ObservedObject var model: StageViewModel
     let selected: Bool
     let working: Bool
-    @State private var hovering = false
 
     var body: some View {
         let profile = model.browser[card.window]?.profile
@@ -458,14 +543,7 @@ private struct StageTopTab: View {
         }
         .padding(.horizontal, 9)
         .frame(height: StageTabLayout.tabHeight)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (card.ask != nil ? Color.orange.opacity(0.16) : (hovering ? Color.primary.opacity(0.07) : Color.clear))))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(card.ask != nil ? Color.orange.opacity(0.75) : (selected ? StagePalette.stroke : Color.clear), lineWidth: card.ask != nil ? 1.5 : 1))
-        .shadow(color: .black.opacity(selected ? 0.10 : 0), radius: 1.5, y: 0.5)
-        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .onTapGesture { model.select(card.id) }
-        .onHover { hovering = $0 }
-        .help(model.tooltip(for: card))
-        .contextMenu { StageTabMenu(card: card, model: model) }
+        .modifier(StageTabChrome(card: card, model: model, selected: selected, shadowOpacity: 0.10))
     }
 }
 
@@ -486,10 +564,10 @@ private struct StageSideTabs: View {
                 Spacer(minLength: 0)
             } else {
                 ScrollView(.vertical) {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                    StageActivityClock(latest: model.latestActivityDate, window: 16) { now in
                         VStack(spacing: 2) {
                             ForEach(model.cards) { card in
-                                StageSideTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card, at: context.date))
+                                StageSideTab(card: card, model: model, selected: card.id == model.selected, working: model.isWorking(card, at: now))
                             }
                         }
                         .padding(.horizontal, 8)
@@ -500,19 +578,28 @@ private struct StageSideTabs: View {
             Divider()
             HStack(spacing: 6) {
                 Button {
+                    model.openPicker()
+                } label: {
+                    Label(t("Add windows", "收入窗口"), systemImage: "plus")
+                }
+                .buttonStyle(StageIconButton())
+                .help(t("Pick open windows to move onto the stage (⌘N)", "识别所有窗口并选择收入舞台（⌘N）"))
+                Spacer(minLength: 0)
+                Button {
                     model.tabsOnLeft = false
                 } label: {
-                    Label(t("Tabs on top", "标签放到顶部"), systemImage: "rectangle.topthird.inset.filled")
+                    Image(systemName: "rectangle.topthird.inset.filled")
                 }
                 .buttonStyle(StageIconButton())
                 .help(t("Show the tabs along the top", "把标签放到顶部"))
-                Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
             .frame(height: 34)
         }
         .background(StagePalette.strip)
         .contextMenu {
+            Button(t("Move Windows to Stage…", "收入窗口…")) { model.openPicker() }
+            Divider()
             Button(t("Show Tabs on Top", "标签放在顶部")) { model.tabsOnLeft = false }
         }
     }
@@ -523,7 +610,6 @@ private struct StageSideTab: View {
     @ObservedObject var model: StageViewModel
     let selected: Bool
     let working: Bool
-    @State private var hovering = false
 
     var body: some View {
         let profile = model.browser[card.window]?.profile
@@ -553,26 +639,19 @@ private struct StageSideTab: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(selected ? StagePalette.card : (card.ask != nil ? Color.orange.opacity(0.16) : (hovering ? Color.primary.opacity(0.07) : Color.clear))))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(card.ask != nil ? Color.orange.opacity(0.75) : (selected ? StagePalette.stroke : Color.clear), lineWidth: card.ask != nil ? 1.5 : 1))
-        .shadow(color: .black.opacity(selected ? 0.08 : 0), radius: 1.5, y: 0.5)
-        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .onTapGesture { model.select(card.id) }
-        .onHover { hovering = $0 }
-        .help(model.tooltip(for: card))
-        .contextMenu { StageTabMenu(card: card, model: model) }
+        .modifier(StageTabChrome(card: card, model: model, selected: selected, shadowOpacity: 0.08))
     }
 
     private var subtitle: String {
         if let ask = card.ask { return t("needs you: \(ask.text)", "需要你：\(ask.text)") }
-        if let since = card.heldSince { return t("you hold it · since \(StageClock.minutes.string(from: since))", "你接管着 · \(StageClock.minutes.string(from: since)) 起") }
+        if let since = card.heldSince { return t("you hold it · since \(StageClock.hhmm(since))", "你接管着 · \(StageClock.hhmm(since)) 起") }
         if card.foreign { return t("\(card.app) · not put here by amcu", "\(card.app) · 不是 amcu 放的") }
         if card.windows.count > 1 { return t("\(card.app) · \(card.windows.count) windows", "\(card.app) · \(card.windows.count) 个窗口") }
         return card.app
     }
 }
 
-private struct StageProfileTag: View {
+struct StageProfileTag: View {
     let profile: String
 
     var body: some View {
@@ -690,7 +769,7 @@ private struct StagePane: View {
                     StagePermissionBanner(answersFor: model.summary.answersFor)
                         .padding([.horizontal, .top], 12)
                 }
-                StageEmpty()
+                StageEmpty(onAddWindows: model.openPicker)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -733,7 +812,7 @@ private struct StageWindowBar: View {
             .layoutPriority(1)
             Spacer(minLength: 8)
             if let since = card.heldSince {
-                StageBadge(text: t("you hold it · since \(StageClock.minutes.string(from: since))", "你接管着 · \(StageClock.minutes.string(from: since)) 起"), tint: .orange)
+                StageBadge(text: t("you hold it · since \(StageClock.hhmm(since))", "你接管着 · \(StageClock.hhmm(since)) 起"), tint: .orange)
                     .help(t("On your screen now. \"Hand back\" puts it back on the stage; an agent acting on it takes it back too",
                             "现在在你的屏幕上。点「交还」放回舞台；agent 要操作它时也会自动收回"))
                 Button { model.handBack(card.window) } label: {
@@ -864,12 +943,20 @@ private struct StageInspector: View {
                     let count = tabs.reduce(0) { $0 + $1.tabs.count }
                     StageSection(title: t("\(count) tab\(count == 1 ? "" : "s")", "\(count) 个标签")) {
                         if tabs.count == 1 {
-                            StageTabList(tabs: tabs[0].tabs)
+                            let win = tabs[0].window
+                            let canControl = model.browser[win]?.socket != nil
+                            StageTabList(
+                                tabs: tabs[0].tabs,
+                                canControl: canControl,
+                                onActivate: { model.activateTab(win, $0) },
+                                onClose: { model.closeTab(win, $0) }
+                            )
                         } else {
                             VStack(alignment: .leading, spacing: 10) {
                                 ForEach(tabs, id: \.window) { group in
                                     let number = (card.windows.firstIndex(of: group.window) ?? 0) + 1
                                     let shown = group.window == card.window
+                                    let canControl = model.browser[group.window]?.socket != nil
                                     VStack(alignment: .leading, spacing: 3) {
                                         Button { model.pick(group.window) } label: {
                                             Text(shown ? t("Window \(number) · shown", "窗口 \(number) · 正在显示") : t("Window \(number)", "窗口 \(number)"))
@@ -878,7 +965,12 @@ private struct StageInspector: View {
                                         }
                                         .buttonStyle(.plain)
                                         .padding(.horizontal, 8)
-                                        StageTabList(tabs: group.tabs)
+                                        StageTabList(
+                                            tabs: group.tabs,
+                                            canControl: canControl,
+                                            onActivate: { model.activateTab(group.window, $0) },
+                                            onClose: { model.closeTab(group.window, $0) }
+                                        )
                                     }
                                 }
                             }
@@ -900,7 +992,7 @@ private struct StageWindowSwitcher: View {
     @ObservedObject var model: StageViewModel
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        StageActivityClock(latest: model.latestActivityDate(for: card.windows), window: 16) { now in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(Array(card.windows.enumerated()), id: \.element) { index, window in
@@ -921,7 +1013,7 @@ private struct StageWindowSwitcher: View {
                                     Image(systemName: "hand.raised.fill")
                                         .font(.system(size: 9))
                                         .foregroundStyle(Color.orange)
-                                } else if model.isWorking(window, at: context.date) {
+                                } else if model.isWorking(window, at: now) {
                                     Circle()
                                         .fill(Color.green)
                                         .frame(width: 6, height: 6)
@@ -956,7 +1048,7 @@ private struct StageAskBanner: View {
                 .font(.system(size: 20))
                 .foregroundStyle(Color.orange)
             VStack(alignment: .leading, spacing: 3) {
-                Text(t("\(StageActivity.sessionLabel(ask.session)) needs you · \(StageClock.minutes.string(from: ask.at))", "\(StageActivity.sessionLabel(ask.session)) 需要你 · \(StageClock.minutes.string(from: ask.at))"))
+                Text(t("\(StageActivity.sessionLabel(ask.session)) needs you · \(StageClock.hhmm(ask.at))", "\(StageActivity.sessionLabel(ask.session)) 需要你 · \(StageClock.hhmm(ask.at))"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.orange)
                 Text(ask.text)
@@ -1010,7 +1102,7 @@ private struct StageFacts: View {
             fact(t("Size", "大小"), "\(Int(card.size.width)) × \(Int(card.size.height))")
             fact(t("Where", "位置"), origin)
             if let since = card.heldSince {
-                fact(t("Since", "接管于"), StageClock.minutes.string(from: since))
+                fact(t("Since", "接管于"), StageClock.hhmm(since))
             }
             fact(t("Process", "进程"), "pid \(card.pid)")
         }
@@ -1046,8 +1138,15 @@ private struct StageStatusBar: View {
         let summary = model.summary
         let held = summary.held
         HStack(spacing: 6) {
-            StageChip(symbol: "display", text: "\(Int(summary.stage.width))×\(Int(summary.stage.height))")
-                .help(t("The stage: a display off the corner of your screen that you never see", "舞台：在你屏幕角外的一块看不到的屏"))
+            StageChip(
+                symbol: "display",
+                text: summary.keepAlive
+                    ? "\(Int(summary.stage.width))×\(Int(summary.stage.height)) · \(t("pinned", "常驻"))"
+                    : "\(Int(summary.stage.width))×\(Int(summary.stage.height))"
+            )
+                .help(summary.keepAlive
+                      ? t("The stage stays running even when empty (toggle in Stage menu)", "空舞台时也保持常驻（可在「舞台」菜单切换）")
+                      : t("The stage: a display off the corner of your screen that you never see", "舞台：在你屏幕角外的一块看不到的屏"))
             StageChip(
                 symbol: "cursorarrow.slash",
                 text: summary.pullbacks > 0
@@ -1103,7 +1202,7 @@ private struct StageStatusBar: View {
     }
 }
 
-private struct StageCapsuleButton: ButtonStyle {
+struct StageCapsuleButton: ButtonStyle {
     let prominent: Bool
 
     func makeBody(configuration: Configuration) -> some View {
@@ -1148,7 +1247,7 @@ private struct StageChip: View {
     }
 }
 
-private struct StageBadge: View {
+struct StageBadge: View {
     let text: String
     let tint: Color
 
@@ -1163,26 +1262,12 @@ private struct StageBadge: View {
     }
 }
 
-enum StageClock {
-    static let minutes: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
-
-    static let seconds: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter
-    }()
-}
-
 private struct StageOperatorBadge: View {
     let entry: StageActivity
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            if context.date.timeIntervalSince(entry.at) < 15 {
+        StageActivityClock(latest: entry.at, window: 16) { now in
+            if now.timeIntervalSince(entry.at) < 15 {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(Color.green)
@@ -1206,10 +1291,10 @@ private struct StageActivityList: View {
     let entries: [StageActivity]
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
+        StageActivityClock(latest: entries.first?.at, window: 9) { now in
             VStack(alignment: .leading, spacing: 7) {
                 ForEach(entries) { entry in
-                    StageActivityRow(entry: entry, fresh: context.date.timeIntervalSince(entry.at) < 8)
+                    StageActivityRow(entry: entry, fresh: now.timeIntervalSince(entry.at) < 8)
                 }
             }
         }
@@ -1237,7 +1322,7 @@ private struct StageActivityRow: View {
                     .truncationMode(.middle)
                     .help(entry.session)
                 Spacer(minLength: 6)
-                Text(StageClock.seconds.string(from: entry.at))
+                Text(StageClock.hhmmss(entry.at))
                     .font(.system(size: 10.5).monospacedDigit())
                     .foregroundStyle(.tertiary)
                     .fixedSize()
@@ -1369,6 +1454,9 @@ final class StageDragView: NSView {
 
 private struct StageTabList: View {
     let tabs: [StageTabs.Tab]
+    var canControl = false
+    var onActivate: (Int) -> Void = { _ in }
+    var onClose: (Int) -> Void = { _ in }
     @State private var expanded = false
     private let folded = 8
 
@@ -1378,7 +1466,7 @@ private struct StageTabList: View {
             : tabs.enumerated().filter { $0.offset < folded || $0.element.active || $0.element.attached }.map(\.element)
         VStack(alignment: .leading, spacing: 1) {
             ForEach(shown) { tab in
-                StageTabRow(tab: tab)
+                StageTabRow(tab: tab, canControl: canControl, onActivate: { onActivate(tab.id) }, onClose: { onClose(tab.id) })
             }
             if expanded || shown.count < tabs.count {
                 Button(expanded ? t("Show fewer", "收起") : t("\(tabs.count - shown.count) more", "还有 \(tabs.count - shown.count) 个")) {
@@ -1395,6 +1483,10 @@ private struct StageTabList: View {
 
 private struct StageTabRow: View {
     let tab: StageTabs.Tab
+    let canControl: Bool
+    let onActivate: () -> Void
+    let onClose: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         let site = StageTabs.host(of: tab.url)
@@ -1420,11 +1512,31 @@ private struct StageTabRow: View {
                     .help(t("amcu's debugger is on this tab: an agent is driving it, or did and has not let go",
                             "amcu 的调试器挂在这个标签上：agent 正在操作它，或操作过还没放手"))
             }
+            if canControl && hovering {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .help(t("Close this tab", "关闭这个标签页"))
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(tab.active ? Color.accentColor.opacity(0.13) : Color.clear))
-        .help(tab.url)
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(
+            tab.active ? Color.accentColor.opacity(0.13) : (canControl && hovering ? Color.primary.opacity(0.05) : Color.clear)
+        ))
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .onTapGesture {
+            if canControl && !tab.active { onActivate() }
+        }
+        .onHover { hovering = $0 }
+        .help(canControl
+              ? (tab.url.isEmpty ? t("Click to switch to this tab", "点击切换到这个标签页") : "\(tab.url)\n\(t("Click to switch to this tab", "点击切换到这个标签页"))")
+              : tab.url)
     }
 }
 
@@ -1441,18 +1553,25 @@ private struct StageMonogram: View {
 }
 
 private struct StageEmpty: View {
+    let onAddWindows: () -> Void
+
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Image(systemName: "theatermasks")
                 .font(.system(size: 40, weight: .light))
                 .foregroundStyle(.tertiary)
             Text(t("Nothing on the stage", "舞台上还没有窗口"))
                 .font(.system(size: 14, weight: .semibold))
-            Text(t("Windows an agent puts here with `amcu stage put` show up as tabs, each with a live picture.",
-                   "agent 用 amcu stage put 放上来的窗口会一个个出现在标签里，带实时画面。"))
+            Text(t("Pick open windows to tuck away here, or let an agent put them here with `amcu stage put`.",
+                   "可以挑选桌面上已打开的窗口收入这里，或由 agent 通过 amcu stage put 放上来。"))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            Button(action: onAddWindows) {
+                Label(t("Move Windows to Stage…", "选择窗口收入舞台"), systemImage: "plus")
+            }
+            .buttonStyle(StageCapsuleButton(prominent: true))
+            .padding(.top, 4)
         }
         .padding(.vertical, 56)
         .padding(.horizontal, 24)

@@ -101,4 +101,106 @@ func runStageGeometryTests(_ t: Harness) {
     let identity = Stage.identity
     t.expectEqual(identity.vendorID, 0x616D, "the stage's vendor number spells 'am'")
     t.expectEqual(identity.productID, 0x6375, "and its product number 'cu', so any process can recognise it")
+
+    // Browser window matching for the extension popup's Move to Stage button.
+    let w1 = StageBrowserMatcher.Candidate(id: 101, frame: CGRect(x: 100, y: 80, width: 1200, height: 800), title: "Inbox - Google Chrome - Work", main: false, zOrder: 2)
+    let w2 = StageBrowserMatcher.Candidate(id: 102, frame: CGRect(x: 400, y: 120, width: 1200, height: 800), title: "Docs - Google Chrome - Personal", main: true, zOrder: 1)
+    let w2Stack = StageBrowserMatcher.Candidate(id: 103, frame: CGRect(x: 400, y: 120, width: 1200, height: 800), title: "Mail - Google Chrome - Work", main: false, zOrder: 3)
+    t.expectEqual(
+        StageBrowserMatcher.match(candidates: [w1, w2], target: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 101, y: 80, width: 1200, height: 800)), title: "Inbox", focused: true)),
+        101, "unique frame within tolerance matches directly"
+    )
+    t.expectEqual(
+        StageBrowserMatcher.match(candidates: [w2, w2Stack], target: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 400, y: 120, width: 1200, height: 800)), title: "Mail", focused: false)),
+        103, "stacked identical frames are disambiguated by active tab title"
+    )
+    t.expectEqual(
+        StageBrowserMatcher.match(candidates: [w2, w2Stack], target: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 400, y: 120, width: 1200, height: 800)), title: nil, focused: true)),
+        102, "stacked identical frames without title break ties by focused main window"
+    )
+    t.expect(
+        StageBrowserMatcher.match(candidates: [w2, w2Stack], target: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 400, y: 120, width: 1200, height: 800)), title: nil, focused: false)) == nil,
+        "ambiguous unfocused stacked windows are refused rather than guessed"
+    )
+    t.expectEqual(
+        StageBrowserMatcher.match(candidates: [w1, w2], target: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 412, y: 128, width: 1200, height: 800)), title: "Docs", focused: false)),
+        102, "slight coordinate drift falls back to near-frame + title match"
+    )
+    t.expect(
+        StageBrowserMatcher.match(candidates: [w1], target: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 900, y: 500, width: 600, height: 400)), title: "Unrelated", focused: false)) == nil,
+        "non-matching bounds and title refuse"
+    )
+
+    // Stage window picker grouping & filtering.
+    let picked = [
+        StageAvailableWindow(id: 1, pid: 10, app: "Google Chrome", bundleID: "com.google.Chrome", title: "小红书", size: CGSize(width: 1200, height: 800), profile: "bunny", tabCount: 3, zOrder: 1),
+        StageAvailableWindow(id: 2, pid: 20, app: "Notes", bundleID: "com.apple.Notes", title: "Todo", size: CGSize(width: 800, height: 600), zOrder: 2),
+        StageAvailableWindow(id: 3, pid: 10, app: "Google Chrome", bundleID: "com.google.Chrome", title: "闲鱼", size: CGSize(width: 1200, height: 800), profile: "jtf", tabCount: 1, zOrder: 3)
+    ]
+    let allGroups = StageWindowScanner.group(picked, query: "")
+    t.expectEqual(allGroups.map(\.pid), [10, 20], "picker groups by pid in frontmost z-order")
+    t.expectEqual(allGroups[0].windows.map(\.id), [1, 3], "same app's windows stay grouped together")
+    let byProfile = StageWindowScanner.group(picked, query: "BUNNY")
+    t.expectEqual(byProfile.count, 1, "picker search matches browser profile case-insensitively")
+    t.expectEqual(byProfile[0].windows.map(\.id), [1], "picker search narrows to matching windows")
+
+    // StageClock & StageParams compatibility.
+    let sampleDate = Date(timeIntervalSince1970: 1_800_000_000)
+    t.expectEqual(StageClock.hhmm(sampleDate).count, 5, "StageClock.hhmm formats HH:mm")
+    t.expectEqual(StageClock.hhmmss(sampleDate).count, 8, "StageClock.hhmmss formats HH:mm:ss")
+    t.expect(StageClock.iso8601(sampleDate).contains("T"), "StageClock.iso8601 produces ISO-8601 timestamp")
+    if let data = try? JSONEncoder().encode(StageParams(pid: 42, follow: false, browserWindow: StageBrowserWindowMatch(bounds: FrameJSON(CGRect(x: 1, y: 2, width: 300, height: 400)), title: "T", focused: true), restoreMinimized: true, keepAlive: true)),
+       let decoded = try? JSONDecoder().decode(StageParams.self, from: data) {
+        t.expectEqual(decoded.browserWindow?.title, "T", "StageParams round-trips browserWindow")
+        t.expectEqual(decoded.restoreMinimized, true, "StageParams round-trips restoreMinimized")
+        t.expectEqual(decoded.keepAlive, true, "StageParams round-trips keepAlive")
+    } else {
+        t.expect(false, "StageParams failed to round-trip")
+    }
+
+    // Default stage display size cap.
+    t.expectEqual(
+        StageGeometry.defaultStageSize(main: CGSize(width: 2560, height: 1080), maxSize: CGSize(width: 1920, height: 1080)),
+        CGSize(width: 1920, height: 1080), "ultrawide main display is capped at 1920x1080 by default"
+    )
+    t.expectEqual(
+        StageGeometry.defaultStageSize(main: CGSize(width: 1440, height: 900), maxSize: CGSize(width: 1920, height: 1080)),
+        CGSize(width: 1440, height: 900), "smaller main display keeps its own size"
+    )
+    t.expectEqual(
+        StageGeometry.defaultStageSize(main: CGSize(width: 2560, height: 1440), maxSize: nil),
+        CGSize(width: 2560, height: 1440), "nil cap preserves full main display size"
+    )
+
+    // Global hotkeys parsing & Policy stage section.
+    t.expect(StageHotkeys.parse("opt+cmd+s") != nil, "opt+cmd+s parses as a Carbon hotkey")
+    t.expect(StageHotkeys.parse("opt+cmd+w") != nil, "opt+cmd+w parses as a Carbon hotkey")
+    t.expect(StageHotkeys.parse("s") == nil, "a bare key without modifiers is refused as a global hotkey")
+    t.expect(StageHotkeys.parse("cmd+notakey") == nil, "an unknown key is refused as a global hotkey")
+    let parsedPolicy = Policy.parse(["stage": ["idleExit": 0, "maxDisplaySize": "none", "hotkeys": false, "putFrontHotkey": "ctrl+opt+s"]])
+    t.expectEqual(parsedPolicy.stage.idleExit, 0, "policy stage.idleExit=0 disables idle exit")
+    t.expect(parsedPolicy.stage.maxDisplaySize == nil, "policy stage.maxDisplaySize=none disables display cap")
+    t.expectEqual(parsedPolicy.stage.hotkeys, false, "policy stage.hotkeys toggles global hotkeys")
+    t.expectEqual(parsedPolicy.stage.putFrontHotkey, "ctrl+opt+s", "policy stage.putFrontHotkey overrides default")
+
+    // Stage workspace presets (build, save/load/delete, match).
+    let items = StagePresetStore.buildItems(from: [
+        (app: "Google Chrome", bundleID: "com.google.Chrome", profile: "bunny", title: "Page A"),
+        (app: "Google Chrome", bundleID: "com.google.Chrome", profile: "bunny", title: "Page B"),
+        (app: "Notes", bundleID: "com.apple.Notes", profile: nil, title: "Todo")
+    ])
+    t.expectEqual(items.count, 2, "preset items deduplicate windows sharing the same browser profile")
+    let preset = StagePreset(name: "Shops", items: items)
+    let matchedAvailable = StagePresetStore.matchCandidates(preset, in: picked)
+    t.expectEqual(matchedAvailable.map(\.id), [1, 2], "preset matches browser profile and non-browser app cleanly")
+    let tempPresets = FileManager.default.temporaryDirectory.appendingPathComponent("amcu-presets-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: tempPresets) }
+    do {
+        _ = try StagePresetStore.save(preset, to: tempPresets)
+        t.expectEqual(StagePresetStore.load(from: tempPresets).map(\.name), ["Shops"], "preset round-trips through disk")
+        _ = try StagePresetStore.delete(name: "shops", from: tempPresets)
+        t.expect(StagePresetStore.load(from: tempPresets).isEmpty, "preset delete is case-insensitive")
+    } catch {
+        t.expect(false, "preset store threw: \(error)")
+    }
 }

@@ -1,20 +1,27 @@
 import AppKit
 import ImageIO
 
-enum StageBundle {
-    static var appURL: URL { Stage.cacheDirectory.appendingPathComponent("stage-host/amcu.app", isDirectory: true) }
+public enum StageBundle {
+    public static var appURL: URL { Stage.cacheDirectory.appendingPathComponent("stage-host/amcu.app", isDirectory: true) }
+    /// Standalone user-facing app bundle in `~/Applications` so macOS Spotlight,
+    /// Finder and Chrome's native host can launch the stage with its own stable
+    /// signature and TCC grants.
+    public static var installedAppURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/amcu Stage.app", isDirectory: true)
+    }
     static var executableURL: URL { appURL.appendingPathComponent("Contents/MacOS/amcu") }
-    private static var contentsURL: URL { appURL.appendingPathComponent("Contents", isDirectory: true) }
-    private static var iconURL: URL { contentsURL.appendingPathComponent("Resources/AppIcon.icns") }
     private static var legacyExecutableURL: URL { Stage.cacheDirectory.appendingPathComponent("stage-host/amcu") }
     private static let iconRevision = "1"
 
-    static var identifier: String {
+    public static var identifier: String {
         Stage.identity.serial == 1 ? "cc.uoox.amcu.stage" : "cc.uoox.amcu.stage.\(Stage.identity.serial)"
     }
 
-    static var isCurrentProcessInside: Bool {
-        Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL.path == appURL.resolvingSymlinksInPath().standardizedFileURL.path
+    public static var isCurrentProcessInside: Bool {
+        let current = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL.path
+        if current == appURL.resolvingSymlinksInPath().standardizedFileURL.path { return true }
+        if Stage.identity.serial == 1 && current == installedAppURL.resolvingSymlinksInPath().standardizedFileURL.path { return true }
+        return false
     }
 
     static func infoPlist(version: String) -> [String: Any] {
@@ -42,14 +49,17 @@ enum StageBundle {
     }
 
     @discardableResult
-    static func install(from source: URL) throws -> String {
+    static func install(from source: URL, to bundleURL: URL = appURL) throws -> String {
         let manager = FileManager.default
+        let contentsURL = bundleURL.appendingPathComponent("Contents", isDirectory: true)
         let resources = contentsURL.appendingPathComponent("Resources", isDirectory: true)
+        let targetExecutable = contentsURL.appendingPathComponent("MacOS/amcu")
+        let iconURL = resources.appendingPathComponent("AppIcon.icns")
         do {
             try manager.createDirectory(at: resources, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try manager.createDirectory(at: executableURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try manager.createDirectory(at: targetExecutable.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         } catch {
-            throw AmcuError(.stageUnavailable, "could not make the stage app at \(appURL.path): \(error.localizedDescription)")
+            throw AmcuError(.stageUnavailable, "could not make the stage app at \(bundleURL.path): \(error.localizedDescription)")
         }
         let infoURL = contentsURL.appendingPathComponent("Info.plist")
         let previous = (try? Data(contentsOf: infoURL)).flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
@@ -63,9 +73,28 @@ enum StageBundle {
         if previous?["AmcuIconRevision"] as? String != iconRevision || !manager.fileExists(atPath: iconURL.path), let icns = StageIcon.icns() {
             try? icns.write(to: iconURL, options: .atomic)
         }
-        let executable = try Stage.cloneExecutable(from: source, to: executableURL)
-        if manager.fileExists(atPath: legacyExecutableURL.path) { try? manager.removeItem(at: legacyExecutableURL) }
+        let executable = try Stage.cloneExecutable(from: source, to: targetExecutable)
+        if bundleURL == appURL, manager.fileExists(atPath: legacyExecutableURL.path) {
+            try? manager.removeItem(at: legacyExecutableURL)
+        }
         return executable
+    }
+
+    /// Installs and signs `~/Applications/amcu Stage.app`, then registers it
+    /// with Launch Services so Finder, Spotlight and browser extensions can
+    /// start the stage with its own TCC grants.
+    public static func installStandaloneApp(signIdentity: String? = nil) throws -> (appPath: String, signedWith: String) {
+        let source = URL(fileURLWithPath: Responsibility.executablePath).resolvingSymlinksInPath()
+        _ = try install(from: source, to: installedAppURL)
+        let listing = (try? SafariInstall.run("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"]).output) ?? ""
+        let requested = signIdentity ?? ProcessInfo.processInfo.environment["AMCU_SIGN_IDENTITY"]
+        let signer = SafariInstall.chooseSigner(identityListing: listing, requested: requested)
+        let result = try SafariInstall.run("/usr/bin/codesign", ["--force", "--deep", "--sign", signer.codesignArgument, installedAppURL.path])
+        guard result.status == 0 else {
+            throw AmcuError(.stageUnavailable, "codesign failed for \(installedAppURL.path): \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        _ = try? SafariInstall.run("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", ["-f", installedAppURL.path])
+        return (installedAppURL.path, signer.description)
     }
 }
 

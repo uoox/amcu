@@ -197,11 +197,20 @@ THE STAGE: A DISPLAY THE USER NEVER SEES
   down the left as the user likes: the
   window live, what agents just did to it and which session (your session
   name shows: $AMCU_SESSION or --session make it readable), a browser
-  window's tabs (the ones your debugger is on marked "amcu"), and a "take
-  over" button. Quitting that app closes the stage. The display is kept by a
-  process of its own: an upgraded amcu takes the stage over by itself, and
-  `amcu stage restart` does it on demand, without the windows leaving the
-  stage.
+  window's tabs (clickable to switch or close directly from the stage, with
+  ones your debugger is on marked "amcu"), a "take over" button, a picker
+  (`+` / ⌘N) to discover open windows on the Mac and tuck chosen ones onto
+  the stage, workspace presets (`amcu stage preset`) to stage or release a
+  whole group in one step, global hotkeys (⌥⌘S to tuck the frontmost window,
+  ⌥⌘W to toggle the stage window), and a keep-alive toggle so an empty stage
+  can stay resident (configurable in policy.json). The browser extension popup
+  also has a "Move to Stage" button for the current browser window; `amcu stage
+  install-app` installs a signed `~/Applications/amcu Stage.app` so Spotlight
+  and browser extensions can start the stage with its own permissions. Quitting
+  that app closes the stage. The display defaults to at most 1920×1080 logical
+  points (configurable via `--size` or policy) and is kept by a process of its
+  own: an upgraded amcu takes the stage over by itself, and `amcu stage
+  restart` does it on demand, without the windows leaving the stage.
   A link the user opens from another application lands in the browser's
   last active window, which may be one you drive on the stage; the extension
   moves it to the window they used last (or a new one on their screen) and

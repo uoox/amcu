@@ -221,10 +221,40 @@ api.tabs.onUpdated.addListener(() => pollLoop());
 api.tabs.onActivated.addListener(() => pollLoop());
 api.runtime.onStartup.addListener(() => pollLoop());
 api.runtime.onInstalled.addListener(() => pollLoop());
+async function stageCurrentWindow(windowId) {
+  const win = windowId !== undefined && windowId !== null
+    ? await api.windows.get(windowId, { populate: true }).catch(() => null)
+    : await api.windows.getCurrent({ populate: true }).catch(() => null);
+  if (!win || win.type !== 'normal') {
+    return { ok: false, error: { code: 'window_not_found', message: 'current window cannot be moved to the stage' } };
+  }
+  if (win.state === 'fullscreen') {
+    return { ok: false, error: { code: 'unsupported', message: 'exit full screen before moving this window to the stage' } };
+  }
+  const activeTab = (win.tabs || []).find(t => t.active) || (win.tabs || [])[0] || null;
+  return api.runtime.sendNativeMessage(APP_ID, {
+    type: 'stage.putWindow',
+    params: {
+      window: { left: win.left, top: win.top, width: win.width, height: win.height },
+      state: win.state,
+      focused: !!win.focused,
+      title: activeTab && activeTab.title ? activeTab.title : '',
+      url: activeTab && activeTab.url ? activeTab.url : ''
+    }
+  });
+}
+
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.__amcuPopup) {
     pollLoop();
     sendResponse({ status, recentErrors, hostAccess });
+    return false;
+  }
+  if (message && message.__amcuStageCurrent) {
+    stageCurrentWindow(message.windowId)
+      .then(reply => sendResponse(reply))
+      .catch(error => sendResponse({ ok: false, error: asBridgeError(error).toJSON() }));
+    return true;
   }
   return false;
 });
@@ -796,6 +826,20 @@ const handlers = {
 
   async 'tabs.close'(params) {
     const tab = await resolveTab(params, { acting: true });
+    await api.tabs.remove(tab.id);
+    return { closed: tabSummary(tab) };
+  },
+
+  async 'stage.tab.activate'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
+    await api.tabs.update(tab.id, { active: true });
+    return { tab: tabSummary(await getTab(tab.id) || tab) };
+  },
+
+  async 'stage.tab.close'(params) {
+    const tab = await getTab(params.tab);
+    if (!tab) throw new BridgeError('tab_not_found', `no tab with id ${params.tab}`);
     await api.tabs.remove(tab.id);
     return { closed: tabSummary(tab) };
   },

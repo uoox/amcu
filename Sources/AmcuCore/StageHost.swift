@@ -14,25 +14,26 @@ import Foundation
 /// process, so it acts with the same Accessibility and Screen Recording
 /// grants as that command.
 public enum StageHost {
-    public static func run(pointSize: CGSize?, scale: Int?, source: String?) -> Never {
+    public static func run(pointSize: CGSize?, scale: Int?, source: String?, keepAlive: Bool? = nil, showOnStart: Bool = false) -> Never {
         signal(SIGPIPE, SIG_IGN)
-        if !StageBundle.isCurrentProcessInside { relaunchInsideBundle(pointSize: pointSize, scale: scale, source: source) }
+        if !StageBundle.isCurrentProcessInside { relaunchInsideBundle(pointSize: pointSize, scale: scale, source: source, keepAlive: keepAlive) }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
-        let runtime = StageRuntime(pointSize: pointSize, scale: scale, source: source)
+        let runtime = StageRuntime(pointSize: pointSize, scale: scale, source: source, keepAlive: keepAlive, showOnStart: showOnStart)
         stageRuntime = runtime
         app.delegate = runtime
         app.run()
         exit(0)
     }
 
-    private static func relaunchInsideBundle(pointSize: CGSize?, scale: Int?, source: String?) {
+    private static func relaunchInsideBundle(pointSize: CGSize?, scale: Int?, source: String?, keepAlive: Bool?) {
         let origin = URL(fileURLWithPath: source ?? Responsibility.executablePath).resolvingSymlinksInPath()
         do {
             var arguments = [try StageBundle.install(from: origin), "stage", "serve"]
             if let source { arguments += ["--source", source] }
             if let pointSize { arguments += ["--size", "\(Int(pointSize.width))x\(Int(pointSize.height))"] }
             if let scale { arguments += ["--scale", String(scale)] }
+            if keepAlive == true { arguments.append("--keep-alive") }
             _ = try Stage.spawnDetached(arguments)
             exit(0)
         } catch {
@@ -47,18 +48,27 @@ public enum StageHost {
             _ = try? StageClient.request("show", StageParams(activate: true))
             exit(0)
         }
+        if AXIsProcessTrusted() {
+            run(pointSize: nil, scale: nil, source: nil, keepAlive: true, showOnStart: true)
+        }
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         app.applicationIconImage = StageIcon.image()
         app.activate()
         let alert = NSAlert()
-        alert.messageText = StageText.t("The stage is not running", "舞台没有在运行")
+        alert.messageText = StageText.t("Accessibility permission needed", "需要辅助功能权限")
         alert.informativeText = StageText.t(
-            "It starts by itself when an agent puts a window on it (`amcu stage put`), and then shows up in the Dock with every window as a tab.",
-            "agent 把窗口放上舞台（amcu stage put）时它会自己启动，出现在程序坞里，每个窗口一个标签。"
+            "Grant Accessibility to amcu Stage in System Settings so it can start directly from Finder/Spotlight and move windows onto the stage. You can also start the stage from a terminal with `amcu stage start`.",
+            "请在系统设置中授予 amcu Stage 辅助功能权限，之后即可直接从访达/聚焦启动舞台、并在浏览器扩展中一键收入窗口。"
         )
-        alert.addButton(withTitle: StageText.t("OK", "好"))
-        alert.runModal()
+        alert.addButton(withTitle: StageText.t("Open Accessibility Settings", "打开辅助功能设置"))
+        alert.addButton(withTitle: StageText.t("Cancel", "取消")).keyEquivalent = "\u{1b}"
+        if alert.runModal() == .alertFirstButtonReturn {
+            Permissions.request()
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        }
         exit(0)
     }
 }
@@ -121,8 +131,13 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     /// dialogs, panels. Help tags, drag images and the like are left alone.
     static let followedSubroles: Set<String> = ["AXStandardWindow", "AXDialog", "AXSystemDialog", "AXFloatingWindow", "AXSystemFloatingWindow"]
 
+    private static let keepAliveKey = "amcu.stage.keepAlive"
+    private static let hotkeysKey = "amcu.stage.hotkeys"
+
     private let requestedSize: CGSize?
     private let requestedScale: Int?
+    private let requestedKeepAlive: Bool?
+    private let showOnStart: Bool
     /// The binary this host was copied from; when it changes, a new host
     /// from it takes over.
     private let source: String?
@@ -137,6 +152,9 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private var stageArea: CGRect = .zero
     private(set) var scale = 1
     private(set) var contact: StageGeometry.Contact = .apart
+    private(set) var keepAlive = false
+    private(set) var hotkeysEnabled = true
+    private var hotkeys: StageHotkeyManager?
     private var userDisplays: [CGRect] = []
     private var records: [CGWindowID: Record] = [:]
     private var unresolved: [StageState.SavedRecord] = []
@@ -154,7 +172,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private var askSeq = 0
     /// Which tabs are in which browser window on the stage, for placing a
     /// browser verb's activity; refreshed by the stage window and on demand.
-    private var tabPairing: [CGWindowID: StageTabs.Paired] = [:]
+    private(set) var tabPairing: [CGWindowID: StageTabs.Paired] = [:]
     private var pairingTabs = false
     private var lastPersisted: Data?
     private var app: StageApp?
@@ -167,9 +185,11 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     private var stopping = false
     private var lastPlacement = Date.distantPast
 
-    init(pointSize: CGSize?, scale: Int?, source: String?) {
+    init(pointSize: CGSize?, scale: Int?, source: String?, keepAlive: Bool? = nil, showOnStart: Bool = false) {
         requestedSize = pointSize
         requestedScale = scale
+        requestedKeepAlive = keepAlive
+        self.showOnStart = showOnStart
         self.source = source
     }
 
@@ -220,7 +240,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             displayID = kept.displayID
             scale = kept.scale
             refreshDisplays()
-            StageRuntime.log("taking over display \(displayID), kept by pid \(kept.pid) since \(ISO8601DateFormatter().string(from: kept.since))")
+            StageRuntime.log("taking over display \(displayID), kept by pid \(kept.pid) since \(StageClock.iso8601(kept.since))")
             return
         }
         // A display whose keeper just went takes a moment to disappear.
@@ -236,7 +256,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             return
         }
         let mainBounds = CGDisplayBounds(CGMainDisplayID())
-        let size = requestedSize ?? mainBounds.size
+        let cap = Policy.current.stage.maxDisplaySize.flatMap(StageGeometry.parseSize)
+        let size = requestedSize ?? StageGeometry.defaultStageSize(main: mainBounds.size, maxSize: cap)
         let scale = requestedScale ?? Int(NSScreen.screens.first?.backingScaleFactor ?? 2)
         do {
             let started = try StageDisplayHolder.start(pointSize: size, scale: scale)
@@ -285,14 +306,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         refreshArea()
     }
 
-    private func screen(for id: CGDirectDisplayID) -> NSScreen? {
-        NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }
-    }
-
     private var mainHeight: CGFloat { CGDisplayBounds(CGMainDisplayID()).height }
 
     private func refreshArea() {
-        if let screen = screen(for: displayID) {
+        if let screen = NSScreen.forDisplay(displayID) {
             stageArea = StageGeometry.quartzRect(fromCocoa: screen.visibleFrame, mainDisplayHeight: mainHeight)
         } else {
             stageArea = CGRect(x: stageBounds.minX, y: stageBounds.minY + 40, width: stageBounds.width, height: max(0, stageBounds.height - 40))
@@ -306,8 +323,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     }
 
     private func waitForScreen(deadline: Date, then: @escaping () -> Void) {
-        if screen(for: displayID) != nil || Date() > deadline {
-            if screen(for: displayID) == nil { StageRuntime.log("NSScreen did not list the stage within 3s; using its bounds minus a menu bar") }
+        if NSScreen.forDisplay(displayID) != nil || Date() > deadline {
+            if NSScreen.forDisplay(displayID) == nil { StageRuntime.log("NSScreen did not list the stage within 3s; using its bounds minus a menu bar") }
             then()
             return
         }
@@ -320,6 +337,12 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         refreshDisplays()
         let restored = restoreState()
         if !restored.done { try? FileManager.default.removeItem(at: Stage.takeoversURL) }
+        keepAlive = requestedKeepAlive
+            ?? restored.keepAlive
+            ?? (UserDefaults.standard.object(forKey: Self.keepAliveKey) as? Bool)
+            ?? (Stage.idleExit <= 0)
+        hotkeysEnabled = (UserDefaults.standard.object(forKey: Self.hotkeysKey) as? Bool)
+            ?? Policy.current.stage.hotkeys
         sourceStamp = source.flatMap(FileStamp.init(path:))
         do {
             listenFD = try RelaySockets.listenUnix(path: Stage.socketURL.path)
@@ -335,11 +358,16 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         self.app = app
         NSApp.setActivationPolicy(.regular)
         startCursorGuard()
+        startHotkeys()
         observeSystem()
         handleSignals()
         repeatOnMain(every: 2) { [weak self] in self?.tick() }
         StageRuntime.log("stage up: display \(displayID), \(Int(stageBounds.width))x\(Int(stageBounds.height))@\(scale)x at \(Int(stageBounds.minX)),\(Int(stageBounds.minY)), \(contact.rawValue) contact; answers for \(answersFor ?? "?")\(holder.map { "; display kept by pid \($0.pid)" } ?? "")")
-        if restored.shown { app.show() }
+        if showOnStart {
+            app.show(activate: true)
+        } else if restored.shown {
+            app.show()
+        }
         changed()
     }
 
@@ -353,8 +381,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                 usleep(200_000)
                 continue
             }
-            var one: Int32 = 1
-            setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+            RelaySockets.setNoSigPipe(client)
             let worker = Thread { [unowned self] in self.serve(client) }
             worker.start()
         }
@@ -386,7 +413,11 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             let moves: [StageMove]
             switch request.method {
             case "status": moves = []
+            case "config":
+                if let keep = request.params.keepAlive { setKeepAlive(keep) }
+                moves = []
             case "put": moves = try put(request.params)
+            case "putBrowserWindow": moves = try putBrowserWindow(request.params)
             case "release": moves = try release(request.params)
             case "stop": moves = stop(reason: "asked to stop")
             case "show":
@@ -440,8 +471,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         Responsibility.current().map { $0.isSelf ? "amcu" : $0.name }
     }
 
-    func status() -> StageStatus {
-        prune()
+    func status(pruneFirst: Bool = true, onScreen: [[String: Any]]? = nil) -> StageStatus {
+        if pruneFirst { prune() }
         let following = followers.values
             .map { StageFollow(pid: $0.pid, app: $0.app, bundleID: $0.bundleID) }
             .sorted { $0.pid < $1.pid }
@@ -457,14 +488,15 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             accessibility: AXIsProcessTrusted(),
             screenRecording: CGPreflightScreenCaptureAccess(),
             cursorPullbacks: pullbacks,
-            windows: windowsOnStage(),
+            windows: windowsOnStage(using: onScreen),
             takenOver: takeovers.values.sorted { $0.since < $1.since }.map(publicTakeover),
             following: following,
             notes: notes,
             // A folded repeat keeps its place in the list but not its time.
             activity: Array(activity.suffix(20)).sorted { $0.at < $1.at },
             holderPID: holder?.pid,
-            asks: asks
+            asks: asks,
+            keepAlive: keepAlive || Stage.idleExit <= 0
         )
     }
 
@@ -516,11 +548,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         for open in asks where open.isOpen && open.windowID == UInt32(id) { end(ask: open.id, state) }
     }
 
-    private func pruneAsks() {
+    private func pruneAsks(staged: [StageWindow], existing: Set<CGWindowID>) {
         asks.removeAll { !$0.isOpen && Date().timeIntervalSince($0.endedAt ?? $0.at) > 600 }
         guard asks.contains(where: \.isOpen), !Stage.screenIsLocked else { return }
-        let here = Set(windowsOnStage().map { CGWindowID($0.windowID) }).union(records.keys).union(takeovers.keys)
-        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let here = Set(staged.map { CGWindowID($0.windowID) }).union(records.keys).union(takeovers.keys)
         for open in asks where open.isOpen && !here.contains(CGWindowID(open.windowID)) {
             end(ask: open.id, existing.contains(CGWindowID(open.windowID)) ? .released : .gone)
         }
@@ -556,9 +587,174 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             guard let element = findWindow(app: app, appElement: appElement, id: id) else {
                 return StageMove(windowID: id, app: appName(app), title: nil, from: nil, to: nil, ok: false, note: "no such window any more")
             }
-            return stage(element, id: id, app: app, origin: .put)
+            return stage(element, id: id, app: app, origin: .put, restoreMinimized: params.restoreMinimized == true)
         }
         if params.follow ?? true { follow(app, appElement: appElement) }
+        return moves
+    }
+
+    func putBrowserWindow(_ params: StageParams) throws -> [StageMove] {
+        guard !stopping else { throw AmcuError(.stageUnavailable, "the stage is shutting down") }
+        guard AXIsProcessTrusted() else { throw hostNotTrusted() }
+        guard let pid = params.pid, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
+            throw AmcuError(.appNotFound, "the browser process is no longer running")
+        }
+        guard let target = params.browserWindow else {
+            throw AmcuError(.invalidArgument, "putBrowserWindow requires browserWindow")
+        }
+        let appElement = AXUIElementCreateApplication(pid)
+        AX.setMessagingTimeout(appElement, seconds: 1.5)
+        let onScreen = Stage.windowList([.optionOnScreenOnly, .excludeDesktopElements])
+        var zOrders: [CGWindowID: Int] = [:]
+        for (index, entry) in onScreen.enumerated() {
+            guard (entry[kCGWindowOwnerPID as String] as? pid_t) == pid,
+                  let id = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
+            zOrders[id] = index
+        }
+        var elements: [CGWindowID: AXUIElement] = [:]
+        var candidates: [StageBrowserMatcher.Candidate] = []
+        for element in AX.windows(appElement) {
+            AX.setMessagingTimeout(element, seconds: 0.8)
+            guard let id = AX.windowID(element), let frame = AX.frame(element),
+                  frame.width >= 100, frame.height >= 100,
+                  AX.bool(element, kAXMinimizedAttribute as String) != true else { continue }
+            elements[id] = element
+            candidates.append(StageBrowserMatcher.Candidate(
+                id: id,
+                frame: frame,
+                title: StageRuntime.title(of: element) ?? "",
+                main: AX.bool(element, kAXMainAttribute as String) == true,
+                zOrder: zOrders[id] ?? Int.max
+            ))
+        }
+        guard let matchedID = StageBrowserMatcher.match(candidates: candidates, target: target),
+              let element = elements[matchedID] else {
+            throw AmcuError(.windowNotFound, StageText.t(
+                "Could not uniquely identify this browser window on macOS.",
+                "无法唯一定位当前浏览器窗口，为避免误移动已取消。"
+            ))
+        }
+        let move = takeovers[matchedID] != nil
+            ? handBack(matchedID, by: params.by)
+            : stage(element, id: matchedID, app: app, origin: .put)
+        if move.ok {
+            let label = move.title.map { " \"\($0)\"" } ?? ""
+            note("moved \(move.app)\(label) onto the stage from the browser extension")
+        }
+        return [move]
+    }
+
+    @discardableResult
+    func putFromPicker(_ items: [(pid: pid_t, windowID: CGWindowID)], follow shouldFollow: Bool) -> [StageMove] {
+        guard !stopping, AXIsProcessTrusted() else { return [] }
+        var moves: [StageMove] = []
+        var followedApps: [pid_t: (app: NSRunningApplication, element: AXUIElement)] = [:]
+        var appCache: [pid_t: (app: NSRunningApplication, element: AXUIElement)] = [:]
+        for item in items {
+            if takeovers[item.windowID] != nil {
+                moves.append(handBack(item.windowID))
+                continue
+            }
+            let resolved: (app: NSRunningApplication, element: AXUIElement)? = appCache[item.pid] ?? {
+                guard let app = NSRunningApplication(processIdentifier: item.pid), !app.isTerminated else { return nil }
+                let appElement = AXUIElementCreateApplication(item.pid)
+                AX.setMessagingTimeout(appElement, seconds: 1.5)
+                let pair = (app, appElement)
+                appCache[item.pid] = pair
+                return pair
+            }()
+            guard let resolved else {
+                moves.append(StageMove(windowID: item.windowID, app: "pid \(item.pid)", title: nil, from: nil, to: nil, ok: false, note: StageText.t("application is gone", "应用已退出")))
+                continue
+            }
+            guard let element = findWindow(app: resolved.app, appElement: resolved.element, id: item.windowID) else {
+                moves.append(StageMove(windowID: item.windowID, app: appName(resolved.app), title: nil, from: nil, to: nil, ok: false, note: StageText.t("window is no longer available", "窗口已关闭或不可访问")))
+                continue
+            }
+            let move = stage(element, id: item.windowID, app: resolved.app, origin: .put, restoreMinimized: true)
+            moves.append(move)
+            if move.ok {
+                let label = move.title.map { " \"\($0)\"" } ?? ""
+                note("moved \(move.app)\(label) onto the stage from the stage window")
+                if shouldFollow { followedApps[item.pid] = resolved }
+            }
+        }
+        for (_, pair) in followedApps {
+            follow(pair.app, appElement: Target.appElement(pair.app))
+        }
+        changed()
+        if let first = moves.first(where: \.ok) {
+            app?.selectIfShown(windowID: CGWindowID(first.windowID))
+        }
+        return moves
+    }
+
+    func setKeepAlive(_ enabled: Bool) {
+        keepAlive = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.keepAliveKey)
+        if enabled { emptySince = nil }
+        changed()
+    }
+
+    func setHotkeysEnabled(_ enabled: Bool) {
+        hotkeysEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.hotkeysKey)
+        let stagePolicy = Policy.current.stage
+        hotkeys?.setEnabled(enabled, putFrontSpec: stagePolicy.putFrontHotkey, toggleWindowSpec: stagePolicy.toggleWindowHotkey)
+        changed()
+    }
+
+    private func startHotkeys() {
+        let manager = StageHotkeyManager { [weak self] action in
+            guard let self, !self.stopping else { return }
+            switch action {
+            case .putFront: self.putFrontmostWindow()
+            case .toggleWindow: self.app?.toggleVisibility()
+            }
+        }
+        let stagePolicy = Policy.current.stage
+        manager.setEnabled(hotkeysEnabled, putFrontSpec: stagePolicy.putFrontHotkey, toggleWindowSpec: stagePolicy.toggleWindowHotkey)
+        hotkeys = manager
+    }
+
+    /// Triggered by the global hotkey (default ⌥⌘S): tucks the active window
+    /// onto the stage (or hands it back if taken over), never staging amcu.
+    func putFrontmostWindow() {
+        guard !stopping, AXIsProcessTrusted() else { return }
+        guard let pid = focusedPID(), pid != getpid(), !Stage.isAmcu(pid),
+              let frontApp = NSRunningApplication(processIdentifier: pid), !frontApp.isTerminated else { return }
+        let appElement = AXUIElementCreateApplication(pid)
+        AX.setMessagingTimeout(appElement, seconds: 1)
+        let element = AX.element(appElement, kAXFocusedWindowAttribute as String)
+            ?? AX.element(appElement, kAXMainWindowAttribute as String)
+            ?? AX.windows(appElement).first
+        guard let element, let id = AX.windowID(element) else { return }
+        if takeovers[id] != nil {
+            _ = handBack(id)
+            return
+        }
+        if AX.bool(element, "AXFullScreen") == true {
+            note("hotkey skipped \(appName(frontApp)): exit full screen before moving it to the stage")
+            changed()
+            return
+        }
+        let move = stage(element, id: id, app: frontApp, origin: .put)
+        if move.ok {
+            let label = move.title.map { " \"\($0)\"" } ?? ""
+            note("moved \(move.app)\(label) onto the stage via global hotkey")
+            changed()
+            app?.selectIfShown(windowID: CGWindowID(move.windowID))
+        } else {
+            note("hotkey could not move \(move.app): \(move.note ?? "unknown reason")")
+            changed()
+        }
+    }
+
+    @discardableResult
+    func releaseWindowIDs(_ ids: [CGWindowID]) -> [StageMove] {
+        guard !ids.isEmpty else { return [] }
+        let moves = (try? release(StageParams(windowIDs: ids))) ?? []
+        changed()
         return moves
     }
 
@@ -567,12 +763,35 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         return AX.remoteWindow(pid: app.processIdentifier, windowID: id)
     }
 
-    private func stage(_ element: AXUIElement, id: CGWindowID, app: NSRunningApplication, origin: StageWindow.Origin) -> StageMove {
+    private func windowElement(id: CGWindowID, app: NSRunningApplication, record: Record?) -> AXUIElement? {
+        if let record, AX.frame(record.element) != nil { return record.element }
+        return findWindow(app: app, appElement: Target.appElement(app), id: id)
+    }
+
+    private func activateWindow(_ element: AXUIElement, app: NSRunningApplication) {
+        try? AX.setValue(element, kAXMainAttribute as String, kCFBooleanTrue)
+        try? AX.perform(element, kAXRaiseAction as String)
+        try? AX.setValue(Target.appElement(app), kAXFrontmostAttribute as String, kCFBooleanTrue)
+    }
+
+    private func stage(_ element: AXUIElement, id: CGWindowID, app: NSRunningApplication, origin: StageWindow.Origin, restoreMinimized: Bool = false) -> StageMove {
         let name = appName(app)
         AX.setMessagingTimeout(element, seconds: 1.5)
         let title = StageRuntime.title(of: element)
         func failure(_ note: String, from: CGRect? = nil, to: CGRect? = nil) -> StageMove {
             StageMove(windowID: id, app: name, title: title, from: from.map(FrameJSON.init), to: to.map(FrameJSON.init), ok: false, note: note)
+        }
+        if AX.bool(element, kAXMinimizedAttribute as String) == true {
+            guard restoreMinimized else {
+                return failure("it is minimised: restoring it would animate it out of the user's Dock, so it stays where it is", from: AX.frame(element))
+            }
+            do {
+                try WindowControl.setMinimized(element, false)
+            } catch {
+                return failure("could not restore the minimised window: \((error as? AmcuError)?.message ?? String(describing: error))", from: AX.frame(element))
+            }
+            let deadline = Date().addingTimeInterval(0.8)
+            while Date() < deadline, AX.bool(element, kAXMinimizedAttribute as String) == true { usleep(50_000) }
         }
         guard let frame = AX.frame(element) else { return failure("its frame cannot be read") }
         if StageGeometry.isOnStage(frame, stage: stageBounds) {
@@ -581,9 +800,6 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                 watchDestruction(of: element, pid: app.processIdentifier)
             }
             return StageMove(windowID: id, app: name, title: title, from: FrameJSON(frame), to: FrameJSON(frame), ok: true, note: "already on the stage")
-        }
-        if AX.bool(element, kAXMinimizedAttribute as String) == true {
-            return failure("it is minimised: restoring it would animate it out of the user's Dock, so it stays where it is", from: frame)
         }
         let source = userDisplays.first { StageGeometry.isOnStage(frame, stage: $0) } ?? CGDisplayBounds(CGMainDisplayID())
         let target = StageGeometry.carry(frame, from: source, to: stageBounds, within: stageArea)
@@ -673,11 +889,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             records[id] = nil
             return StageMove(windowID: id, app: name, title: title, from: nil, to: nil, ok: false, note: "its application is gone")
         }
-        let element: AXUIElement? = {
-            if let record, AX.frame(record.element) != nil { return record.element }
-            return findWindow(app: app, appElement: Target.appElement(app), id: id)
-        }()
-        guard let element, let frame = AX.frame(element) else {
+        guard let element = windowElement(id: id, app: app, record: record), let frame = AX.frame(element) else {
             records[id] = nil
             return StageMove(windowID: id, app: name, title: title, from: nil, to: nil, ok: false, note: "no such window any more")
         }
@@ -710,7 +922,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     /// The usable area (below the menu bar, clear of the Dock) of the user
     /// display under `point`, in Quartz coordinates.
     private func usableArea(containing point: CGPoint) -> CGRect {
-        for screen in NSScreen.screens where !Stage.identity.matches((screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0) {
+        for screen in NSScreen.screens where !screen.isStage {
             let frame = StageGeometry.quartzRect(fromCocoa: screen.frame, mainDisplayHeight: mainHeight)
             if frame.contains(point) { return StageGeometry.quartzRect(fromCocoa: screen.visibleFrame, mainDisplayHeight: mainHeight) }
         }
@@ -737,11 +949,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         guard let pid = record?.pid ?? entry?.pid, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
             return failure("its application is gone")
         }
-        let element: AXUIElement? = {
-            if let record, AX.frame(record.element) != nil { return record.element }
-            return findWindow(app: app, appElement: Target.appElement(app), id: id)
-        }()
-        guard let element, let frame = AX.frame(element) else { return failure("no such window any more") }
+        guard let element = windowElement(id: id, app: app, record: record), let frame = AX.frame(element) else { return failure("no such window any more") }
         guard StageGeometry.isOnStage(frame, stage: stageBounds) else { return failure("it is not on the stage") }
         let previousFront = focusedPID()
         let destination: CGPoint
@@ -760,9 +968,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             return failure("the application kept it on the stage")
         }
         records[id] = nil
-        try? AX.setValue(element, kAXMainAttribute as String, kCFBooleanTrue)
-        try? AX.perform(element, kAXRaiseAction as String)
-        try? AX.setValue(Target.appElement(app), kAXFrontmostAttribute as String, kCFBooleanTrue)
+        activateWindow(element, app: app)
         takeovers[id] = Takeover(
             windowID: id, pid: pid, app: name, bundleID: app.bundleIdentifier, title: title, since: Date(),
             stageFrame: frame, home: record?.home, origin: record?.origin ?? .found,
@@ -873,9 +1079,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     func focusHeld(_ id: CGWindowID) {
         guard let held = takeovers[id], let app = NSRunningApplication(processIdentifier: held.pid), !app.isTerminated,
               let element = findWindow(app: app, appElement: Target.appElement(app), id: id) else { return }
-        try? AX.setValue(element, kAXMainAttribute as String, kCFBooleanTrue)
-        try? AX.perform(element, kAXRaiseAction as String)
-        try? AX.setValue(Target.appElement(app), kAXFrontmostAttribute as String, kCFBooleanTrue)
+        activateWindow(element, app: app)
     }
 
     private func publicTakeover(_ held: Takeover) -> StageTakeover {
@@ -894,11 +1098,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     }
 
     /// Takeovers whose window was closed are over.
-    private func pruneTakeovers() {
-        guard !takeovers.isEmpty,
-              let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return }
-        let existing = Set(list.compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
-        let gone = takeovers.keys.filter { !existing.contains($0) }
+    private func pruneTakeovers(existing: Set<CGWindowID>? = nil) {
+        guard !takeovers.isEmpty else { return }
+        let present = existing ?? Stage.existingWindowIDs()
+        let gone = takeovers.keys.filter { !present.contains($0) }
         guard !gone.isEmpty else { return }
         for id in gone {
             if let held = takeovers.removeValue(forKey: id) { note("\(held.app)'s taken-over window closed") }
@@ -907,10 +1110,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     }
 
     private func focusedPID() -> pid_t? {
-        let systemWide = AXUIElementCreateSystemWide()
-        AX.setMessagingTimeout(systemWide, seconds: 0.5)
-        if let focused = AX.element(systemWide, kAXFocusedApplicationAttribute as String), let pid = AX.pid(focused) { return pid }
-        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+        Stage.focusedApplicationPID() ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
 
     // MARK: - Following new windows
@@ -1006,10 +1206,24 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     // MARK: - What is on the stage
 
     /// Every window whose centre is on the stage, whoever put it there.
-    func windowsOnStage() -> [StageWindow] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
+    func windowsOnStage(using preloaded: [[String: Any]]? = nil) -> [StageWindow] {
+        let list = preloaded ?? Stage.windowList([.optionOnScreenOnly, .excludeDesktopElements])
         let own = getpid()
         let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
+        var appsByPID: [pid_t: NSRunningApplication?] = [:]
+        var amcuByPID: [pid_t: Bool] = [:]
+        func running(_ pid: pid_t) -> NSRunningApplication? {
+            if let cached = appsByPID[pid] { return cached }
+            let app = NSRunningApplication(processIdentifier: pid)
+            appsByPID[pid] = app
+            return app
+        }
+        func isAmcu(_ pid: pid_t) -> Bool {
+            if let cached = amcuByPID[pid] { return cached }
+            let value = Stage.isAmcu(pid)
+            amcuByPID[pid] = value
+            return value
+        }
         var result: [StageWindow] = []
         for entry in list {
             guard let id = entry[kCGWindowNumber as String] as? CGWindowID,
@@ -1019,10 +1233,11 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
                   let rect = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
                   rect.width >= 40, rect.height >= 40,
                   (entry[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                  StageGeometry.isOnStage(rect, stage: stageBounds), !Stage.isAmcu(pid) else { continue }
+                  StageGeometry.isOnStage(rect, stage: stageBounds), !isAmcu(pid) else { continue }
             // Mission Control's shields, space bars and app icons are not
             // application windows. Listing them creates phantom stage tabs.
-            let ownerBundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+            let runningApp = running(pid)
+            let ownerBundle = runningApp?.bundleIdentifier
             guard ownerBundle != "com.apple.WindowManager", ownerBundle != "com.apple.dock" else { continue }
             let record = records[id]
             let saved = record == nil ? unresolved.first { $0.windowID == id } : nil
@@ -1030,8 +1245,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             result.append(StageWindow(
                 windowID: id,
                 pid: pid,
-                app: record?.app ?? saved?.app ?? NSRunningApplication(processIdentifier: pid)?.localizedName ?? (entry[kCGWindowOwnerName as String] as? String) ?? "pid \(pid)",
-                bundleID: record?.bundleID ?? saved?.bundleID ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier,
+                app: record?.app ?? saved?.app ?? runningApp?.localizedName ?? (entry[kCGWindowOwnerName as String] as? String) ?? "pid \(pid)",
+                bundleID: record?.bundleID ?? saved?.bundleID ?? ownerBundle,
                 title: title,
                 frame: FrameJSON(rect),
                 home: record?.home.map(FrameJSON.init) ?? saved?.home,
@@ -1046,14 +1261,14 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     /// stage: minimised, or anything that briefly empties the on-screen list
     /// (a put window came back "not put here by amcu" after a night, its home
     /// lost).
-    private func prune() {
-        adoptUnresolved()
+    private func prune(onScreen: [[String: Any]]? = nil, all: [[String: Any]]? = nil, existing: Set<CGWindowID>? = nil) {
+        adoptUnresolved(existing: existing)
         guard !records.isEmpty else { return }
-        let present = Set(windowsOnStage().map(\.windowID))
+        let present = Set(windowsOnStage(using: onScreen).map(\.windowID))
         let absent = records.filter { !present.contains($0.key) }
         guard !absent.isEmpty else { return }
         var bounds: [CGWindowID: CGRect] = [:]
-        for entry in CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? [] {
+        for entry in all ?? Stage.windowList([.optionAll]) {
             guard let id = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
             bounds[id] = (entry[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) } ?? .null
         }
@@ -1069,14 +1284,14 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func adoptUnresolved() {
+    private func adoptUnresolved(existing: Set<CGWindowID>? = nil) {
         guard !unresolved.isEmpty else { return }
-        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let present = existing ?? Stage.existingWindowIDs()
         let locked = Stage.screenIsLocked
         var waiting: [StageState.SavedRecord] = []
         var adopted = 0
         for saved in unresolved {
-            guard existing.contains(saved.windowID), records[saved.windowID] == nil,
+            guard present.contains(saved.windowID), records[saved.windowID] == nil,
                   let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
             guard !locked, let element = findWindow(app: app, appElement: Target.appElement(app), id: saved.windowID) else {
                 waiting.append(saved)
@@ -1096,11 +1311,11 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         "com.apple.UserNotificationCenter", "com.apple.SecurityAgent", "com.apple.coreservices.uiagent", "com.apple.accessibility.universalAccessAuthWarn"
     ]
 
-    private func returnPrompts() {
+    private func returnPrompts(onScreen: [[String: Any]]? = nil) {
         guard !userDisplays.isEmpty, !Stage.screenIsLocked else { return }
         let apps = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated && StageRuntime.promptApps.contains($0.bundleIdentifier ?? "") }
         let pids = Set(apps.map(\.processIdentifier))
-        let list = pids.isEmpty ? [] : CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let list = pids.isEmpty ? [] : (onScreen ?? Stage.windowList([.optionOnScreenOnly]))
         let showing = Set(list.compactMap { entry -> pid_t? in
             guard let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pids.contains(pid),
                   let bounds = entry[kCGWindowBounds as String] as? NSDictionary,
@@ -1225,23 +1440,32 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             displayGone()
             return
         }
-        prune()
-        pruneTakeovers()
-        returnPrompts()
-        pruneAsks()
+        let onScreen = Stage.windowList([.optionOnScreenOnly, .excludeDesktopElements])
+        let needsAll = !unresolved.isEmpty || !records.isEmpty || !takeovers.isEmpty || asks.contains(where: \.isOpen)
+        let all = needsAll ? Stage.windowList([.optionAll]) : []
+        let existing = needsAll ? Stage.existingWindowIDs(from: all) : []
+        prune(onScreen: onScreen, all: all, existing: existing)
+        pruneTakeovers(existing: existing)
+        returnPrompts(onScreen: onScreen)
+        let staged = windowsOnStage(using: onScreen)
+        pruneAsks(staged: staged, existing: existing)
         // Not empty while amcu still holds a put window, even if the window
         // list cannot see it right now: leaving would dump it on the user.
-        if windowsOnStage().isEmpty && records.isEmpty && unresolved.isEmpty && takeovers.isEmpty {
-            let start = emptySince ?? Date()
-            emptySince = start
-            if Date().timeIntervalSince(start) >= Stage.idleExit {
-                stopAndExit(reason: "empty for \(Int(Stage.idleExit / 60)) minutes")
-                return
+        if staged.isEmpty && records.isEmpty && unresolved.isEmpty && takeovers.isEmpty {
+            if !keepAlive && Stage.idleExit > 0 {
+                let start = emptySince ?? Date()
+                emptySince = start
+                if Date().timeIntervalSince(start) >= Stage.idleExit {
+                    stopAndExit(reason: "empty for \(Int(Stage.idleExit / 60)) minutes")
+                    return
+                }
+            } else {
+                emptySince = nil
             }
         } else {
             emptySince = nil
         }
-        changed()
+        changed(alreadyPruned: true, onScreen: onScreen)
         checkForUpgrade()
     }
 
@@ -1283,6 +1507,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     func exitNow() {
         stopping = true
+        hotkeys?.unregisterAll()
+        hotkeys = nil
         app?.uninstall()
         app = nil
         // No request reaches a host on its way out.
@@ -1305,6 +1531,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         }
         persist()
         stopping = true
+        hotkeys?.unregisterAll()
+        hotkeys = nil
         app?.uninstall()
         app = nil
         if listenFD >= 0 { close(listenFD) }
@@ -1364,9 +1592,9 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     /// After anything changed: the stage window shows it, and the next host
     /// would find it.
-    private func changed() {
+    private func changed(alreadyPruned: Bool = false, onScreen: [[String: Any]]? = nil) {
         persist()
-        app?.refresh()
+        app?.refresh(pruneFirst: !alreadyPruned, onScreen: onScreen)
     }
 
     private func persist() {
@@ -1388,7 +1616,8 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
             activity: Array(activity.suffix(80)),
             windowShown: app?.isShown ?? false,
             tabs: app?.tabs,
-            asks: asks
+            asks: asks,
+            keepAlive: keepAlive
         )
         guard let data = try? StageWire.encoder().encode(state), data != lastPersisted else { return }
         do {
@@ -1402,10 +1631,10 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
 
     /// Carries on from the host that kept this display before: its records,
     /// what it followed and what the user holds, for the windows still there.
-    private func restoreState() -> (done: Bool, shown: Bool, tabs: StageState.Tabs?) {
+    private func restoreState() -> (done: Bool, shown: Bool, tabs: StageState.Tabs?, keepAlive: Bool?) {
         guard let holder, let data = try? Data(contentsOf: Stage.stateURL),
               let state = try? StageWire.decoder().decode(StageState.self, from: data),
-              state.holderPID == holder.pid, state.displayID == displayID else { return (false, false, nil) }
+              state.holderPID == holder.pid, state.displayID == displayID else { return (false, false, nil, nil) }
         since = state.since
         pullbacks = state.pullbacks
         notes = state.notes
@@ -1413,7 +1642,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         activitySeq = activity.map(\.seq).max() ?? 0
         asks = state.asks ?? []
         askSeq = asks.map(\.id).max() ?? 0
-        let existing = Set((CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { $0[kCGWindowNumber as String] as? CGWindowID })
+        let existing = Stage.existingWindowIDs()
         for saved in state.records {
             guard let app = NSRunningApplication(processIdentifier: saved.pid), !app.isTerminated else { continue }
             guard let element = findWindow(app: app, appElement: Target.appElement(app), id: saved.windowID) else {
@@ -1433,7 +1662,7 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
         saveTakeovers()
         let waiting = unresolved.isEmpty ? "" : "; \(unresolved.count) more kept until accessibility can see \(unresolved.count == 1 ? "it" : "them")\(Stage.screenIsLocked ? " (the screen is locked)" : "")"
         note("took the stage over from the previous host (amcu \(state.version)): \(records.count) window\(records.count == 1 ? "" : "s"), \(takeovers.count) held by the user, \(followers.count) followed\(waiting)")
-        return (true, state.windowShown, state.tabs)
+        return (true, state.windowShown, state.tabs, state.keepAlive)
     }
 
     // MARK: - Upgrading in place
@@ -1555,16 +1784,13 @@ final class StageRuntime: NSObject, NSApplicationDelegate {
     // MARK: - Notes and log
 
     func note(_ text: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        notes.append("\(formatter.string(from: Date())) \(text)")
+        notes.append("\(StageClock.hhmmss(Date())) \(text)")
         if notes.count > 8 { notes.removeFirst(notes.count - 8) }
         StageRuntime.log(text)
     }
 
     static func log(_ message: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        FileHandle.standardError.write(Data("\(stamp) amcu stage[\(getpid())]: \(message)\n".utf8))
+        FileHandle.standardError.write(Data("\(StageClock.iso8601(Date())) amcu stage[\(getpid())]: \(message)\n".utf8))
     }
 }
 
@@ -1611,4 +1837,5 @@ struct StageState: Codable {
     let windowShown: Bool
     let tabs: Tabs?
     var asks: [StageAsk]? = nil
+    var keepAlive: Bool? = nil
 }

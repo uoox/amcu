@@ -18,11 +18,14 @@ enum StageCommands {
       top or down the left as the user chooses: a live picture of the
       window, what agents just did to it and which session did it (a ring
       where a click landed), a browser window's tabs (the ones amcu's
-      debugger is on marked), what an agent asks of the user, and a way to
-      close the stage. Quitting the app closes the stage. The cursor is kept off the
-      stage. The display is kept by a process of its own, so upgrading amcu
-      or `stage restart` replaces the host without the windows ever leaving
-      the stage.
+      debugger is on marked), what an agent asks of the user, a picker (`+` /
+      ⌘N) to discover all open windows on the Mac and move chosen ones onto the
+      stage, and a way to close the stage. The browser extension popup also has
+      a "Move to Stage" (收入舞台) button to tuck the current browser window
+      onto the stage without application-wide following. Quitting the app closes
+      the stage. The cursor is kept off the stage. The display is kept by a
+      process of its own, so upgrading amcu or `stage restart` replaces the host
+      without the windows ever leaving the stage.
 
     LINKS THE USER OPENS STAY OFF THE STAGE
       A link the user opens from another application (chat, mail, Finder)
@@ -84,14 +87,23 @@ enum StageCommands {
                pictures, take-over and hand-back buttons) without taking their
                keyboard; they move, resize, minimise or close it like any
                window, and the Dock icon brings it back; --hide closes it
-      start    [--size WxH] [--scale 1|2]
-               start an empty stage; the default matches the user's main display
-      restart  a new host from this amcu takes over the stage; the display and
-               its windows stay (a host from before 0.13 keeps the display
-               itself: then its windows come back to the user's screen for a
-               moment and are put back). An upgraded amcu does this by itself
-               a few seconds after it is installed.
-      stop     bring every window back and remove the display
+      start       [--size WxH] [--scale 1|2] [--keep-alive]
+                  start an empty stage; default logical size follows main display
+                  capped at 1920×1080 (policy stage.maxDisplaySize). --keep-alive
+                  keeps an empty stage running instead of auto-exiting.
+      install-app [--sign IDENTITY]
+                  install and sign ~/Applications/amcu Stage.app so Finder,
+                  Spotlight and browser extensions can start the stage directly
+                  with its own TCC grants.
+      preset      list | save --name N | put --name N | release --name N | delete --name N
+                  save the current stage as a named workspace group, or stage /
+                  release all matching windows of a group in one command.
+      restart     a new host from this amcu takes over the stage; the display and
+                  its windows stay (a host from before 0.13 keeps the display
+                  itself: then its windows come back to the user's screen for a
+                  moment and are put back). An upgraded amcu does this by itself
+                  a few seconds after it is installed.
+      stop        bring every window back and remove the display
 
     NOTES
       Stage applications you drive, not ones the user is using — a window of
@@ -114,11 +126,13 @@ enum StageCommands {
         case "restart": try restart(flags)
         case "show": try show(flags)
         case "ask": try ask(flags)
+        case "install-app": try installApp(flags)
+        case "preset": try preset(flags)
         // Hidden: the resident process `start` spawns, and the one that keeps
         // the display.
         case "serve":
             let size = try flags.string("size").map(parseSize)
-            StageHost.run(pointSize: size, scale: try scale(flags), source: flags.string("source"))
+            StageHost.run(pointSize: size, scale: try scale(flags), source: flags.string("source"), keepAlive: flags.has("keep-alive") ? true : nil)
         case "preview":
             let size = try flags.string("size").map(parseSize) ?? CGSize(width: 1280, height: 820)
             let out = flags.string("out") ?? FileManager.default.temporaryDirectory.appendingPathComponent("amcu-stage-preview.png").path
@@ -153,7 +167,8 @@ enum StageCommands {
 
     private static func start(_ flags: Flags) throws {
         let size = try flags.string("size").map(parseSize)
-        let (reply, started) = try StageClient.start(pointSize: size, scale: try scale(flags))
+        let keepAlive: Bool? = flags.has("keep-alive") ? true : nil
+        let (reply, started) = try StageClient.start(pointSize: size, scale: try scale(flags), keepAlive: keepAlive)
         struct Payload: Encodable {
             let ok = true
             let started: Bool
@@ -163,6 +178,113 @@ enum StageCommands {
             var lines = [started ? "stage started" : "a stage is already running\(size.map { _ in " (stop it first to change its size)" } ?? "")"]
             lines += render(reply.status)
             return lines.joined(separator: "\n")
+        }
+    }
+
+    private static func installApp(_ flags: Flags) throws {
+        let (path, signer) = try StageBundle.installStandaloneApp(signIdentity: flags.string("sign"))
+        struct Payload: Encodable {
+            let ok = true
+            let appPath: String
+            let signedWith: String
+        }
+        Output.emit(Payload(appPath: path, signedWith: signer)) {
+            "installed \(path) (signed with \(signer))\nGrant Accessibility (and Screen Recording for live previews) to amcu Stage once in System Settings so Spotlight and browser extensions can start the stage directly."
+        }
+    }
+
+    private static func preset(_ flags: Flags) throws {
+        let action = flags.positional.dropFirst().first ?? "list"
+        switch action {
+        case "list":
+            let presets = StagePresetStore.load()
+            struct Payload: Encodable {
+                let ok = true
+                let presets: [StagePreset]
+            }
+            Output.emit(Payload(presets: presets)) {
+                if presets.isEmpty { return "no stage presets saved — run `amcu stage preset save --name <name>`" }
+                return presets.map { preset in
+                    let items = preset.items.map { item in
+                        item.profile.map { "\(item.app) [\($0)]" } ?? item.titleHint.map { "\(item.app) — \($0)" } ?? item.app
+                    }.joined(separator: ", ")
+                    return "  \(preset.name) (\(preset.items.count)): \(items)"
+                }.joined(separator: "\n")
+            }
+        case "save":
+            let name = try flags.required("name", hint: "Pass --name for the workspace preset.")
+            let status = try StageClient.request("status").status
+            let targets = status.windows.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+                + status.takenOver.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+            let pairing = StageTabs.collect(for: targets)
+            let raw: [(app: String, bundleID: String?, profile: String?, title: String?)] = status.windows.map {
+                ($0.app, $0.bundleID, pairing[CGWindowID($0.windowID)]?.profile, $0.title)
+            } + status.takenOver.map {
+                ($0.app, $0.bundleID, pairing[CGWindowID($0.windowID)]?.profile, $0.title)
+            }
+            let items = StagePresetStore.buildItems(from: raw)
+            guard !items.isEmpty else {
+                throw AmcuError(.windowNotFound, "no windows are on the stage to save into preset '\(name)'")
+            }
+            let preset = StagePreset(name: name, items: items)
+            _ = try StagePresetStore.save(preset)
+            struct Payload: Encodable {
+                let ok = true
+                let preset: StagePreset
+            }
+            Output.emit(Payload(preset: preset)) {
+                "saved preset '\(name)' with \(items.count) item\(items.count == 1 ? "" : "s")"
+            }
+        case "put":
+            try Permissions.requireAccessibility()
+            let name = try flags.required("name", hint: "Pass --name of a saved workspace preset.")
+            guard let preset = StagePresetStore.load().first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+                throw AmcuError(.invalidArgument, "no stage preset named '\(name)'", nextSteps: ["Run `amcu stage preset list`."])
+            }
+            let (startReply, started) = try StageClient.start()
+            let status = startReply.status
+            let available = StageWindowScanner.scan(
+                stageBounds: status.bounds.cgRect,
+                onStageIDs: Set(status.windows.map { CGWindowID($0.windowID) }),
+                heldIDs: Set(status.takenOver.map { CGWindowID($0.windowID) }),
+                ownPID: getpid()
+            )
+            let matched = StagePresetStore.matchCandidates(preset, in: available)
+            guard !matched.isEmpty else {
+                try report("preset put", reply: StageReply(status: status, moves: []), started: started, emptyMessage: "no matching open windows outside the stage for '\(preset.name)'")
+                return
+            }
+            var allMoves: [StageMove] = []
+            var latestStatus = status
+            for (pid, group) in Dictionary(grouping: matched, by: \.pid) {
+                let reply = try StageClient.request("put", StageParams(pid: pid, windowIDs: group.map { UInt32($0.id) }, follow: false, by: Commands.session(flags), restoreMinimized: true))
+                allMoves += reply.moves
+                latestStatus = reply.status
+            }
+            try report("preset put", reply: StageReply(status: latestStatus, moves: allMoves), started: started, emptyMessage: nil)
+        case "release":
+            let name = try flags.required("name", hint: "Pass --name of a saved workspace preset.")
+            guard let preset = StagePresetStore.load().first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+                throw AmcuError(.invalidArgument, "no stage preset named '\(name)'", nextSteps: ["Run `amcu stage preset list`."])
+            }
+            let status = try StageClient.request("status").status
+            let targets = status.windows.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+                + status.takenOver.map { (windowID: CGWindowID($0.windowID), pid: $0.pid) }
+            let pairing = StageTabs.collect(for: targets)
+            let ids = StagePresetStore.matchStaged(preset, windows: status.windows, takenOver: status.takenOver, browser: pairing)
+            guard !ids.isEmpty else {
+                try report("preset release", reply: StageReply(status: status, moves: []), started: false, emptyMessage: "no windows of preset '\(preset.name)' are on the stage")
+                return
+            }
+            let reply = try StageClient.request("release", StageParams(windowIDs: ids))
+            try report("preset release", reply: reply, started: false, emptyMessage: nil)
+        case "delete":
+            let name = try flags.required("name", hint: "Pass --name of the preset to delete.")
+            _ = try StagePresetStore.delete(name: name)
+            struct Payload: Encodable { let ok = true; let deleted: String }
+            Output.emit(Payload(deleted: name)) { "deleted preset '\(name)'" }
+        default:
+            throw AmcuError(.invalidArgument, "unknown preset action '\(action)'", nextSteps: ["Use: list, save, put, release, or delete."])
         }
     }
 
@@ -468,6 +590,7 @@ enum StageCommands {
         var host = "host: pid \(status.hostPID), amcu \(status.version)"
         if let answersFor = status.answersFor { host += ", answers for \(answersFor)" }
         host += status.holderPID.map { "; display kept by pid \($0)" } ?? "; the host keeps the display itself"
+        if status.keepAlive { host += "; keep-alive" }
         if !status.accessibility { host += " — NOT trusted for Accessibility: it cannot move windows" }
         if !status.screenRecording { host += " — no Screen Recording: the stage window shows no pictures" }
         lines.append(host)
@@ -493,31 +616,25 @@ enum StageCommands {
             }
         }
         if !status.takenOver.isEmpty {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm"
             lines.append("taken over by the user (\(status.takenOver.count)) — an acting verb on one of these windows hands it back to the stage first:")
             for held in status.takenOver {
                 let name = held.title.map { "\(held.app) — \($0)" } ?? held.app
-                lines.append("  id=\(held.windowID) pid=\(held.pid) \(name)  (since \(formatter.string(from: held.since)), returns to \(Int(held.stageFrame.x)),\(Int(held.stageFrame.y)) on the stage)")
+                lines.append("  id=\(held.windowID) pid=\(held.pid) \(name)  (since \(StageClock.hhmm(held.since)), returns to \(Int(held.stageFrame.x)),\(Int(held.stageFrame.y)) on the stage)")
             }
         }
         if !status.following.isEmpty {
             lines.append("following: " + status.following.map { "\($0.app) (pid \($0.pid))" }.joined(separator: ", ") + " — new windows move to the stage unless the user is working in that app")
         }
         if !status.activity.isEmpty {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm:ss"
             lines.append("agents lately:")
             lines += status.activity.suffix(6).map { entry in
-                "  \(formatter.string(from: entry.at)) \(StageActivity.sessionLabel(entry.session)): \(entry.summary(chinese: false))\(entry.windowID.map { " (id=\($0))" } ?? "")"
+                "  \(StageClock.hhmmss(entry.at)) \(StageActivity.sessionLabel(entry.session)): \(entry.summary(chinese: false))\(entry.windowID.map { " (id=\($0))" } ?? "")"
             }
         }
         let open = status.asks.filter(\.isOpen)
         if !open.isEmpty {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm"
             lines.append("asking the user (\(open.count)):")
-            lines += open.map { "  ask \($0.id) since \(formatter.string(from: $0.at)) \(StageActivity.sessionLabel($0.session)) on id=\($0.windowID): \($0.text)" }
+            lines += open.map { "  ask \($0.id) since \(StageClock.hhmm($0.at)) \(StageActivity.sessionLabel($0.session)) on id=\($0.windowID): \($0.text)" }
         }
         if !status.notes.isEmpty {
             lines.append("recent:")
